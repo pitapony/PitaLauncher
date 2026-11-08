@@ -1,0 +1,65 @@
+# PitaGames CI
+#
+# Pure-Rust crates (core, db, art, metadata, platform, stores, shim, cli) are linted and
+# tested on a stock Ubuntu runner. The GUI (`crates/app`) needs WebKitGTK, which
+# does not exist on macOS/Windows — it is compile-checked in the same `archlinux`
+# image that the product targets, matching the AGENTS.md verification rules.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  core:
+    name: core (fmt, clippy, test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --check -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-shim -p pitagames-cli
+
+      - name: Clippy
+        run: cargo clippy -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-shim -p pitagames-cli --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-shim -p pitagames-cli
+
+  gui:
+    name: gui build (archlinux container)
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      # Install webkit2gtk and friends BEFORE checkout: the runner container
+      # needs git + nodejs for actions/checkout to work at all. clippy/rustfmt
+      # ship inside the `rust` package on Arch; libudev via systemd-libs.
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git nodejs pkgconf openssl xdotool \
+            rust \
+            webkit2gtk-4.1 gtk3 libsecret sqlite
+
+      - uses: actions/checkout@v4
+
+      - name: Build the launcher (crates/app)
+        run: cargo build -p pitagames --all-targets
+
+      # Keep the GUI lint bar the same as everyone else's.
+      - name: Clippy (crates/app)
+        run: cargo clippy -p pitagames --all-targets -- -D warnings
+
+      - name: Tests (crates/app)
+        run: cargo test -p pitagames

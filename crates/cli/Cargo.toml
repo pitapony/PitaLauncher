@@ -1,0 +1,24 @@
+[package]
+name = "pitagames-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Developer CLI for PitaGames (headless scans, diagnostics)"
+
+[[bin]]
+name = "pitagames-cli"
+path = "src/main.rs"
+
+[dependencies]
+pitagames-core.workspace = true
+pitagames-metadata.workspace = true
+pitagames-platform.workspace = true
+pitagames-stores.workspace = true
+
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "time"] }
+
+[dev-dependencies]
+tempfile.workspace = true

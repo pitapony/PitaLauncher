@@ -1,0 +1,32 @@
+"UserLocalConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"apps"
+				{
+					"440"
+					{
+						"Playtime"		"3600"
+					}
+					"620"
+					{
+						"LaunchOptions"		"-novid %command%"
+						"Playtime"		"9000"
+						"LastPlayed"		"1710000000"
+					}
+				}
+			}
+		}
+	}
+	"friends"
+	{
+		"PersonaName"		"player"
+	}
+	"WebStorage"
+	{
+	}
+}

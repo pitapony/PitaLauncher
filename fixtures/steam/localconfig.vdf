@@ -1,0 +1,16 @@
+"localconfig"
+{
+	"apps"
+	{
+		"440"
+		{
+			"Playtime" "3600"
+			"LastPlayed" "1700000000"
+		}
+		"620"
+		{
+			"Playtime" "9000"
+			"LastPlayed" "1710000000"
+		}
+	}
+}

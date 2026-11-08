@@ -1,0 +1,15 @@
+[package]
+name = "pitagames-shim"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Launch shim placed in Steam launch options"
+
+[[bin]]
+name = "pitagames-shim"
+path = "src/main.rs"
+
+[dependencies]
+pitagames-core.workspace = true
+thiserror.workspace = true

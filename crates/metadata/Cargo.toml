@@ -1,0 +1,20 @@
+[package]
+name = "pitagames-metadata"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Store metadata fetch, rate limiting and cache policy for PitaGames"
+
+[dependencies]
+pitagames-core.workspace = true
+
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+tokio.workspace = true

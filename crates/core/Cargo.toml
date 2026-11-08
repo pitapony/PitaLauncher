@@ -1,0 +1,15 @@
+[package]
+name = "pitagames-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Domain types and platform paths for PitaGames"
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

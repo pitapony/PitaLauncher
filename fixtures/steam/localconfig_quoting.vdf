@@ -1,0 +1,29 @@
+"UserLocalConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"apps"
+				{
+					// A launch line with an escaped quote pair.
+					"620"
+					{
+						"LaunchOptions"		"WINEDLLOVERRIDES=\"dxgi=n,b\" %command% -novid"
+						"LastPlayed"		"1710000000"
+					}
+					"440"
+					{
+						"LaunchOptions"		"\"C:\\Games\\Game\\game.exe\" --flag"
+						"Playtime"		"3600"
+					}
+				}
+			}
+		}
+	}
+	"friends"
+	{
+	}
+}

@@ -1,0 +1,22 @@
+[package]
+name = "pitagames-art"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Steam art download, resize, WebP encode, disk cache and loopback server"
+
+[dependencies]
+axum.workspace = true
+pitagames-core.workspace = true
+
+rand.workspace = true
+reqwest.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+image = { version = "0.25", default-features = false, features = ["webp", "png", "jpeg"] }
+
+[dev-dependencies]
+tempfile.workspace = true

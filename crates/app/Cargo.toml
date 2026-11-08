@@ -1,0 +1,27 @@
+[package]
+name = "pitagames"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "The PitaGames launcher (the only crate allowed to touch Dioxus)"
+
+[[bin]]
+name = "pitagames"
+path = "src/main.rs"
+
+[dependencies]
+pitagames-art.workspace = true
+pitagames-core.workspace = true
+pitagames-db.workspace = true
+pitagames-metadata.workspace = true
+pitagames-stores.workspace = true
+
+dioxus.workspace = true
+futures-channel.workspace = true
+futures-util.workspace = true
+time.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
