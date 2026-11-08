@@ -17,7 +17,7 @@ The GUI only builds against Arch's WebKitGTK, so build all three binaries in
 `archlinux:latest` and copy them into `dist/`:
 
 ```bash
-cd /Users/julienpohie/code/game-launcher
+cd /Users/julienpohie/code/pitagames
 mkdir -p dist
 
 docker run --rm \
