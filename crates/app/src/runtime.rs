@@ -16,9 +16,11 @@ use std::path::{Path, PathBuf};
 use pitagames_core::{Profile, ShimProfile, save_shim_profile, shim_launch_options};
 use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime};
 use pitagames_platform::proton::{self, DiscoveryReport};
+use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::steam::user_configs;
 use pitagames_stores::steam_config::{
-    self, RestoreReport, SteamProcessState, WriteOptions, WriteReport,
+    self, CompatRestoreReport, CompatWriteReport, RestoreReport, SteamProcessState, WriteOptions,
+    WriteReport,
 };
 
 /// Every Proton build discovery found, best first.
@@ -202,6 +204,79 @@ fn restore_in(
         .map_err(|error| error.to_string())
 }
 
+/// `<steam>/config/config.vdf`, where the per-game compatibility tool lives.
+pub fn compat_config_path(steam_root: &Path) -> PathBuf {
+    steam_root.join("config").join("config.vdf")
+}
+
+/// The compatibility tool Steam is forced to use for this game, if any.
+pub fn read_compat(steam_root: &Path, app_id: &str) -> Result<Option<CompatTool>, String> {
+    let config = compat_config_path(steam_root);
+    if !config.is_file() {
+        return Ok(None);
+    }
+    steam_config::read_compat_tool(&config, app_id).map_err(|error| error.to_string())
+}
+
+/// Force a compatibility tool for this game (`config.vdf` `CompatToolMapping`).
+pub fn apply_compat(
+    steam_root: &Path,
+    app_id: &str,
+    tool: &CompatTool,
+    force: bool,
+) -> Result<CompatWriteReport, String> {
+    compat_write(steam_root, app_id, Some(tool), force, &backup_dir()?)
+}
+
+/// Remove the forced tool, so Steam decides again.
+pub fn clear_compat(
+    steam_root: &Path,
+    app_id: &str,
+    force: bool,
+) -> Result<CompatWriteReport, String> {
+    compat_write(steam_root, app_id, None, force, &backup_dir()?)
+}
+
+/// Put the game's original compatibility-tool mapping back.
+pub fn restore_compat(
+    steam_root: &Path,
+    app_id: &str,
+    force: bool,
+) -> Result<CompatRestoreReport, String> {
+    restore_compat_in(steam_root, app_id, force, &backup_dir()?)
+}
+
+fn restore_compat_in(
+    steam_root: &Path,
+    app_id: &str,
+    force: bool,
+    backup_dir: &Path,
+) -> Result<CompatRestoreReport, String> {
+    let config = compat_config_path(steam_root);
+    let steam = steam_config::detect_steam_process(steam_root);
+    let mut options = WriteOptions::new(backup_dir);
+    options.allow_running = force;
+
+    steam_config::restore_compat_tool(&config, app_id, steam, &options)
+        .map_err(|error| error.to_string())
+}
+
+fn compat_write(
+    steam_root: &Path,
+    app_id: &str,
+    tool: Option<&CompatTool>,
+    force: bool,
+    backup_dir: &Path,
+) -> Result<CompatWriteReport, String> {
+    let config = compat_config_path(steam_root);
+    let steam = steam_config::detect_steam_process(steam_root);
+    let mut options = WriteOptions::new(backup_dir);
+    options.allow_running = force;
+
+    steam_config::apply_compat_tool(&config, app_id, tool, steam, &options)
+        .map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,5 +388,42 @@ mod tests {
         assert!(restored.exact, "nothing else changed, so a byte restore");
         assert_eq!(std::fs::read_to_string(&localconfig).unwrap(), original);
         assert!(!routing_status(&root, "620").shim_installed);
+    }
+
+    #[test]
+    fn forcing_a_compat_tool_round_trips_through_the_writer() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("Steam");
+        let config = root.join("config");
+        std::fs::create_dir_all(&config).unwrap();
+        let config_vdf = config.join("config.vdf");
+        let original = "\"InstallConfigStore\"\n{\n\t\"Software\"\n\t{\n\t\t\"Valve\"\n\t\t{\n\t\t\t\"Steam\"\n\t\t\t{\n\t\t\t\t\"CompatToolMapping\"\n\t\t\t\t{\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n";
+        std::fs::write(&config_vdf, original).unwrap();
+
+        let backups = temp.path().join("backups");
+
+        assert_eq!(read_compat(&root, "620").unwrap(), None);
+
+        let written = compat_write(
+            &root,
+            "620",
+            Some(&CompatTool::new("proton-cachyos")),
+            true,
+            &backups,
+        )
+        .unwrap();
+        assert!(written.changed);
+        assert_eq!(
+            read_compat(&root, "620").unwrap().unwrap().name,
+            "proton-cachyos"
+        );
+
+        let cleared = compat_write(&root, "620", None, true, &backups).unwrap();
+        assert!(cleared.changed);
+        assert_eq!(read_compat(&root, "620").unwrap(), None);
+
+        // The restore record points at the pre-PitaGames (empty) state.
+        restore_compat_in(&root, "620", true, &backups).unwrap();
+        assert_eq!(std::fs::read_to_string(&config_vdf).unwrap(), original);
     }
 }

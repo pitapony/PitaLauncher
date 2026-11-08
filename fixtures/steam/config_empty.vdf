@@ -1,0 +1,17 @@
+"InstallConfigStore"
+{
+	"Software"
+	{
+		"Valve"
+		{
+			"Steam"
+			{
+				"CompatToolMapping"
+				{
+				}
+				"AutoUpdateWindowEnabled"		"1"
+			}
+		}
+	}
+	"last_changelist"		"1234"
+}

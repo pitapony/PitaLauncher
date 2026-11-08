@@ -97,14 +97,14 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 |---|---|
 | `crates/core` | Domain types, launch spec, profiles, XDG paths, metadata types |
 | `crates/db` | SQLite pool, migrations and repositories |
-| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options writer |
+| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers |
 | `crates/metadata` | Steam `appdetails` client, rate limiter and cache policy |
 | `crates/platform` | Proton discovery and runtime selection |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
 | `crates/shim` | `pitagames-shim` launch shim |
 | `crates/cli` | Headless developer CLI |
 | `crates/app` | Dioxus desktop GUI (the only crate allowed to use RSX) |
-| `fixtures/` | Steam VDF/ACF and `localconfig.vdf` fixtures |
+| `fixtures/` | Steam VDF/ACF, `localconfig.vdf` and `config.vdf` fixtures |
 | `docs/` | Per-slice implementation notes and the hardware test checklist |
 
 ## Documentation
@@ -115,6 +115,8 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-art.md`](docs/m1-art.md) — art pipeline and loopback server.
 - [`docs/m1-proton.md`](docs/m1-proton.md) — Proton discovery and selection.
 - [`docs/m1-launch-options.md`](docs/m1-launch-options.md) — Steam launch-options writer.
+- [`docs/m1-profile.md`](docs/m1-profile.md) — shim profile contract and runtime panel.
+- [`docs/m1-compat-tool.md`](docs/m1-compat-tool.md) — per-game compatibility-tool writer.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

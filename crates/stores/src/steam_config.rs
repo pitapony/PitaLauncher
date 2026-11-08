@@ -1,32 +1,42 @@
-//! Controlled writes to Steam's `localconfig.vdf`.
+//! Controlled writes to Steam's config files.
 //!
-//! This is the highest-risk code path in the launcher: the file is Steam's, and
-//! a bad write breaks per-game settings or the whole client's user config. The
-//! rules from the plan are enforced here, not documented and hoped for:
+//! This is the highest-risk code path in the launcher: these files are Steam's,
+//! and a bad write breaks per-game settings or the whole client's user config.
+//! Two writers share the same guard rails, [`apply_edit`]/[`restore_edit`]:
+//!
+//! - the per-game launch options in `userdata/<id>/config/localconfig.vdf`
+//!   ([`apply_launch_options`]);
+//! - the per-game compatibility-tool mapping in `config/config.vdf`
+//!   ([`apply_compat_tool`], the "force this Proton build" choice).
+//!
+//! The rules from the plan are enforced here, not documented and hoped for:
 //!
 //! 1. refuse while Steam is running (its own write on exit would win);
-//! 2. change only the requested app's `LaunchOptions` key
-//!    ([`crate::localconfig`] splices the bytes);
+//! 2. change only the requested app's key(s) (the format-preserving splices in
+//!    [`crate::localconfig`] and [`crate::compat_tool`]);
 //! 3. keep a timestamped backup of the untruncated original;
 //! 4. replace atomically: temp file in the same directory, `fsync`, `rename`;
 //! 5. record what was written so a restore can either copy the original bytes
-//!    back (byte-identical) or splice only this key when Steam changed other
-//!    things in between.
+//!    back (byte-identical) or splice only this app's keys when Steam changed
+//!    other things in between.
 //!
-//! The restore record is a small JSON file next to the backup. The GUI will
-//! mirror the same fields into SQLite when it owns the apply flow; keeping the
-//! record next to the backup means `pitagames-cli launch-options --restore`
-//! works without a database.
+//! The restore record is a small JSON file next to the backup. The GUI mirrors
+//! the same fields into SQLite when it owns the apply flow; keeping the record
+//! next to the backup means `pitagames-cli launch-options --restore` (and
+//! `compat-tool --restore`) works without a database.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::process;
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use time::OffsetDateTime;
 
+use crate::compat_tool::{self, CompatTool};
 use crate::localconfig;
 
 /// What the Steam client is doing, as far as this machine can tell.
@@ -94,6 +104,33 @@ pub struct RestoreReport {
     /// `true` when the whole file was restored byte-for-byte from the backup.
     /// `false` means Steam changed other keys in the meantime, so only this
     /// app's `LaunchOptions` was spliced back and the rest was left alone.
+    pub exact: bool,
+    /// The original backup used for the restore.
+    pub backup: PathBuf,
+}
+
+/// What [`apply_compat_tool`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatWriteReport {
+    pub config: PathBuf,
+    pub app_id: String,
+    /// The mapping before the write; `None` means the app had none.
+    pub previous: Option<CompatTool>,
+    /// The mapping after the write; `None` means it was removed.
+    pub applied: Option<CompatTool>,
+    pub changed: bool,
+    /// `None` when nothing was written.
+    pub backup: Option<PathBuf>,
+}
+
+/// What [`restore_compat_tool`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatRestoreReport {
+    pub config: PathBuf,
+    pub app_id: String,
+    /// The mapping that was put back; `None` means there was none.
+    pub restored: Option<CompatTool>,
+    /// `true` when the whole file was restored byte-for-byte from the backup.
     pub exact: bool,
     /// The original backup used for the restore.
     pub backup: PathBuf,
@@ -177,6 +214,10 @@ fn check_steam_closed(state: SteamProcessState, allow_running: bool) -> Result<(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Launch options
+// ---------------------------------------------------------------------------
+
 /// Read one app's launch options, or `None` when the key/section is absent.
 pub fn read_launch_options(localconfig: &Path, app_id: &str) -> Result<Option<String>, Error> {
     let text = read_text(localconfig)?;
@@ -205,23 +246,232 @@ pub fn apply_launch_options(
     steam: SteamProcessState,
     options: &WriteOptions,
 ) -> Result<WriteReport, Error> {
+    let scope = user_id_for(localconfig);
+    let outcome = apply_edit(
+        localconfig,
+        app_id,
+        "localconfig",
+        &scope,
+        |input| {
+            let edit = localconfig::edit(input, app_id, value)?;
+            Ok(PlannedEdit {
+                text: edit.text,
+                previous: edit.previous.map(Value::String),
+                applied: value.map(|value| Value::String(value.to_string())),
+            })
+        },
+        steam,
+        options,
+    )?;
+
+    Ok(WriteReport {
+        localconfig: outcome.config,
+        user_id: outcome.scope,
+        app_id: app_id.to_string(),
+        previous: as_string(outcome.previous),
+        applied: as_string(outcome.applied),
+        changed: outcome.changed,
+        backup: outcome.backup,
+    })
+}
+
+/// Undo the last [`apply_launch_options`] for an app.
+///
+/// When the file is byte-for-byte what we wrote, the original file is copied
+/// back and the result is byte-identical to the pre-write state. When Steam has
+/// changed something else since (playtime, another app), only this app's
+/// `LaunchOptions` is put back, so Steam's changes are never clobbered.
+pub fn restore_launch_options(
+    localconfig: &Path,
+    app_id: &str,
+    steam: SteamProcessState,
+    options: &WriteOptions,
+) -> Result<RestoreReport, Error> {
+    let scope = user_id_for(localconfig);
+    let outcome = restore_edit(
+        localconfig,
+        app_id,
+        "localconfig",
+        &scope,
+        |input, previous| {
+            let edit = localconfig::edit(input, app_id, previous.and_then(Value::as_str))?;
+            Ok(edit.changed.then_some(edit.text))
+        },
+        steam,
+        options,
+    )?;
+
+    Ok(RestoreReport {
+        localconfig: outcome.config,
+        user_id: outcome.scope,
+        app_id: app_id.to_string(),
+        restored: as_string(outcome.restored),
+        exact: outcome.exact,
+        backup: outcome.backup,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility-tool mapping (force a Proton build per game)
+// ---------------------------------------------------------------------------
+
+/// Read one app's compatibility-tool mapping from `config.vdf`.
+pub fn read_compat_tool(config: &Path, app_id: &str) -> Result<Option<CompatTool>, Error> {
+    let text = read_text(config)?;
+    Ok(compat_tool::read(&text, app_id)?)
+}
+
+/// Set (`Some`) or remove (`None`) one app's compatibility-tool mapping.
+///
+/// This is the write behind the GUI's "force this Proton build in Steam"
+/// action: it makes Steam start the game with the named compatibility tool.
+/// Same guard rails as [`apply_launch_options`].
+pub fn apply_compat_tool(
+    config: &Path,
+    app_id: &str,
+    tool: Option<&CompatTool>,
+    steam: SteamProcessState,
+    options: &WriteOptions,
+) -> Result<CompatWriteReport, Error> {
+    let outcome = apply_edit(
+        config,
+        app_id,
+        "config",
+        COMPAT_SCOPE,
+        |input| {
+            let edit = compat_tool::edit(input, app_id, tool)?;
+            Ok(PlannedEdit {
+                text: edit.text,
+                previous: edit.previous.as_ref().map(to_value).transpose()?,
+                applied: tool.map(to_value).transpose()?,
+            })
+        },
+        steam,
+        options,
+    )?;
+
+    Ok(CompatWriteReport {
+        config: outcome.config,
+        app_id: app_id.to_string(),
+        previous: outcome.previous.and_then(from_value),
+        applied: outcome.applied.and_then(from_value),
+        changed: outcome.changed,
+        backup: outcome.backup,
+    })
+}
+
+/// Undo the last [`apply_compat_tool`] for an app.
+pub fn restore_compat_tool(
+    config: &Path,
+    app_id: &str,
+    steam: SteamProcessState,
+    options: &WriteOptions,
+) -> Result<CompatRestoreReport, Error> {
+    let outcome = restore_edit(
+        config,
+        app_id,
+        "config",
+        COMPAT_SCOPE,
+        |input, previous| {
+            let tool = match previous {
+                Some(value) => Some(serde_json::from_value(value.clone())?),
+                None => None,
+            };
+            let edit = compat_tool::edit(input, app_id, tool.as_ref())?;
+            Ok(edit.changed.then_some(edit.text))
+        },
+        steam,
+        options,
+    )?;
+
+    Ok(CompatRestoreReport {
+        config: outcome.config,
+        app_id: app_id.to_string(),
+        restored: outcome.restored.and_then(from_value),
+        exact: outcome.exact,
+        backup: outcome.backup,
+    })
+}
+
+/// `config.vdf` belongs to the install, not a Steam user, so its restore
+/// records and backups are scoped `global`.
+const COMPAT_SCOPE: &str = "global";
+
+fn as_string(value: Option<Value>) -> Option<String> {
+    value.and_then(|value| value.as_str().map(str::to_string))
+}
+
+fn to_value<T: Serialize>(value: &T) -> Result<Value, Error> {
+    Ok(serde_json::to_value(value)?)
+}
+
+fn from_value<T: DeserializeOwned>(value: Value) -> Option<T> {
+    serde_json::from_value(value).ok()
+}
+
+// ---------------------------------------------------------------------------
+// Shared write machinery
+// ---------------------------------------------------------------------------
+
+/// A value-agnostic edit for [`apply_edit`].
+struct PlannedEdit {
+    /// The complete new document.
+    text: String,
+    /// What the target held before; the shape is the writer's.
+    previous: Option<Value>,
+    /// What the target holds after; the shape is the writer's.
+    applied: Option<Value>,
+}
+
+/// The result of a shared apply, before it is turned into a typed report.
+struct Applied {
+    config: PathBuf,
+    scope: String,
+    previous: Option<Value>,
+    applied: Option<Value>,
+    changed: bool,
+    backup: Option<PathBuf>,
+}
+
+/// The result of a shared restore, before it is turned into a typed report.
+struct Restored {
+    config: PathBuf,
+    scope: String,
+    restored: Option<Value>,
+    exact: bool,
+    backup: PathBuf,
+}
+
+/// The guarded apply both writers share.
+///
+/// `plan` turns the current document into an edit; `stem` and `scope` name the
+/// backup and journal (`<stem>-<scope>-<app>…`).
+fn apply_edit<F>(
+    config: &Path,
+    app_id: &str,
+    stem: &str,
+    scope: &str,
+    plan: F,
+    steam: SteamProcessState,
+    options: &WriteOptions,
+) -> Result<Applied, Error>
+where
+    F: Fn(&str) -> Result<PlannedEdit, Error>,
+{
     check_steam_closed(steam, options.allow_running)?;
 
-    let original = read_bytes(localconfig)?;
+    let original = read_bytes(config)?;
     let original_text = String::from_utf8(original.clone()).map_err(|_| Error::NotUtf8 {
-        path: localconfig.to_path_buf(),
+        path: config.to_path_buf(),
     })?;
-    let edit = localconfig::edit(&original_text, app_id, value)?;
-    let user_id = user_id_for(localconfig);
-    let applied = value.map(str::to_string);
+    let edit = plan(&original_text)?;
 
-    if !edit.changed {
-        return Ok(WriteReport {
-            localconfig: localconfig.to_path_buf(),
-            user_id,
-            app_id: app_id.to_string(),
+    if edit.text == original_text {
+        return Ok(Applied {
+            config: config.to_path_buf(),
+            scope: scope.to_string(),
             previous: edit.previous,
-            applied,
+            applied: edit.applied,
             changed: false,
             backup: None,
         });
@@ -232,22 +482,16 @@ pub fn apply_launch_options(
         source,
     })?;
 
-    let journal_path = journal_path(&options.backup_dir, &user_id, app_id);
+    let journal_path = journal_path(&options.backup_dir, stem, scope, app_id);
     let existing = match load_journal(&journal_path)? {
-        Some(journal)
-            if journal.app_id == app_id
-                && journal.user_id == user_id
-                && journal.localconfig == localconfig =>
-        {
-            Some(journal)
-        }
+        Some(journal) if journal.app_id == app_id && journal.config == config => Some(journal),
         Some(journal) => {
-            // Same user id and app under a different Steam root: do not
-            // overwrite the other file's restore point.
+            // Same app under a different config file: do not overwrite the
+            // other file's restore point.
             return Err(Error::RecordMismatch {
                 app_id: app_id.to_string(),
-                recorded: journal.localconfig,
-                requested: localconfig.to_path_buf(),
+                recorded: journal.config,
+                requested: config.to_path_buf(),
             });
         }
         None => None,
@@ -269,7 +513,7 @@ pub fn apply_launch_options(
     }
 
     // Keep the first restore point: a second apply must not make the already
-    // shimmed line the "original" launch options.
+    // written value the "original".
     let (previous, backup, original_sha256, created_unix) = match existing {
         Some(journal) => (
             journal.previous,
@@ -278,7 +522,7 @@ pub fn apply_launch_options(
             journal.created_unix,
         ),
         None => {
-            let backup = unique_backup_path(&options.backup_dir, &user_id, app_id, "");
+            let backup = unique_backup_path(&options.backup_dir, stem, scope, app_id, "");
             write_new_file(&backup, &original)?;
             (
                 edit.previous.clone(),
@@ -291,11 +535,11 @@ pub fn apply_launch_options(
 
     let journal = Journal {
         app_id: app_id.to_string(),
-        user_id: user_id.clone(),
-        localconfig: localconfig.to_path_buf(),
+        scope: scope.to_string(),
+        config: config.to_path_buf(),
         backup: backup.clone(),
         previous: previous.clone(),
-        applied: applied.clone(),
+        applied: edit.applied.clone(),
         original_sha256,
         written_sha256: sha256_hex(edit.text.as_bytes()),
         created_unix,
@@ -306,52 +550,54 @@ pub fn apply_launch_options(
     // back. A backup without a record is much worse than a record without a
     // write.
     write_journal(&journal_path, &journal)?;
-    if let Err(error) = atomic_write(localconfig, edit.text.as_bytes()) {
+    if let Err(error) = atomic_write(config, edit.text.as_bytes()) {
         let _ = fs::remove_file(&journal_path);
         return Err(error);
     }
 
-    Ok(WriteReport {
-        localconfig: localconfig.to_path_buf(),
-        user_id,
-        app_id: app_id.to_string(),
+    Ok(Applied {
+        config: config.to_path_buf(),
+        scope: scope.to_string(),
         previous,
-        applied,
+        applied: edit.applied,
         changed: true,
         backup: Some(backup),
     })
 }
 
-/// Undo the last [`apply_launch_options`] for an app.
+/// The guarded restore both writers share.
 ///
-/// When the file is byte-for-byte what we wrote, the original file is copied
-/// back and the result is byte-identical to the pre-write state. When Steam has
-/// changed something else since (playtime, another app), only this app's
-/// `LaunchOptions` is put back, so Steam's changes are never clobbered.
-pub fn restore_launch_options(
-    localconfig: &Path,
+/// `merge` receives the current document and the recorded value and returns the
+/// merged document (or `None` when nothing needs to change).
+fn restore_edit<F>(
+    config: &Path,
     app_id: &str,
+    stem: &str,
+    scope: &str,
+    merge: F,
     steam: SteamProcessState,
     options: &WriteOptions,
-) -> Result<RestoreReport, Error> {
+) -> Result<Restored, Error>
+where
+    F: Fn(&str, Option<&Value>) -> Result<Option<String>, Error>,
+{
     check_steam_closed(steam, options.allow_running)?;
 
-    let user_id = user_id_for(localconfig);
-    let journal_path = journal_path(&options.backup_dir, &user_id, app_id);
+    let journal_path = journal_path(&options.backup_dir, stem, scope, app_id);
     let journal = load_journal(&journal_path)?.ok_or_else(|| Error::NoRecord {
         app_id: app_id.to_string(),
         path: journal_path.clone(),
     })?;
 
-    if journal.localconfig != localconfig {
+    if journal.config != config {
         return Err(Error::RecordMismatch {
             app_id: app_id.to_string(),
-            recorded: journal.localconfig,
-            requested: localconfig.to_path_buf(),
+            recorded: journal.config,
+            requested: config.to_path_buf(),
         });
     }
 
-    let current = read_bytes(localconfig)?;
+    let current = read_bytes(config)?;
 
     if sha256_hex(&current) == journal.written_sha256 {
         let backup_bytes = read_bytes(&journal.backup).map_err(|_| Error::BackupModified {
@@ -365,12 +611,11 @@ pub fn restore_launch_options(
             });
         }
 
-        atomic_write(localconfig, &backup_bytes)?;
+        atomic_write(config, &backup_bytes)?;
         remove_journal(&journal_path);
-        return Ok(RestoreReport {
-            localconfig: localconfig.to_path_buf(),
-            user_id,
-            app_id: app_id.to_string(),
+        return Ok(Restored {
+            config: config.to_path_buf(),
+            scope: scope.to_string(),
             restored: journal.previous,
             exact: true,
             backup: journal.backup,
@@ -378,37 +623,40 @@ pub fn restore_launch_options(
     }
 
     let current_text = String::from_utf8(current.clone()).map_err(|_| Error::NotUtf8 {
-        path: localconfig.to_path_buf(),
+        path: config.to_path_buf(),
     })?;
-    let edit = localconfig::edit(&current_text, app_id, journal.previous.as_deref())?;
-    if edit.changed {
-        // This write is itself undoable: keep what the file looked like before
-        // the merge.
-        let pre_restore = unique_backup_path(&options.backup_dir, &user_id, app_id, "-pre-restore");
-        write_new_file(&pre_restore, &current)?;
-        atomic_write(localconfig, edit.text.as_bytes())?;
+    if let Some(text) = merge(&current_text, journal.previous.as_ref())? {
+        if text != current_text {
+            // This write is itself undoable: keep what the file looked like
+            // before the merge.
+            let pre_restore =
+                unique_backup_path(&options.backup_dir, stem, scope, app_id, "-pre-restore");
+            write_new_file(&pre_restore, &current)?;
+            atomic_write(config, text.as_bytes())?;
+        }
     }
     remove_journal(&journal_path);
 
-    Ok(RestoreReport {
-        localconfig: localconfig.to_path_buf(),
-        user_id,
-        app_id: app_id.to_string(),
+    Ok(Restored {
+        config: config.to_path_buf(),
+        scope: scope.to_string(),
         restored: journal.previous,
         exact: false,
         backup: journal.backup,
     })
 }
 
-/// One restore point per app and Steam user.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// One restore point per app and config file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct Journal {
     app_id: String,
-    user_id: String,
-    localconfig: PathBuf,
+    #[serde(alias = "user_id")]
+    scope: String,
+    #[serde(alias = "localconfig")]
+    config: PathBuf,
     backup: PathBuf,
-    previous: Option<String>,
-    applied: Option<String>,
+    previous: Option<Value>,
+    applied: Option<Value>,
     original_sha256: String,
     written_sha256: String,
     created_unix: i64,
@@ -435,14 +683,14 @@ fn user_id_for(localconfig: &Path) -> String {
         .collect()
 }
 
-fn journal_path(dir: &Path, user_id: &str, app_id: &str) -> PathBuf {
-    dir.join(format!("localconfig-{user_id}-{app_id}.json"))
+fn journal_path(dir: &Path, stem: &str, scope: &str, app_id: &str) -> PathBuf {
+    dir.join(format!("{stem}-{scope}-{app_id}.json"))
 }
 
-fn unique_backup_path(dir: &Path, user_id: &str, app_id: &str, suffix: &str) -> PathBuf {
+fn unique_backup_path(dir: &Path, stem: &str, scope: &str, app_id: &str, suffix: &str) -> PathBuf {
     let stamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
     dir.join(format!(
-        "localconfig-{user_id}-{app_id}-{stamp}-{}{suffix}.vdf",
+        "{stem}-{scope}-{app_id}-{stamp}-{}{suffix}.vdf",
         process::id()
     ))
 }
@@ -509,7 +757,7 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     let name = path
         .file_name()
         .and_then(|name| name.to_str())
-        .unwrap_or("localconfig.vdf");
+        .unwrap_or("config.vdf");
     let stamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
     let temp = parent.join(format!(".{name}.tmp-{}-{stamp}", process::id()));
 
@@ -573,6 +821,9 @@ pub enum Error {
     #[error(transparent)]
     Edit(#[from] localconfig::Error),
 
+    #[error(transparent)]
+    Compat(#[from] compat_tool::Error),
+
     #[error(
         "Steam is running (pid {pid}); quit Steam and retry \
          (its config would overwrite ours on exit)"
@@ -608,6 +859,9 @@ mod tests {
     const EMPTY: &str = include_str!("../../../fixtures/steam/localconfig_empty.vdf");
     const WITH_OPTIONS: &str = include_str!("../../../fixtures/steam/localconfig_with_options.vdf");
     const QUOTING: &str = include_str!("../../../fixtures/steam/localconfig_quoting.vdf");
+    const CONFIG_EMPTY: &str = include_str!("../../../fixtures/steam/config_empty.vdf");
+    const CONFIG_WITH_MAPPING: &str =
+        include_str!("../../../fixtures/steam/config_with_compat.vdf");
 
     fn fixture(dir: &Path, content: &str) -> PathBuf {
         let path = dir.join("Steam/userdata/123/config/localconfig.vdf");
@@ -616,8 +870,19 @@ mod tests {
         path
     }
 
+    fn config_fixture(dir: &Path, content: &str) -> PathBuf {
+        let path = dir.join("Steam/config/config.vdf");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, content).unwrap();
+        path
+    }
+
     fn options(dir: &Path) -> WriteOptions {
         WriteOptions::new(dir.join("backups"))
+    }
+
+    fn journal_for(dir: &Path, stem: &str, scope: &str, app_id: &str) -> PathBuf {
+        journal_path(&dir.join("backups"), stem, scope, app_id)
     }
 
     fn backup_files(dir: &Path) -> Vec<PathBuf> {
@@ -666,7 +931,7 @@ mod tests {
 
             assert!(restored.exact, "{name}");
             assert_eq!(fs::read(&path).unwrap(), original, "{name}");
-            assert!(!journal_path(&dir.path().join("backups"), "123", "620").exists());
+            assert!(!journal_for(dir.path(), "localconfig", "123", "620").exists());
         }
     }
 
@@ -782,9 +1047,12 @@ mod tests {
             .unwrap();
         }
 
-        let journal_path = journal_path(&dir.path().join("backups"), "123", "620");
+        let journal_path = journal_for(dir.path(), "localconfig", "123", "620");
         let journal: Journal = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
-        assert_eq!(journal.previous.as_deref(), Some("-novid %command%"));
+        assert_eq!(
+            journal.previous.as_ref().and_then(Value::as_str),
+            Some("-novid %command%")
+        );
 
         let restored = restore_launch_options(
             &path,
@@ -1002,7 +1270,11 @@ mod tests {
         let path = fixture(dir.path(), EMPTY);
         let options = options(dir.path());
         fs::create_dir_all(&options.backup_dir).unwrap();
-        fs::write(journal_path(&options.backup_dir, "123", "620"), "not json").unwrap();
+        fs::write(
+            journal_for(dir.path(), "localconfig", "123", "620"),
+            "not json",
+        )
+        .unwrap();
 
         let error = apply_launch_options(
             &path,
@@ -1118,6 +1390,271 @@ mod tests {
         assert_eq!(
             hash,
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Compatibility-tool mapping
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compat_set_then_restore_is_byte_identical() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_EMPTY);
+        let original = fs::read(&path).unwrap();
+
+        let report = apply_compat_tool(
+            &path,
+            "620",
+            Some(&CompatTool::new("proton-cachyos")),
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+
+        assert!(report.changed);
+        assert_eq!(report.previous, None);
+        assert_eq!(report.applied.unwrap().name, "proton-cachyos");
+        assert_eq!(fs::read(report.backup.as_ref().unwrap()).unwrap(), original);
+
+        let restored = restore_compat_tool(
+            &path,
+            "620",
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+
+        assert!(restored.exact);
+        assert_eq!(restored.restored, None);
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!journal_for(dir.path(), "config", "global", "620").exists());
+    }
+
+    #[test]
+    fn compat_replacing_a_mapping_restores_the_original_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_WITH_MAPPING);
+        let original = fs::read(&path).unwrap();
+
+        let report = apply_compat_tool(
+            &path,
+            "620",
+            Some(&CompatTool::new("GE-Proton9-20")),
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+        assert_eq!(report.previous.unwrap().name, "proton_9");
+        assert_eq!(
+            read_compat_tool(&path, "620").unwrap().unwrap().name,
+            "GE-Proton9-20"
+        );
+
+        let restored = restore_compat_tool(
+            &path,
+            "620",
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+        assert!(restored.exact);
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn compat_clearing_a_mapping_then_restoring_returns_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_WITH_MAPPING);
+        let original = fs::read(&path).unwrap();
+
+        let report = apply_compat_tool(
+            &path,
+            "620",
+            None,
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+        assert!(report.changed);
+        assert_eq!(report.previous.unwrap().name, "proton_9");
+        assert_eq!(read_compat_tool(&path, "620").unwrap(), None);
+
+        restore_compat_tool(
+            &path,
+            "620",
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn compat_repeated_writes_keep_the_original_restore_point() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_WITH_MAPPING);
+
+        for name in ["GE-Proton9-20", "proton-cachyos", "proton_9"] {
+            apply_compat_tool(
+                &path,
+                "620",
+                Some(&CompatTool::new(name)),
+                SteamProcessState::Stopped,
+                &options(dir.path()),
+            )
+            .unwrap();
+        }
+
+        let journal_path = journal_for(dir.path(), "config", "global", "620");
+        let journal: Journal = serde_json::from_slice(&fs::read(&journal_path).unwrap()).unwrap();
+        let previous: Option<CompatTool> = journal
+            .previous
+            .as_ref()
+            .and_then(|value| from_value(value.clone()));
+        assert_eq!(previous.map(|tool| tool.name), Some("proton_9".to_string()));
+
+        let restored = restore_compat_tool(
+            &path,
+            "620",
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+        assert!(restored.exact);
+        assert_eq!(fs::read(&path).unwrap(), CONFIG_WITH_MAPPING.as_bytes());
+    }
+
+    #[test]
+    fn compat_running_steam_refuses_the_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_EMPTY);
+        let original = fs::read(&path).unwrap();
+
+        let error = apply_compat_tool(
+            &path,
+            "620",
+            Some(&CompatTool::new("proton_9")),
+            SteamProcessState::Running { pid: 5 },
+            &options(dir.path()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, Error::SteamRunning { pid: 5 }));
+        assert_eq!(fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn compat_restore_after_steam_changed_other_keys_keeps_steams_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_WITH_MAPPING);
+
+        apply_compat_tool(
+            &path,
+            "620",
+            Some(&CompatTool::new("GE-Proton9-20")),
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+
+        let changed = fs::read_to_string(&path).unwrap().replace(
+            "\"AutoUpdateWindowEnabled\"\t\t\"1\"",
+            "\"AutoUpdateWindowEnabled\"\t\t\"0\"",
+        );
+        fs::write(&path, &changed).unwrap();
+
+        let restored = restore_compat_tool(
+            &path,
+            "620",
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+
+        assert!(!restored.exact);
+        assert_eq!(restored.restored.unwrap().name, "proton_9");
+        assert_eq!(
+            read_compat_tool(&path, "620").unwrap().unwrap().name,
+            "proton_9"
+        );
+        assert!(
+            fs::read_to_string(&path)
+                .unwrap()
+                .contains("\"AutoUpdateWindowEnabled\"\t\t\"0\"")
+        );
+    }
+
+    #[test]
+    fn compat_writing_the_same_mapping_does_not_create_a_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_WITH_MAPPING);
+        let existing = read_compat_tool(&path, "620").unwrap().unwrap();
+
+        let report = apply_compat_tool(
+            &path,
+            "620",
+            Some(&existing),
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap();
+
+        assert!(!report.changed);
+        assert!(report.backup.is_none());
+        assert!(!dir.path().join("backups").exists());
+    }
+
+    #[test]
+    fn compat_restore_without_a_record_is_a_clear_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = config_fixture(dir.path(), CONFIG_EMPTY);
+
+        let error = restore_compat_tool(
+            &path,
+            "620",
+            SteamProcessState::Stopped,
+            &options(dir.path()),
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::NoRecord { .. }), "{error}");
+        assert!(error.to_string().contains("620"));
+    }
+
+    #[test]
+    fn compat_and_launch_option_records_do_not_collide() {
+        // Both writers keep a journal under the same backup dir for app 620;
+        // the differing stems must keep them apart.
+        let dir = tempfile::tempdir().unwrap();
+        let localconfig = fixture(dir.path(), EMPTY);
+        let config = config_fixture(dir.path(), CONFIG_EMPTY);
+        let options = options(dir.path());
+
+        apply_launch_options(
+            &localconfig,
+            "620",
+            Some("pillow %command%"),
+            SteamProcessState::Stopped,
+            &options,
+        )
+        .unwrap();
+        apply_compat_tool(
+            &config,
+            "620",
+            Some(&CompatTool::new("proton_9")),
+            SteamProcessState::Stopped,
+            &options,
+        )
+        .unwrap();
+
+        assert!(journal_for(dir.path(), "localconfig", "123", "620").exists());
+        assert!(journal_for(dir.path(), "config", "global", "620").exists());
+
+        // Restoring the compat mapping leaves the launch option alone.
+        restore_compat_tool(&config, "620", SteamProcessState::Stopped, &options).unwrap();
+        assert_eq!(
+            read_launch_options(&localconfig, "620").unwrap().as_deref(),
+            Some("pillow %command%")
         );
     }
 }

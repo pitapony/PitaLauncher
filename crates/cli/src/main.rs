@@ -16,10 +16,13 @@ use pitagames_core::{
     shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
-use pitagames_stores::DownloadProgress;
+use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
 use pitagames_stores::steam::{self, ScanReport};
-use pitagames_stores::steam_config::{self, SteamProcessState, WriteOptions, WriteReport};
+use pitagames_stores::steam_config::{
+    self, CompatRestoreReport, CompatWriteReport, SteamProcessState, WriteOptions, WriteReport,
+};
+use pitagames_stores::{DEFAULT_PRIORITY, DownloadProgress};
 
 /// Give up on an install after an hour unless told otherwise.
 const DEFAULT_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -48,6 +51,7 @@ fn run() -> Result<()> {
         "proton" => proton(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
+        "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -1092,6 +1096,380 @@ fn display_value(value: Option<&str>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// compat-tool
+// ---------------------------------------------------------------------------
+
+/// Read or write one app's Steam compatibility-tool mapping (`config.vdf`).
+///
+/// This is the diagnostic surface for the "force a Proton build" write: it
+/// prints the file it resolved, the Steam process state and the exact mapping,
+/// and refuses to write while Steam is running unless `--force` is passed. The
+/// GUI calls the same `stores::steam_config` functions.
+fn compat_tool(args: &[String]) -> Result<()> {
+    let parsed = parse_compat_tool_args(args)?;
+    if parsed.help {
+        println!("{}", compat_tool_usage());
+        return Ok(());
+    }
+
+    let target = resolve_compat_config(&parsed)?;
+    let backup_dir = match &parsed.backup_dir {
+        Some(dir) => dir.clone(),
+        None => pitagames_core::paths::data_dir()
+            .map(|dir| dir.join("backups").join("steam"))
+            .context("cannot determine the XDG data dir; pass --backup-dir <path>")?,
+    };
+    let mut write = WriteOptions::new(backup_dir);
+    write.allow_running = parsed.force;
+
+    let steam = match target.steam_root.as_deref() {
+        Some(root) => steam_config::detect_steam_process(root),
+        None => SteamProcessState::Unknown,
+    };
+
+    let action = parsed.action.clone().unwrap_or(CompatAction::Read);
+    match &action {
+        CompatAction::Read => {
+            let current = steam_config::read_compat_tool(&target.config, &target.app_id)?;
+            print_compat(&target, &steam, current.as_ref(), parsed.json);
+            Ok(())
+        }
+        CompatAction::Restore => {
+            if parsed.dry_run {
+                bail!("--dry-run applies to --set/--clear, not --restore");
+            }
+            let report =
+                steam_config::restore_compat_tool(&target.config, &target.app_id, steam, &write)?;
+            print_compat_restore(&target, &report, parsed.json);
+            Ok(())
+        }
+        CompatAction::Set(_) | CompatAction::Clear => {
+            let next = planned_compat(&action, parsed.priority());
+            if parsed.dry_run {
+                print_compat(&target, &steam, next.as_ref(), parsed.json);
+                eprintln!("dry run: no files were written");
+                return Ok(());
+            }
+            let report = steam_config::apply_compat_tool(
+                &target.config,
+                &target.app_id,
+                next.as_ref(),
+                steam,
+                &write,
+            )?;
+            print_compat_write(&target, &steam, &report, parsed.json);
+            Ok(())
+        }
+    }
+}
+
+/// The mapping `--set`/`--clear` would write.
+fn planned_compat(action: &CompatAction, priority: i32) -> Option<CompatTool> {
+    match action {
+        CompatAction::Set(name) => Some(CompatTool {
+            name: name.clone(),
+            config: String::new(),
+            priority,
+        }),
+        CompatAction::Clear | CompatAction::Read | CompatAction::Restore => None,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompatAction {
+    Read,
+    Set(String),
+    Clear,
+    Restore,
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CompatToolArgs {
+    app_id: Option<String>,
+    steam_root: Option<PathBuf>,
+    config: Option<PathBuf>,
+    backup_dir: Option<PathBuf>,
+    action: Option<CompatAction>,
+    priority: Option<i32>,
+    dry_run: bool,
+    force: bool,
+    json: bool,
+    help: bool,
+}
+
+impl CompatToolArgs {
+    /// Steam's own default when it forces a tool for one game.
+    fn priority(&self) -> i32 {
+        self.priority.unwrap_or(DEFAULT_PRIORITY)
+    }
+}
+
+fn parse_compat_tool_args(args: &[String]) -> Result<CompatToolArgs> {
+    let mut parsed = CompatToolArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--dry-run" => parsed.dry_run = true,
+            "--force" => parsed.force = true,
+            "--clear" => set_compat_action(&mut parsed, CompatAction::Clear, arg)?,
+            "--restore" => set_compat_action(&mut parsed, CompatAction::Restore, arg)?,
+            "--set" | "--steam-root" | "--config" | "--backup-dir" | "--priority" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                if value.is_empty() && arg != "--set" {
+                    bail!("{arg} requires a value");
+                }
+                apply_compat_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--set=")
+                || arg.starts_with("--steam-root=")
+                || arg.starts_with("--config=")
+                || arg.starts_with("--backup-dir=")
+                || arg.starts_with("--priority=") =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                if value.is_empty() {
+                    bail!("{flag} requires a value");
+                }
+                apply_compat_flag(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => {
+                if parsed.app_id.is_some() {
+                    bail!(
+                        "unexpected argument `{other}` for `compat-tool`\n\n{}",
+                        compat_tool_usage()
+                    );
+                }
+                parsed.app_id = Some(other.to_string());
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `compat-tool`\n\n{}",
+                compat_tool_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn set_compat_action(args: &mut CompatToolArgs, action: CompatAction, flag: &str) -> Result<()> {
+    if args.action.is_some() {
+        bail!("{flag} conflicts with the other action flags (--set/--clear/--restore)");
+    }
+    args.action = Some(action);
+    Ok(())
+}
+
+fn apply_compat_flag(args: &mut CompatToolArgs, flag: &str, value: &str) -> Result<()> {
+    match flag {
+        "--set" => set_compat_action(args, CompatAction::Set(value.to_string()), flag)?,
+        "--steam-root" => args.steam_root = Some(PathBuf::from(value)),
+        "--config" => args.config = Some(PathBuf::from(value)),
+        "--backup-dir" => args.backup_dir = Some(PathBuf::from(value)),
+        "--priority" => {
+            let priority = value
+                .parse::<i32>()
+                .with_context(|| format!("`{value}` is not a priority number"))?;
+            if priority < 0 {
+                bail!("--priority must not be negative");
+            }
+            args.priority = Some(priority);
+        }
+        other => bail!("internal error: unknown flag `{other}`"),
+    }
+    Ok(())
+}
+
+/// The `config.vdf` to edit and the Steam root it belongs to (when known).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CompatToolTarget {
+    config: PathBuf,
+    steam_root: Option<PathBuf>,
+    app_id: String,
+}
+
+fn resolve_compat_config(args: &CompatToolArgs) -> Result<CompatToolTarget> {
+    let app_id = args
+        .app_id
+        .clone()
+        .context("missing Steam appid\n\nsee `pitagames-cli compat-tool --help`")?;
+    if app_id.is_empty() || !app_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("`{app_id}` is not a numeric Steam appid");
+    }
+
+    let (config, steam_root) = match &args.config {
+        Some(path) => {
+            let path = path.clone();
+            let root = derive_steam_root_from_config(&path);
+            (path, root)
+        }
+        None => {
+            let root = match &args.steam_root {
+                Some(root) => root.clone(),
+                None => discover_steam_root()
+                    .context("no Steam root found; pass --steam-root or --config")?,
+            };
+            (root.join("config").join("config.vdf"), Some(root))
+        }
+    };
+
+    if !config.is_file() {
+        bail!(
+            "{} does not exist; pass --config or a Steam root with a config.vdf",
+            config.display()
+        );
+    }
+
+    Ok(CompatToolTarget {
+        config,
+        steam_root,
+        app_id,
+    })
+}
+
+/// `<root>/config/config.vdf` → `<root>`.
+fn derive_steam_root_from_config(config: &Path) -> Option<PathBuf> {
+    let parent = config.parent()?;
+    if parent.file_name().is_some_and(|name| name == "config") {
+        return parent.parent().map(Path::to_path_buf);
+    }
+    None
+}
+
+fn print_compat(
+    target: &CompatToolTarget,
+    steam: &SteamProcessState,
+    mapping: Option<&CompatTool>,
+    json: bool,
+) {
+    if json {
+        let payload = serde_json::json!({
+            "config": target.config,
+            "steam_root": target.steam_root,
+            "app_id": target.app_id,
+            "compat_tool": mapping,
+            "steam": steam.describe(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("a JSON value always serializes")
+        );
+        return;
+    }
+
+    println!("Steam root:   {}", display_compat_root(target));
+    println!("App:          {}", target.app_id);
+    println!("Steam:        {}", steam.describe());
+    match mapping {
+        Some(tool) => println!("Compat tool:  {} (priority {})", tool.name, tool.priority),
+        None => println!("Compat tool:  (Steam decides)"),
+    }
+}
+
+fn print_compat_write(
+    target: &CompatToolTarget,
+    steam: &SteamProcessState,
+    report: &CompatWriteReport,
+    json: bool,
+) {
+    if json {
+        let payload = serde_json::json!({
+            "config": report.config,
+            "steam_root": target.steam_root,
+            "app_id": report.app_id,
+            "previous": report.previous,
+            "applied": report.applied,
+            "changed": report.changed,
+            "backup": report.backup,
+            "steam": steam.describe(),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("a JSON value always serializes")
+        );
+        return;
+    }
+
+    if !report.changed {
+        println!(
+            "Compat tool already set to {}",
+            display_compat(report.applied.as_ref())
+        );
+        return;
+    }
+
+    println!("Updated {}", report.config.display());
+    println!("App:          {}", report.app_id);
+    println!(
+        "Compat tool:  {} -> {}",
+        display_compat(report.previous.as_ref()),
+        display_compat(report.applied.as_ref())
+    );
+    if let Some(backup) = &report.backup {
+        println!("Backup:       {}", backup.display());
+    }
+    println!(
+        "Steam:        {} (quit it before the next Steam start if it was running)",
+        steam.describe()
+    );
+}
+
+fn print_compat_restore(target: &CompatToolTarget, report: &CompatRestoreReport, json: bool) {
+    if json {
+        let payload = serde_json::json!({
+            "config": report.config,
+            "steam_root": target.steam_root,
+            "app_id": report.app_id,
+            "restored": report.restored,
+            "exact": report.exact,
+            "backup": report.backup,
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).expect("a JSON value always serializes")
+        );
+        return;
+    }
+
+    println!("Restored {}", report.config.display());
+    println!("App:          {}", report.app_id);
+    println!("Compat tool:  {}", display_compat(report.restored.as_ref()));
+    println!(
+        "Mode:         {}",
+        if report.exact {
+            "byte-identical file restore"
+        } else {
+            "merged (Steam changed other keys; only this app's mapping was put back)"
+        }
+    );
+    println!("Backup:       {}", report.backup.display());
+}
+
+fn display_compat_root(target: &CompatToolTarget) -> String {
+    target
+        .steam_root
+        .as_deref()
+        .map(|root| root.display().to_string())
+        .unwrap_or_else(|| "(derived from --config)".to_string())
+}
+
+fn display_compat(tool: Option<&CompatTool>) -> String {
+    match tool {
+        Some(tool) => format!("`{}`", tool.name),
+        None => "(Steam decides)".to_string(),
+    }
+}
+
 /// Run a `LaunchSpec` without a shell.
 fn spawn(spec: &LaunchSpec) -> std::io::Result<()> {
     let mut command = Command::new(&spec.program);
@@ -1255,7 +1633,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -1308,6 +1686,31 @@ fn launch_options_usage() -> String {
      keeps a timestamped backup. --restore copies the backup back byte-for-byte\n\
      when the file is unchanged, or merges only this app's options when Steam\n\
      changed something else in the meantime."
+        .to_string()
+}
+
+fn compat_tool_usage() -> String {
+    "USAGE:\n    pitagames-cli compat-tool <appid> [options]\n\n\
+     ARGS:\n    \
+     <appid>                Numeric Steam appid\n\n\
+     TARGET:\n    \
+     --steam-root <path>    Steam root (default: auto-detect); reads <root>/config/config.vdf\n    \
+     --config <path>        Edit this config.vdf directly (skips --steam-root)\n\n\
+     ACTIONS (default: read):\n    \
+     --set <name>           Force this compatibility tool, e.g. proton-cachyos, GE-Proton9-20\n    \
+     --clear                Remove the mapping so Steam decides again\n    \
+     --restore              Put the original mapping back from PitaGames' backup\n\n\
+     OPTIONS:\n    \
+     --priority <n>         Mapping priority for --set (default: 250)\n    \
+     --backup-dir <path>    Where backups and the restore record live\n    \
+     --dry-run              Print the planned mapping without writing\n    \
+     --force                Write even if Steam looks running (Linux only)\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     This writes Steam's per-game CompatToolMapping, the same setting as Steam's\n\
+     Libraries > Properties > Compatibility screen. Same guard rails as\n\
+     launch-options: refuses while Steam runs, atomic replace, timestamped backup\n\
+     and a byte-identical restore when Steam has not changed the file since."
         .to_string()
 }
 
@@ -1411,6 +1814,85 @@ mod tests {
             Some(PathBuf::from("/games/Steam"))
         );
         assert_eq!(derive_steam_root(Path::new("/tmp/localconfig.vdf")), None);
+    }
+
+    #[test]
+    fn derives_the_steam_root_from_a_config_vdf_path() {
+        assert_eq!(
+            derive_steam_root_from_config(Path::new("/games/Steam/config/config.vdf")),
+            Some(PathBuf::from("/games/Steam"))
+        );
+        assert_eq!(
+            derive_steam_root_from_config(Path::new("/tmp/config.vdf")),
+            None
+        );
+    }
+
+    #[test]
+    fn parses_compat_tool_actions_and_targets() {
+        let parsed = parse_compat_tool_args(&[
+            "620".to_string(),
+            "--steam-root".to_string(),
+            "/steam".to_string(),
+            "--set=proton-cachyos".to_string(),
+            "--priority".to_string(),
+            "250".to_string(),
+            "--dry-run".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.app_id.as_deref(), Some("620"));
+        assert_eq!(parsed.steam_root, Some(PathBuf::from("/steam")));
+        assert_eq!(
+            parsed.action,
+            Some(CompatAction::Set("proton-cachyos".to_string()))
+        );
+        assert_eq!(parsed.priority(), 250);
+        assert!(parsed.dry_run && parsed.json && !parsed.force && !parsed.help);
+
+        let default_priority = parse_compat_tool_args(&[
+            "620".to_string(),
+            "--set".to_string(),
+            "proton_9".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(default_priority.priority(), DEFAULT_PRIORITY);
+
+        let clear = parse_compat_tool_args(&["620".to_string(), "--clear".to_string()]).unwrap();
+        assert_eq!(clear.action, Some(CompatAction::Clear));
+        let restore =
+            parse_compat_tool_args(&["620".to_string(), "--restore".to_string()]).unwrap();
+        assert_eq!(restore.action, Some(CompatAction::Restore));
+    }
+
+    #[test]
+    fn rejects_conflicting_or_malformed_compat_tool_args() {
+        for args in [
+            vec!["620", "--set", "a", "--clear"],
+            vec!["620", "--clear", "--restore"],
+            vec!["620", "--set"],
+            vec!["620", "--config="],
+            vec!["620", "--priority", "-5"],
+            vec!["620", "--priority", "many"],
+            vec!["620", "440"],
+            vec!["--bogus"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_compat_tool_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        let help = parse_compat_tool_args(&["--help".to_string()]).unwrap();
+        assert!(help.help);
+    }
+
+    #[test]
+    fn compat_set_builds_the_planned_mapping() {
+        let tool = planned_compat(&CompatAction::Set("GE-Proton9-20".to_string()), 300).unwrap();
+        assert_eq!(tool.name, "GE-Proton9-20");
+        assert_eq!(tool.priority, 300);
+        assert_eq!(tool.config, "");
+        assert_eq!(planned_compat(&CompatAction::Clear, 250), None);
     }
 
     #[test]

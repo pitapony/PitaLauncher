@@ -232,6 +232,26 @@ impl ProtonInstall {
         }
     }
 
+    /// The `CompatToolMapping` name Steam uses for this build, when it can be
+    /// derived without guessing.
+    ///
+    /// Steam matches tools dropped into a `compatibilitytools.d` directory by
+    /// their **folder name** (`proton-cachyos`, `GE-Proton9-20`), so a system or
+    /// user compatibility tool maps to [`Self::name`]. Valve's own builds in
+    /// `steamapps/common` use internal names (`proton_9`, `proton_experimental`)
+    /// that we refuse to invent, and a build outside Steam's search paths
+    /// (umu's own folder, an explicitly picked path) cannot be forced through
+    /// Steam at all: both return `None` and the caller offers Steam's own UI
+    /// instead of writing a name Steam would ignore.
+    pub fn compat_tool_name(&self) -> Option<&str> {
+        match self.source {
+            ProtonSource::SystemCompatibilityTools | ProtonSource::UserCompatibilityTools => {
+                Some(self.name.as_str())
+            }
+            ProtonSource::SteamCommon | ProtonSource::Umu | ProtonSource::Explicit => None,
+        }
+    }
+
     /// Stable identity for de-duplication, resolving symlinked Steam roots.
     fn identity(&self) -> PathBuf {
         identity(&self.path)
@@ -828,6 +848,44 @@ mod tests {
         assert_eq!(
             install.distinct_version(),
             Some("proton-cachyos 10.0-20251101")
+        );
+    }
+
+    #[test]
+    fn compat_tool_names_come_from_compatibilitytools_only() {
+        let temp = temp();
+
+        let cachy = temp.path().join("proton-cachyos");
+        fake_proton(&cachy, None);
+        let install =
+            ProtonInstall::from_dir(&cachy, ProtonSource::SystemCompatibilityTools).unwrap();
+        assert_eq!(install.compat_tool_name(), Some("proton-cachyos"));
+
+        let ge = temp.path().join("GE-Proton9-20");
+        fake_proton(&ge, None);
+        let install = ProtonInstall::from_dir(&ge, ProtonSource::UserCompatibilityTools).unwrap();
+        assert_eq!(install.compat_tool_name(), Some("GE-Proton9-20"));
+
+        // Valve's own builds and umu's private folder are never named by us.
+        let valve = temp.path().join("Proton - Experimental");
+        fake_proton(&valve, None);
+        assert_eq!(
+            ProtonInstall::from_dir(&valve, ProtonSource::SteamCommon)
+                .unwrap()
+                .compat_tool_name(),
+            None
+        );
+        assert_eq!(
+            ProtonInstall::from_dir(&valve, ProtonSource::Umu)
+                .unwrap()
+                .compat_tool_name(),
+            None
+        );
+        assert_eq!(
+            ProtonInstall::from_dir(&valve, ProtonSource::Explicit)
+                .unwrap()
+                .compat_tool_name(),
+            None
         );
     }
 

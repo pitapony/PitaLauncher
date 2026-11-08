@@ -12,6 +12,7 @@ use dioxus::prelude::*;
 use pitagames_core::{GameId, Profile, ProtonRef};
 use pitagames_db::{Db, StoredProfile};
 use pitagames_platform::proton::{DiscoveryReport, ProtonInstall};
+use pitagames_stores::compat_tool::CompatTool;
 
 use crate::View;
 use crate::format;
@@ -62,6 +63,8 @@ pub fn Detail(props: DetailProps) -> Element {
     let mut proton_choice = use_signal(|| ProtonRef::Auto);
     let mut runtime_message = use_signal(String::new);
     let mut routing = use_signal(|| None::<runtime::RoutingStatus>);
+    // The compatibility tool Steam is (or is not) forced to use for this game.
+    let mut compat = use_signal(|| None::<CompatTool>);
 
     // Load the profiles once per mounted game; the parent keys this component
     // by appid so opening another game remounts it.
@@ -84,6 +87,9 @@ pub fn Detail(props: DetailProps) -> Element {
         async move {
             if let Some(root) = root.as_deref() {
                 routing.set(Some(runtime::routing_status(root, &app_id)));
+                if let Ok(tool) = runtime::read_compat(root, &app_id) {
+                    compat.set(tool);
+                }
             }
         }
     });
@@ -204,8 +210,19 @@ pub fn Detail(props: DetailProps) -> Element {
 
     let proton_options = proton_choices(props.proton.as_ref());
     let current_choice = proton_choice();
+    // The Steam compatibility-tool name for the selected choice, when it can be
+    // forced without guessing (compatibilitytools.d builds only).
+    let current_tool = proton_options
+        .iter()
+        .find(|option| option.reference == current_choice)
+        .and_then(|option| option.tool_name.clone());
     let routing_status = routing.read().clone();
+    let compat_status = compat.read().clone();
     let runtime_note = runtime_message.read().clone();
+    let compat_label = match &compat_status {
+        Some(tool) => format!("Steam forces {} for this game.", tool.name),
+        None => "Steam compatibility tool: (Steam decides).".to_string(),
+    };
     let steam_root = props.steam_root.clone();
 
     let play_entry = entry.clone();
@@ -580,6 +597,96 @@ pub fn Detail(props: DetailProps) -> Element {
                             style: action_style(true),
                             "Restore original"
                         }
+                        button {
+                            disabled: current_tool.is_none(),
+                            onclick: {
+                                let root = root.clone();
+                                let app_id = route_app.clone();
+                                let tool_name = current_tool.clone();
+                                move |_| {
+                                    runtime_message.set(String::new());
+                                    let Some(name) = tool_name.clone() else {
+                                        runtime_message.set(
+                                            "Pick a build in a compatibilitytools.d folder first; Steam manages its own Proton builds.".to_string(),
+                                        );
+                                        return;
+                                    };
+                                    let root = root.clone();
+                                    let app_id = app_id.clone();
+                                    spawn(async move {
+                                        let tool = CompatTool::new(name);
+                                        match runtime::apply_compat(&root, &app_id, &tool, false) {
+                                            Ok(report) => {
+                                                let applied = report
+                                                    .applied
+                                                    .map(|tool| tool.name)
+                                                    .unwrap_or_default();
+                                                runtime_message.set(format!(
+                                                    "Steam now forces {applied} for this game."
+                                                ));
+                                                compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                            }
+                                            Err(message) => runtime_message.set(message),
+                                        }
+                                    });
+                                }
+                            },
+                            style: action_style(current_tool.is_some()),
+                            "Force in Steam"
+                        }
+                        button {
+                            disabled: compat_status.is_none(),
+                            onclick: {
+                                let root = root.clone();
+                                let app_id = route_app.clone();
+                                move |_| {
+                                    runtime_message.set(String::new());
+                                    let root = root.clone();
+                                    let app_id = app_id.clone();
+                                    spawn(async move {
+                                        match runtime::clear_compat(&root, &app_id, false) {
+                                            Ok(_) => {
+                                                runtime_message.set(
+                                                    "Cleared the forced compatibility tool; Steam decides again.".to_string(),
+                                                );
+                                                compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                            }
+                                            Err(message) => runtime_message.set(message),
+                                        }
+                                    });
+                                }
+                            },
+                            style: action_style(compat_status.is_some()),
+                            "Clear forced build"
+                        }
+                        button {
+                            onclick: {
+                                let root = root.clone();
+                                let app_id = route_app.clone();
+                                move |_| {
+                                    runtime_message.set(String::new());
+                                    let root = root.clone();
+                                    let app_id = app_id.clone();
+                                    spawn(async move {
+                                        match runtime::restore_compat(&root, &app_id, false) {
+                                            Ok(report) => {
+                                                let restored = report
+                                                    .restored
+                                                    .map(|tool| tool.name)
+                                                    .unwrap_or_else(|| "Steam decides".to_string());
+                                                runtime_message.set(format!(
+                                                    "Restored the original compatibility tool: {restored}."
+                                                ));
+                                                compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                            }
+                                            Err(message) => runtime_message.set(message),
+                                        }
+                                    });
+                                }
+                            },
+                            style: action_style(true),
+                            "Restore forced build"
+                        }
                     }
                 }
 
@@ -595,6 +702,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         if status.shim_installed {
                             span { style: "color:#7a9ad6;", "Routed through pitagames-shim." }
                         }
+                        span { "{compat_label}" }
                         if let Some(warning) = status.warning.clone() {
                             span { style: "color:#d8b070;", "{warning}" }
                         }
@@ -701,6 +809,9 @@ struct ProtonChoice {
     reference: ProtonRef,
     label: String,
     detail: String,
+    /// The Steam compatibility-tool name, when Steam can be forced to use this
+    /// build (compatibilitytools.d entries only).
+    tool_name: Option<String>,
 }
 
 /// Automatic, Steam default, then every build discovery found.
@@ -713,11 +824,13 @@ fn proton_choices(report: Option<&DiscoveryReport>) -> Vec<ProtonChoice> {
                 Some(best) => format!("best available: {} ({})", best.name, best.source.label()),
                 None => "no Proton build found".to_string(),
             },
+            tool_name: None,
         },
         ProtonChoice {
             reference: ProtonRef::SteamDefault,
             label: "Steam default".to_string(),
             detail: "Steam's own compatibility setting decides".to_string(),
+            tool_name: None,
         },
     ];
 
@@ -729,6 +842,7 @@ fn proton_choices(report: Option<&DiscoveryReport>) -> Vec<ProtonChoice> {
                 },
                 label: install.name.clone(),
                 detail: install_detail(install),
+                tool_name: install.compat_tool_name().map(str::to_string),
             });
         }
     }

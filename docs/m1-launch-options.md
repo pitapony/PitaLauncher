@@ -31,7 +31,7 @@ a **byte-level splice**, wrapped in the guard rails from the plan:
 
 | Layer | File | Responsibility |
 |---|---|---|
-| Format-preserving edit | `crates/stores/src/localconfig.rs` | Span-aware VDF scanner; reads one app's value and splices a single key/value pair into the original bytes. |
+| Format-preserving edit | `crates/stores/src/vdf_edit.rs` + `crates/stores/src/localconfig.rs` | Shared span-aware VDF scanner (`vdf_edit`) and the launch-options read/splice on top of it. |
 | Guarded write/restore | `crates/stores/src/steam_config.rs` | Steam-closed check, backup, restore journal, atomic replace, byte-identical restore. |
 | Shim string helper | `crates/core/src/launch.rs` | `shim_launch_options(appid, existing)` / `strip_shim_launch_options`. |
 | CLI diagnostic | `crates/cli/src/main.rs` | `pitagames-cli launch-options …`. |
@@ -171,9 +171,10 @@ output.
   between; they preserve Steam's changes and restore only the launch options.
 - **Steam detection is Linux-only.** `/proc` and `steam.pid` are the evidence;
   macOS returns `Unknown` and requires `--force`.
-- **No compat-tool write yet.** Forcing a Proton build per game lives in
-  `config.vdf` `CompatToolMapping`; the plan defers it to the same guard rails
-  and it is not part of this slice.
+- **No compat-tool write here.** Forcing a Proton build per game lives in
+  `config.vdf` `CompatToolMapping`; it ships as a sibling slice on the same guard
+  rails and machinery (`docs/m1-compat-tool.md`), sharing this module's
+  `apply_edit`/`restore_edit`, backup and journal code.
 - **GUI consumer ships** (`docs/m1-profile.md`): the detail page's Runtime panel
   applies and restores this writer through `crates/app/src/runtime.rs`, and the
   shim profile it writes is what `pitagames-shim` reads at launch.

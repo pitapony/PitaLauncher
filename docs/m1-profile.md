@@ -58,8 +58,10 @@ state. This is the first consumer of the launch-options writer inside the GUI.
 - `env` and `wrappers` are **ordered** and may repeat: later entries win,
   matching `LaunchSpec` semantics.
 - `proton` is the choice recorded for the transparency UI. The shim does not
-  apply it: for a Steam game Steam picks the runtime, so forcing a build per game
-  remains the deferred `config.vdf` `CompatToolMapping` work.
+  apply it: for a Steam game Steam picks the runtime. Forcing a build in Steam
+  itself is the `config.vdf` `CompatToolMapping` writer (see
+  `docs/m1-compat-tool.md`), which the Runtime panel's "Force in Steam" button
+  calls.
 - Writes are **atomic** — sibling temp file, `fsync`, `rename` — exactly like
   `localconfig.vdf`. A half-written profile must never reach a launch.
 - A **missing** profile is `Ok(None)`. A **corrupt** or unknown-schema file is an
@@ -158,10 +160,13 @@ pitagames-cli profile 620 --dir /path/to/profiles
   file's provenance (profile name, Proton choice, timestamp) is recorded.
 - **Graphics is M3.** Injected upscalers, frame generation and neural rendering
   fail compilation by name until the graphics env table lands.
-- **The Proton picker records a choice; it does not yet force the build.** For a
-  Steam game that needs `config.vdf` `CompatToolMapping`, which the plan defers.
-  Until then the picker drives the shim's recorded choice and the transparency UI,
-  while Steam still picks the runtime (usually whatever Steam's own setting says).
+- **The Proton picker records a choice and can now force it in Steam.** The shim
+  file carries the recorded build; the Runtime panel's "Force in Steam" /
+  "Clear forced build" buttons write Steam's `config.vdf` `CompatToolMapping`
+  through the same guarded writer (see `docs/m1-compat-tool.md`). Only
+  `compatibilitytools.d` builds can be forced by name; Steam's own builds are left
+  to Steam. Without a forced build, Steam still picks the runtime (usually
+  whatever Steam's own setting says).
 - **Wrappers apply from the shim, not from a launcher-managed process tree.**
   `gamemoderun`/`mangohud`/`gamescope` are only as available as they are on PATH.
 - **The shim logs one launch line**, not a teed transcript: output tee-ing and

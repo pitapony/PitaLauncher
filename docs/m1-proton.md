@@ -213,7 +213,8 @@ the installs plus `auto`.
   distro/umu; Proton/GE updates are M4).
 - Running `proton --version` or any other subprocess: the `version` file is
   cheaper and side-effect free.
-- Per-game `CompatToolMapping` writes (`config.vdf`) — same guard rails as the
-  launch-options writer (which now exists), and a post-v1 item.
-- A GUI Proton picker: the writer now makes the shim line apply; wiring the
-  picker to it is the next GUI task.
+- Per-game `CompatToolMapping` writes (`config.vdf`): now shipped in the next
+  slice, `docs/m1-compat-tool.md` (same guard rails as the launch-options writer).
+  `ProtonInstall::compat_tool_name()` maps a discovered build to Steam's name.
+- A GUI Proton picker: the writer makes both the shim line and the forced build
+  apply; the Runtime panel wires the picker to both.
