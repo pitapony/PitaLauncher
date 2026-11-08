@@ -45,6 +45,22 @@ pub fn cache_dir() -> Option<PathBuf> {
     xdg_dir("XDG_CACHE_HOME", ".cache")
 }
 
+/// `<XDG_DATA_HOME>/pitagames/profiles`: the pre-compiled shim profiles.
+pub fn profiles_dir() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("profiles"))
+}
+
+/// `<XDG_DATA_HOME>/pitagames/logs`.
+pub fn logs_dir() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("logs"))
+}
+
+/// `<XDG_DATA_HOME>/pitagames/backups/steam`: Steam config backups and the
+/// restore journals.
+pub fn steam_backup_dir() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("backups").join("steam"))
+}
+
 /// Candidate Steam roots, most likely first, without checking existence.
 ///
 /// `PITAGAMES_STEAM_ROOT` (set and non-empty) always comes first, so a user

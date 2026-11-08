@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use pitagames_core::{
-    Game, GameMetadata, LaunchSpec, Platforms, shim_launch_options, steam_install,
+    Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
+    shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_stores::DownloadProgress;
@@ -45,6 +46,7 @@ fn run() -> Result<()> {
         "install" => install(&args.collect::<Vec<_>>()),
         "metadata" => metadata(&args.collect::<Vec<_>>()),
         "proton" => proton(&args.collect::<Vec<_>>()),
+        "profile" => profile(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
@@ -563,6 +565,114 @@ fn format_install(install: &ProtonInstall, name_width: usize) -> String {
         install.path.display(),
         name_width = name_width,
     )
+}
+
+/// Show the compiled shim profile the launcher writes for one game.
+///
+/// The GUI writes `profiles/steam-<appid>.json` on every profile save and
+/// `pitagames-shim` reads it at launch. This command prints what is stored, so a
+/// launch can be explained on a machine where the shim is not on PATH.
+fn profile(args: &[String]) -> Result<()> {
+    let mut app_id: Option<String> = None;
+    let mut dir = pitagames_core::paths::profiles_dir();
+    let mut json = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => json = true,
+            "--dir" => {
+                index += 1;
+                let value = args.get(index).with_context(|| "--dir requires a path")?;
+                dir = Some(PathBuf::from(value));
+            }
+            "-h" | "--help" => {
+                println!("{}", profile_usage());
+                return Ok(());
+            }
+            _ if arg.starts_with("--dir=") => {
+                let value = &arg["--dir=".len()..];
+                if value.is_empty() {
+                    bail!("--dir requires a path");
+                }
+                dir = Some(PathBuf::from(value));
+            }
+            other if !other.starts_with('-') => {
+                if app_id.is_some() {
+                    bail!(
+                        "unexpected argument `{other}` for `profile`\n\n{}",
+                        profile_usage()
+                    );
+                }
+                app_id = Some(other.to_string());
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `profile`\n\n{}",
+                profile_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let app_id = app_id.context("missing Steam appid\n\nsee `pitagames-cli profile --help`")?;
+    if app_id.is_empty() || !app_id.bytes().all(|byte| byte.is_ascii_digit()) {
+        bail!("`{app_id}` is not a numeric Steam appid");
+    }
+
+    let dir = dir.context("cannot determine the XDG data dir; pass --dir <path>")?;
+    let path = shim_profile_path(&dir, &GameId::new(Store::Steam, &app_id));
+    if !path.is_file() {
+        bail!(
+            "no shim profile for appid {app_id} at {}\nthe GUI writes it when you save a profile",
+            path.display()
+        );
+    }
+    let profile = read_shim_profile(&path).context("could not read the shim profile")?;
+
+    if json {
+        let payload = serde_json::json!({ "path": path, "profile": profile });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!("Path:    {}", path.display());
+    println!("Profile: {}", profile.profile);
+    match &profile.proton {
+        Some(proton) => match &proton.install {
+            Some(install) => println!(
+                "Proton:  {} ({}) {}",
+                install.name,
+                install.source,
+                install.path.display()
+            ),
+            None => println!("Proton:  Steam decides"),
+        },
+        None => println!("Proton:  Steam decides"),
+    }
+
+    println!("Environment:");
+    if profile.env.is_empty() {
+        println!("  (none)");
+    }
+    for (key, value) in &profile.env {
+        println!("  {key}={value}");
+    }
+
+    println!("Wrappers:");
+    if profile.wrappers.is_empty() {
+        println!("  (none)");
+    }
+    for wrapper in &profile.wrappers {
+        let mut line = wrapper.program.display().to_string();
+        for arg in &wrapper.args {
+            line.push(' ');
+            line.push_str(arg);
+        }
+        println!("  {line}");
+    }
+
+    Ok(())
 }
 
 /// Read or write one app's Steam launch options.
@@ -1145,7 +1255,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    launch-options  Read, set, shim or restore one game's Steam launch options\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -1159,6 +1269,19 @@ fn proton_usage() -> String {
      -h, --help             Show this help\n\n\
      Without --root/--steam-root the default locations are scanned:\n\
      system compatibilitytools.d, every Steam root, and umu's data directories."
+        .to_string()
+}
+
+fn profile_usage() -> String {
+    "USAGE:\n    pitagames-cli profile <appid> [--dir <path>] [--json]\n\n\
+     ARGS:\n    \
+     <appid>                Numeric Steam appid\n\n\
+     OPTIONS:\n    \
+     --dir <path>           Profiles directory (default: $XDG_DATA_HOME/pitagames/profiles)\n    \
+     --json                 Print the profile as JSON\n    \
+     -h, --help             Show this help\n\n\
+     The GUI writes profiles/steam-<appid>.json on every profile save; the shim\n\
+     reads it at launch. This command shows what is stored."
         .to_string()
 }
 

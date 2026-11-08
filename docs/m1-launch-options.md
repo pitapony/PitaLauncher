@@ -1,8 +1,8 @@
 # M1 — Steam launch-options writer
 
-Status: implemented and verified against fixtures + CLI smoke runs. **Not yet
-exercised against a live Steam client on the RX 9070 / RX 5700 XT**; the GUI
-Proton picker that will call it is still open.
+Status: implemented and verified against fixtures + CLI smoke runs. The GUI
+Proton picker that consumes it now ships (see `docs/m1-profile.md`).
+**Not yet exercised against a live Steam client on the RX 9070 / RX 5700 XT.**
 
 ## Why this exists
 
@@ -174,8 +174,9 @@ output.
 - **No compat-tool write yet.** Forcing a Proton build per game lives in
   `config.vdf` `CompatToolMapping`; the plan defers it to the same guard rails
   and it is not part of this slice.
-- **No GUI consumer yet.** The Proton picker / per-game override calls this
-  writer in a later M1 task.
+- **GUI consumer ships** (`docs/m1-profile.md`): the detail page's Runtime panel
+  applies and restores this writer through `crates/app/src/runtime.rs`, and the
+  shim profile it writes is what `pitagames-shim` reads at launch.
 - **Hardware untested.** Fixtures and CLI smoke runs prove the byte behaviour;
   a real Steam client on the RX 9070 / RX 5700 XT has not run it yet.
 

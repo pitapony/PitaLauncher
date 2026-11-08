@@ -28,6 +28,7 @@ mod downloads;
 mod format;
 mod library;
 mod persist;
+mod runtime;
 
 fn main() {
     // A desktop window, not fullscreen: the 10-foot console shell is M2.5.
@@ -65,6 +66,8 @@ fn App() -> Element {
     let mut art_state = use_signal(|| None::<std::sync::Arc<art::ArtContext>>);
     // Bumped whenever a new image lands on disk; re-renders the <img> sources.
     let art_revision = use_signal(|| 0u64);
+    // Proton builds on this machine; read once, shown on the detail page.
+    let mut proton_state = use_signal(|| None::<pitagames_platform::proton::DiscoveryReport>);
 
     // One task owns the background work: scan, persist, then drain download
     // events for the lifetime of the window. Scans are file IO only, so running
@@ -72,6 +75,8 @@ fn App() -> Element {
     use_future(move || async move {
         let mut library = Library::load();
         let mut metadata_db = None;
+        // Read-only and fast; the detail page needs it as soon as a game opens.
+        proton_state.set(Some(runtime::discover_proton()));
 
         match persist::open_default().await {
             Ok(db) => {
@@ -157,6 +162,11 @@ fn App() -> Element {
     });
 
     let snapshot: Option<Library> = (*library_state.read()).clone();
+    // The detail page's runtime panel needs the Steam root and the Proton list.
+    let steam_root = snapshot
+        .as_ref()
+        .and_then(|library| library.steam_root.clone());
+    let proton_report = proton_state.read().clone();
     // Held as a plain Arc so card closures can clone it cheaply.
     let art_context = art_state.read().clone();
     // Reading the revision makes the whole view re-render when an image lands.
@@ -596,6 +606,8 @@ fn App() -> Element {
                         db: detail::DbHandle(db_handle.clone()),
                         view,
                         hero: hero_url,
+                        steam_root: steam_root.clone(),
+                        proton: proton_report.clone(),
                     }
                 }
             } else if current_view == View::Downloads {

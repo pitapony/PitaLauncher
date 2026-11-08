@@ -119,6 +119,22 @@ pub fn scan_steam(steam_root: &Path, include_tools: bool) -> ScanReport {
 /// A missing `userdata` directory is normal (Steam has not signed in yet) and
 /// is not a warning; unreadable user directories are.
 fn localconfig_files(steam_root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+    user_configs_in(steam_root, warnings)
+        .into_iter()
+        .map(|(_, path)| path)
+        .collect()
+}
+
+/// Every Steam user with a `localconfig.vdf`, as `(user_id, path)`, sorted.
+///
+/// The GUI needs one of these to route a game through the shim (the launch
+/// options live in it); a missing `userdata` directory is an empty list.
+pub fn user_configs(steam_root: &Path) -> Vec<(String, PathBuf)> {
+    let mut warnings = Vec::new();
+    user_configs_in(steam_root, &mut warnings)
+}
+
+fn user_configs_in(steam_root: &Path, warnings: &mut Vec<String>) -> Vec<(String, PathBuf)> {
     let userdata = steam_root.join("userdata");
     let entries = match fs::read_dir(&userdata) {
         Ok(entries) => entries,
@@ -142,12 +158,14 @@ fn localconfig_files(steam_root: &Path, warnings: &mut Vec<String>) -> Vec<PathB
             }
         };
 
+        let user = entry.file_name().to_string_lossy().into_owned();
         let path = entry.path().join("config/localconfig.vdf");
         if path.is_file() {
-            files.push(path);
+            files.push((user, path));
         }
     }
 
+    files.sort();
     files
 }
 

@@ -17,7 +17,9 @@ pub mod watch;
 pub use acf::{AppManifest, DownloadProgress, InstallPhase, ManifestError, flags};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
-pub use steam::{LibraryList, ScanReport, discover_libraries, parse_library_folders, scan_steam};
+pub use steam::{
+    LibraryList, ScanReport, discover_libraries, parse_library_folders, scan_steam, user_configs,
+};
 pub use steam_config::{
     RestoreReport, SteamProcessState, WriteOptions, WriteReport, apply_launch_options,
     detect_steam_process, read_launch_options, restore_launch_options,

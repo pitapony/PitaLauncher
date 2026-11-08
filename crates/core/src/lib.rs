@@ -1,12 +1,15 @@
 //! Domain types shared by every PitaGames crate.
 //!
-//! This crate deliberately has no I/O and no UI framework dependencies: it is
-//! the boundary that keeps the Dioxus renderer replaceable.
+//! This crate deliberately has no UI framework dependencies and almost no I/O:
+//! it is the boundary that keeps the Dioxus renderer replaceable. The one
+//! exception is [`profile_file`] — the launcher's own pre-compiled shim profile,
+//! which the GUI, the CLI and the shim must all agree on byte for byte.
 
 pub mod launch;
 pub mod metadata;
 pub mod paths;
 pub mod profile;
+pub mod profile_file;
 pub mod store;
 
 pub use launch::{
@@ -18,5 +21,10 @@ pub use profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, ModelSource, NeuralRendering,
     NrBackend, NrModel, NrProcessing, NrRoute, PkgArch, Profile, ProfileError, ProtonRef, Upscaler,
     WrapperChain, WrapperStep,
+};
+pub use profile_file::{
+    ProfileFileError, SHIM_PROFILE_SCHEMA, ShimProfile, ShimProton, ShimProtonInstall,
+    load_shim_profile, read_shim_profile, remove_shim_profile, save_shim_profile,
+    shim_profile_path,
 };
 pub use store::{AntiCheat, Game, GameId, Store, UnknownAntiCheat, UnknownStore};
