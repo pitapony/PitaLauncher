@@ -18,7 +18,8 @@ use crate::View;
 use crate::format;
 use crate::library::{self, GameEntry};
 use crate::persist;
-use crate::runtime;
+use crate::runtime::{self, WrapperDraft};
+use crate::wrappers::WrapperEditor;
 
 /// `Db` wraps a SQLite pool and is not `PartialEq`; props only need to know
 /// whether a handle exists, which is what this wrapper compares.
@@ -58,9 +59,10 @@ pub fn Detail(props: DetailProps) -> Element {
     let mut new_name = use_signal(String::new);
     let mut error = use_signal(String::new);
 
-    // Runtime panel: the profile's Proton choice, the routing state and the
-    // last action's message.
+    // Runtime panel: the profile's Proton choice and wrapper chain, the routing
+    // state and the last action's message.
     let mut proton_choice = use_signal(|| ProtonRef::Auto);
+    let mut wrapper_draft = use_signal(WrapperDraft::default);
     let mut runtime_message = use_signal(String::new);
     let mut routing = use_signal(|| None::<runtime::RoutingStatus>);
     // The compatibility tool Steam is (or is not) forced to use for this game.
@@ -74,7 +76,16 @@ pub fn Detail(props: DetailProps) -> Element {
         let db = db_future.clone();
         let game_id = game_future.clone();
         async move {
-            load_profiles(db, game_id, rows, selected, proton_choice, error).await;
+            load_profiles(
+                db,
+                game_id,
+                rows,
+                selected,
+                proton_choice,
+                wrapper_draft,
+                error,
+            )
+            .await;
         }
     });
 
@@ -362,6 +373,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         let is_active = selected_name.as_deref() == Some(profile_name.as_str());
                         let pick_name = profile_name.clone();
                         let pick_proton = row.profile.proton.clone();
+                        let pick_wrappers = row.profile.wrappers.clone();
                         let delete_name = profile_name.clone();
                         let delete_db = db.clone();
                         let delete_game = game_id.clone();
@@ -384,6 +396,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     onclick: move |_| {
                                         selected.set(Some(pick_name.clone()));
                                         proton_choice.set(pick_proton.clone());
+                                        wrapper_draft.set(WrapperDraft::from_chain(&pick_wrappers));
                                     },
                                     style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
                                     "Use"
@@ -399,7 +412,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                                 return;
                                             };
                                             match persist::delete_profile(&db, &game_id, &name).await {
-                                                Ok(_) => load_profiles(Some(db), game_id, rows, selected, proton_choice, error).await,
+                                                Ok(_) => load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, error).await,
                                                 Err(message) => error.set(message),
                                             }
                                         });
@@ -437,7 +450,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                 match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
                                     Ok(_) => {
                                         new_name.set(String::new());
-                                        load_profiles(Some(db), game_id, rows, selected, proton_choice, error).await;
+                                        load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, error).await;
                                     }
                                     Err(message) => error.set(message),
                                 }
@@ -457,7 +470,7 @@ pub fn Detail(props: DetailProps) -> Element {
                 }
                 p {
                     style: "margin:0;font-size:12px;color:#78788a;",
-                    "PitaGames launches this game through pitagames-shim. Pick the Proton build for the active profile, then route the game through the shim in Steam's launch options."
+                    "PitaGames launches this game through pitagames-shim. Pick the Proton build and wrapper chain for the active profile, then route the game through the shim in Steam's launch options."
                 }
 
                 if let Some(profile) = selected_profile.clone() {
@@ -501,6 +514,8 @@ pub fn Detail(props: DetailProps) -> Element {
                     }
                 }
 
+                WrapperEditor { draft: wrapper_draft }
+
                 div {
                     style: "display:flex;gap:8px;flex-wrap:wrap;",
                     button {
@@ -521,9 +536,14 @@ pub fn Detail(props: DetailProps) -> Element {
                             };
                             let game = save_game.clone();
                             let choice = proton_choice();
+                            let draft = wrapper_draft();
                             spawn(async move {
                                 let mut profile = profile;
                                 profile.proton = choice;
+                                if let Err(message) = draft.apply_to(&mut profile) {
+                                    runtime_message.set(message);
+                                    return;
+                                }
                                 if let Err(message) = persist::save_profile(&db, &profile).await {
                                     runtime_message.set(message);
                                     return;
@@ -536,7 +556,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                             compiled.env.len(),
                                             if compiled.env.len() == 1 { "y" } else { "ies" }
                                         ));
-                                        load_profiles(Some(db), game, rows, selected, proton_choice, error).await;
+                                        load_profiles(Some(db), game, rows, selected, proton_choice, wrapper_draft, error).await;
                                     }
                                     Err(message) => runtime_message.set(message),
                                 }
@@ -722,12 +742,14 @@ pub fn Detail(props: DetailProps) -> Element {
 
 /// Load (or reload) the profile list, keeping the current choice when it still
 /// exists and otherwise selecting the first row.
+#[allow(clippy::too_many_arguments)]
 async fn load_profiles(
     db: Option<Db>,
     game_id: GameId,
     mut rows: Signal<Vec<StoredProfile>>,
     mut selected: Signal<Option<String>>,
     mut proton_choice: Signal<ProtonRef>,
+    mut wrapper_draft: Signal<WrapperDraft>,
     mut error: Signal<String>,
 ) {
     let Some(db) = db else {
@@ -741,10 +763,15 @@ async fn load_profiles(
             let next = keep
                 .filter(|name| profiles.iter().any(|row| &row.profile.name == name))
                 .or_else(|| profiles.first().map(|row| row.profile.name.clone()));
-            if let Some(name) = &next {
-                if let Some(row) = profiles.iter().find(|row| &row.profile.name == name) {
+            match next
+                .as_deref()
+                .and_then(|name| profiles.iter().find(|row| row.profile.name == name))
+            {
+                Some(row) => {
                     proton_choice.set(row.profile.proton.clone());
+                    wrapper_draft.set(WrapperDraft::from_chain(&row.profile.wrappers));
                 }
+                None => wrapper_draft.set(WrapperDraft::default()),
             }
             selected.set(next);
             rows.set(profiles);

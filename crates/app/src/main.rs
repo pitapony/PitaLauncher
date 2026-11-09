@@ -29,6 +29,7 @@ mod format;
 mod library;
 mod persist;
 mod runtime;
+mod wrappers;
 
 fn main() {
     // A desktop window, not fullscreen: the 10-foot console shell is M2.5.

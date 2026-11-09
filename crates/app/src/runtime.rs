@@ -13,7 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use pitagames_core::{Profile, ShimProfile, save_shim_profile, shim_launch_options};
+use pitagames_core::profile::{GamescopeOptions, WrapperChain, WrapperStep};
+use pitagames_core::{
+    Profile, ShimProfile, save_shim_profile, shell_quote, shim_launch_options, tokenize_command,
+};
 use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime};
 use pitagames_platform::proton::{self, DiscoveryReport};
 use pitagames_stores::compat_tool::CompatTool;
@@ -32,6 +35,178 @@ pub fn discover_proton() -> DiscoveryReport {
 /// suppressed (nested gamescope is a bug).
 pub fn session_mode() -> bool {
     std::env::var_os("PITAGAMES_SESSION").is_some_and(|value| !value.is_empty())
+}
+
+/// The editable form of a [`WrapperChain`].
+///
+/// The GUI cannot put `Option<u32>` or an argv vector straight into a text
+/// input, so the editor keeps strings and converts once, on save. Conversion is
+/// the validation boundary: a half-typed number or an unbalanced quote is
+/// reported to the user instead of reaching the profile (and then the shim).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrapperDraft {
+    pub gamemode: bool,
+    pub mangohud: bool,
+    pub gamescope: bool,
+    pub width: String,
+    pub height: String,
+    pub refresh_hz: String,
+    pub fullscreen: bool,
+    pub extra_args: String,
+    pub custom: Vec<WrapperDraftStep>,
+}
+
+/// One custom wrapper row, kept as the user typed it.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WrapperDraftStep {
+    pub program: String,
+    pub args: String,
+}
+
+impl Default for WrapperDraft {
+    fn default() -> Self {
+        Self {
+            gamemode: false,
+            mangohud: false,
+            gamescope: false,
+            width: String::new(),
+            height: String::new(),
+            refresh_hz: String::new(),
+            // Enabling gamescope from an empty chain should start fullscreen.
+            fullscreen: true,
+            extra_args: String::new(),
+            custom: Vec::new(),
+        }
+    }
+}
+
+impl WrapperDraft {
+    /// Load the editor from a stored profile.
+    pub fn from_chain(chain: &WrapperChain) -> Self {
+        let gamescope = chain.gamescope.as_ref();
+        Self {
+            gamemode: chain.gamemode,
+            mangohud: chain.mangohud,
+            gamescope: gamescope.is_some(),
+            width: optional_number(gamescope.and_then(|options| options.width)),
+            height: optional_number(gamescope.and_then(|options| options.height)),
+            refresh_hz: optional_number(gamescope.and_then(|options| options.refresh_hz)),
+            fullscreen: gamescope.is_none_or(|options| options.fullscreen),
+            extra_args: gamescope
+                .map(|options| render_args(&options.extra_args))
+                .unwrap_or_default(),
+            custom: chain
+                .custom
+                .iter()
+                .map(|step| WrapperDraftStep {
+                    program: step.program.to_string_lossy().into_owned(),
+                    args: render_args(&step.args),
+                })
+                .collect(),
+        }
+    }
+
+    /// Convert the editor back into a validated [`WrapperChain`].
+    pub fn to_chain(&self) -> Result<WrapperChain, String> {
+        let gamescope = if self.gamescope {
+            Some(GamescopeOptions {
+                width: parse_dimension(&self.width, "Gamescope width")?,
+                height: parse_dimension(&self.height, "Gamescope height")?,
+                refresh_hz: parse_dimension(&self.refresh_hz, "Gamescope refresh rate")?,
+                fullscreen: self.fullscreen,
+                extra_args: parse_args(&self.extra_args, "Gamescope extra args")?,
+            })
+        } else {
+            None
+        };
+
+        let mut custom = Vec::with_capacity(self.custom.len());
+        for (index, step) in self.custom.iter().enumerate() {
+            let program = step.program.trim();
+            if program.is_empty() {
+                return Err(format!("Custom wrapper #{} needs a program.", index + 1));
+            }
+            custom.push(WrapperStep {
+                program: PathBuf::from(program),
+                args: parse_args(&step.args, &format!("Custom wrapper #{} args", index + 1))?,
+            });
+        }
+
+        Ok(WrapperChain {
+            gamemode: self.gamemode,
+            mangohud: self.mangohud,
+            gamescope,
+            custom,
+        })
+    }
+
+    /// Append a custom row, reporting a malformed program or argument list now
+    /// rather than at save time.
+    pub fn add_step(&mut self, program: &str, args: &str) -> Result<(), String> {
+        let program = program.trim();
+        if program.is_empty() {
+            return Err("A custom wrapper needs a program.".to_string());
+        }
+        parse_args(args, "Custom wrapper args")?;
+        self.custom.push(WrapperDraftStep {
+            program: program.to_string(),
+            args: args.trim().to_string(),
+        });
+        Ok(())
+    }
+
+    /// Write the chain into a profile and run the profile's own validation.
+    ///
+    /// Validation happens on a copy, so a refused draft never leaves the
+    /// profile half-edited.
+    pub fn apply_to(&self, profile: &mut Profile) -> Result<(), String> {
+        let mut next = profile.clone();
+        next.wrappers = self.to_chain()?;
+        next.validate().map_err(|error| error.to_string())?;
+        *profile = next;
+        Ok(())
+    }
+
+    /// The chain flattened in front of `%command%`, for the editor preview.
+    pub fn preview(&self) -> Result<String, String> {
+        self.preview_in(session_mode())
+    }
+
+    fn preview_in(&self, session: bool) -> Result<String, String> {
+        let chain = self.to_chain()?;
+        Ok(envc::render_wrapper_chain(&chain, session, "%command%"))
+    }
+}
+
+fn optional_number(value: Option<u32>) -> String {
+    value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+/// Render an argv list back into the editor's single text field.
+fn render_args(args: &[String]) -> String {
+    args.iter()
+        .map(|arg| shell_quote(arg))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn parse_args(text: &str, label: &str) -> Result<Vec<String>, String> {
+    tokenize_command(text).map_err(|error| format!("{label}: {error}"))
+}
+
+/// Parse an optional gamescope dimension: blank means "not set".
+fn parse_dimension(text: &str, label: &str) -> Result<Option<u32>, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let value = text
+        .parse::<u32>()
+        .map_err(|_| format!("{label} must be a whole number."))?;
+    if value == 0 {
+        return Err(format!("{label} must be greater than zero."));
+    }
+    Ok(Some(value))
 }
 
 fn profiles_dir() -> Result<PathBuf, String> {
@@ -295,6 +470,132 @@ mod tests {
             version: Some("proton-cachyos 10.0-20251101".to_string()),
             source: ProtonSource::SystemCompatibilityTools,
         }
+    }
+
+    #[test]
+    fn the_wrapper_draft_round_trips_a_stored_chain() {
+        let chain = WrapperChain {
+            gamemode: true,
+            mangohud: true,
+            gamescope: Some(GamescopeOptions {
+                width: Some(2560),
+                height: Some(1440),
+                refresh_hz: Some(165),
+                fullscreen: false,
+                extra_args: vec!["--hdr-enabled".into(), "two words".into()],
+            }),
+            custom: vec![WrapperStep {
+                program: PathBuf::from("/usr/bin/mangohud"),
+                args: vec!["--dls".into(), "it's".into()],
+            }],
+        };
+
+        let draft = WrapperDraft::from_chain(&chain);
+        assert_eq!(draft.width, "2560");
+        assert_eq!(draft.extra_args, "--hdr-enabled 'two words'");
+        assert_eq!(draft.custom[0].args, "--dls 'it'\\''s'");
+        assert_eq!(draft.to_chain().unwrap(), chain);
+    }
+
+    #[test]
+    fn the_wrapper_draft_reports_bad_input_instead_of_saving_it() {
+        let mut draft = WrapperDraft::default();
+        assert_eq!(draft.to_chain().unwrap(), WrapperChain::default());
+
+        draft.gamescope = true;
+        draft.width = "wide".into();
+        assert_eq!(
+            draft.to_chain().unwrap_err(),
+            "Gamescope width must be a whole number."
+        );
+
+        draft.width = "0".into();
+        assert_eq!(
+            draft.to_chain().unwrap_err(),
+            "Gamescope width must be greater than zero."
+        );
+
+        draft.width.clear();
+        draft.extra_args = "\"unterminated".into();
+        assert!(
+            draft
+                .to_chain()
+                .unwrap_err()
+                .starts_with("Gamescope extra args: unterminated quote")
+        );
+
+        draft.extra_args.clear();
+        draft.custom.push(WrapperDraftStep {
+            program: "  ".into(),
+            args: String::new(),
+        });
+        assert_eq!(
+            draft.to_chain().unwrap_err(),
+            "Custom wrapper #1 needs a program."
+        );
+
+        let mut draft = WrapperDraft::default();
+        assert_eq!(
+            draft.add_step("  ", "").unwrap_err(),
+            "A custom wrapper needs a program."
+        );
+        assert!(
+            draft
+                .add_step("gamemoderun", "\"oops")
+                .unwrap_err()
+                .starts_with("Custom wrapper args: unterminated quote")
+        );
+        draft.add_step("gamemoderun", "--dls 'two words'").unwrap();
+        assert_eq!(draft.custom[0].args, "--dls 'two words'");
+    }
+
+    #[test]
+    fn the_wrapper_preview_shows_the_flattened_chain() {
+        let mut draft = WrapperDraft {
+            gamemode: true,
+            mangohud: true,
+            gamescope: true,
+            width: "1920".into(),
+            height: "1080".into(),
+            refresh_hz: "120".into(),
+            ..WrapperDraft::default()
+        };
+        draft.add_step("prism-run", "--prefer-wayland").unwrap();
+
+        assert_eq!(
+            draft.preview_in(false).unwrap(),
+            "gamescope -w 1920 -h 1080 -r 120 --fullscreen -- gamemoderun mangohud \
+             prism-run --prefer-wayland %command%"
+        );
+        // The console session owns the compositor, so the per-game step is
+        // suppressed in the preview exactly as it is at launch.
+        assert_eq!(
+            draft.preview_in(true).unwrap(),
+            "gamemoderun mangohud prism-run --prefer-wayland %command%"
+        );
+    }
+
+    #[test]
+    fn applying_the_draft_updates_the_profile_and_validates_it() {
+        let mut profile = Profile::new(game(), "Wrapped");
+        let draft = WrapperDraft {
+            gamemode: true,
+            mangohud: true,
+            ..WrapperDraft::default()
+        };
+        draft.apply_to(&mut profile).unwrap();
+        assert!(profile.wrappers.gamemode);
+        assert!(profile.wrappers.mangohud);
+        assert!(profile.wrappers.gamescope.is_none());
+
+        let draft = WrapperDraft {
+            gamescope: true,
+            width: "0".into(),
+            ..WrapperDraft::default()
+        };
+        assert!(draft.apply_to(&mut profile).is_err());
+        // A refused draft must not mutate the profile.
+        assert!(profile.wrappers.gamescope.is_none());
     }
 
     #[test]

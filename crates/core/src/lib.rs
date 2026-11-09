@@ -13,8 +13,8 @@ pub mod profile_file;
 pub mod store;
 
 pub use launch::{
-    LaunchSpec, SHIM_PROGRAM, TokenizeError, shim_launch_options, steam_install, steam_run,
-    strip_shim_launch_options, tokenize_command,
+    LaunchSpec, SHIM_PROGRAM, TokenizeError, flatten_wrappers, render_command, shell_quote,
+    shim_launch_options, steam_install, steam_run, strip_shim_launch_options, tokenize_command,
 };
 pub use metadata::{AppKind, GameMetadata, Platforms};
 pub use profile::{

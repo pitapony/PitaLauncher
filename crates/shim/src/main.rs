@@ -27,8 +27,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 use pitagames_core::{
-    GameId, LaunchSpec, ShimProfile, Store, TokenizeError, WrapperStep, load_shim_profile,
-    tokenize_command,
+    GameId, LaunchSpec, ShimProfile, Store, TokenizeError, flatten_wrappers, load_shim_profile,
+    render_command, tokenize_command,
 };
 
 /// Environment value proving the shim ran; kept from M0.
@@ -106,22 +106,11 @@ fn launch_env(app_id: u32, profile: Option<&ShimProfile>) -> Vec<(String, String
 
 /// Flatten the wrapper chain and the game command into one `program + args`.
 ///
-/// Wrappers are outermost-first: `[gamescope, gamemoderun]` and a game argv
-/// become `gamescope <args> gamemoderun <args> <game> <args…>`.
-fn flatten(wrappers: &[WrapperStep], spec: &LaunchSpec) -> (PathBuf, Vec<String>) {
-    let Some(first) = wrappers.first() else {
-        return (spec.program.clone(), spec.args.clone());
-    };
-
-    let mut args = first.args.clone();
-    for wrapper in &wrappers[1..] {
-        args.push(wrapper.program.to_string_lossy().into_owned());
-        args.extend(wrapper.args.iter().cloned());
-    }
-    args.push(spec.program.to_string_lossy().into_owned());
-    args.extend(spec.args.iter().cloned());
-
-    (first.program.clone(), args)
+/// The composition itself lives in `core::launch` so the GUI preview and the
+/// shim exec cannot disagree.
+fn flatten(wrappers: &[pitagames_core::WrapperStep], spec: &LaunchSpec) -> (PathBuf, Vec<String>) {
+    let (program, args) = flatten_wrappers(wrappers, &spec.program.to_string_lossy(), &spec.args);
+    (PathBuf::from(program), args)
 }
 
 /// Load the compiled profile for a Steam appid, warning (never failing) on error.
@@ -241,13 +230,13 @@ fn explain_launch(app_id: u32, profile: Option<&ShimProfile>, spec: &LaunchSpec)
     let (program, args) = flatten(wrappers, spec);
     let mut command = String::new();
     for (key, value) in &spec.env {
-        command.push_str(&format!("{}={} ", quote(key), quote(value)));
+        command.push_str(&format!(
+            "{}={} ",
+            pitagames_core::shell_quote(key),
+            pitagames_core::shell_quote(value)
+        ));
     }
-    command.push_str(&quote(&program.to_string_lossy()));
-    for arg in &args {
-        command.push(' ');
-        command.push_str(&quote(arg));
-    }
+    command.push_str(&render_command(&program.to_string_lossy(), &args));
 
     println!();
     println!("Command:");
@@ -292,18 +281,6 @@ fn time_stamp() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|elapsed| elapsed.as_secs())
         .unwrap_or(0)
-}
-
-/// POSIX single-quote a token for a copyable command line.
-fn quote(token: &str) -> String {
-    if !token.is_empty()
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&byte))
-    {
-        return token.to_string();
-    }
-    format!("'{}'", token.replace('\'', "'\\''"))
 }
 
 const USAGE: &str = "pitagames-shim — PitaGames launch shim for Steam
@@ -392,6 +369,8 @@ mod tests {
 
     #[test]
     fn wrappers_flatten_outermost_first() {
+        use pitagames_core::WrapperStep;
+
         let wrappers = vec![
             WrapperStep {
                 program: PathBuf::from("gamescope"),
@@ -425,17 +404,6 @@ mod tests {
         let (program, args) = flatten(&[], &spec);
         assert_eq!(program, PathBuf::from("/games/Game/game.exe"));
         assert_eq!(args, vec!["-dx12".to_string()]);
-    }
-
-    #[test]
-    fn quotes_tokens_for_a_copyable_command() {
-        assert_eq!(quote("DXVK_HUD"), "DXVK_HUD");
-        assert_eq!(
-            quote("/games/My Game/game.exe"),
-            "'/games/My Game/game.exe'"
-        );
-        assert_eq!(quote("it's"), "'it'\\''s'");
-        assert_eq!(quote(""), "''");
     }
 
     #[test]

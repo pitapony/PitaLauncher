@@ -29,13 +29,17 @@ hardware layer has been exercised in an `archlinux:latest` container.
   `compatibilitytools.d`, Steam's own builds and umu; prints the auto choice.
 - **Steam launch-options writer** — Steam-closed guard, atomic replace,
   timestamped backup, JSON restore record and byte-identical or merged restore.
+- **Runtime panel** — Proton picker, per-game compatibility-tool forcing, and a
+  wrapper-chain editor (gamemoderun, mangohud, gamescope options and ordered
+  custom `program + args` rows) with a live command preview.
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
-- **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `launch-options`.
+- **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `profile`,
+  `launch-options`, `compat-tool`.
 
 ## Not there yet
 
 - Hardware validation on the RX 9070 and RX 5700 XT.
-- GUI Proton picker and per-game override.
+- Owned-games Steam Web API key, single-instance lock and the virtualized grid.
 - Compatibility database, anti-cheat detection and injection gating.
 - Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR).
 - Other stores (GOG, Epic, Amazon), mod orchestration and packaging.
@@ -117,6 +121,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-launch-options.md`](docs/m1-launch-options.md) — Steam launch-options writer.
 - [`docs/m1-profile.md`](docs/m1-profile.md) — shim profile contract and runtime panel.
 - [`docs/m1-compat-tool.md`](docs/m1-compat-tool.md) — per-game compatibility-tool writer.
+- [`docs/m1-wrappers.md`](docs/m1-wrappers.md) — wrapper-chain editor and argv flattening.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

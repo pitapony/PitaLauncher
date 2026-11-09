@@ -9,6 +9,8 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::profile::WrapperStep;
+
 /// Everything needed to start a game process.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct LaunchSpec {
@@ -51,6 +53,66 @@ impl LaunchSpec {
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.as_str())
     }
+}
+
+/// Flatten an ordered wrapper chain in front of a program.
+///
+/// Wrappers are outermost-first. `[gamescope, gamemoderun]` plus a game argv
+/// become:
+///
+/// ```text
+/// gamescope <args…> gamemoderun <args…> <program> <args…>
+/// ```
+///
+/// The shim execs the result and the GUI renders it for the transparency
+/// panel; keeping one implementation means the preview cannot drift from what
+/// actually runs. No shell is involved: this is still `program + args`.
+#[must_use]
+pub fn flatten_wrappers(
+    wrappers: &[WrapperStep],
+    program: &str,
+    args: &[String],
+) -> (String, Vec<String>) {
+    let Some(first) = wrappers.first() else {
+        return (program.to_string(), args.to_vec());
+    };
+
+    let mut flattened = first.args.clone();
+    for wrapper in &wrappers[1..] {
+        flattened.push(wrapper.program.to_string_lossy().into_owned());
+        flattened.extend(wrapper.args.iter().cloned());
+    }
+    flattened.push(program.to_string());
+    flattened.extend(args.iter().cloned());
+
+    (first.program.to_string_lossy().into_owned(), flattened)
+}
+
+/// Render one program plus its arguments as a copyable POSIX command line.
+#[must_use]
+pub fn render_command(program: &str, args: &[String]) -> String {
+    let mut command = shell_quote(program);
+    for arg in args {
+        command.push(' ');
+        command.push_str(&shell_quote(arg));
+    }
+    command
+}
+
+/// POSIX single-quote a token so a rendered command can be pasted back.
+///
+/// Only tokens made of safe characters are left bare; everything else is
+/// wrapped and embedded single quotes are escaped (`'` → `'\''`).
+#[must_use]
+pub fn shell_quote(token: &str) -> String {
+    if !token.is_empty()
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"@%+=:,./-_".contains(&byte))
+    {
+        return token.to_string();
+    }
+    format!("'{}'", token.replace('\'', "'\\''"))
 }
 
 /// A `LaunchSpec` that asks the running Steam client to start a game.
@@ -473,6 +535,57 @@ mod tests {
             shim_launch_options("620", "DXVK_HUD=fps pitagames-shim 440 %command%"),
             "DXVK_HUD=fps pitagames-shim 620 %command%"
         );
+    }
+
+    #[test]
+    fn wrappers_flatten_outermost_first() {
+        let wrappers = vec![
+            WrapperStep {
+                program: PathBuf::from("gamescope"),
+                args: vec!["--".to_string()],
+            },
+            WrapperStep {
+                program: PathBuf::from("gamemoderun"),
+                args: vec![],
+            },
+        ];
+
+        let (program, args) =
+            flatten_wrappers(&wrappers, "/games/Game/game.exe", &["-dx12".to_string()]);
+        assert_eq!(program, "gamescope");
+        assert_eq!(
+            args,
+            vec![
+                "--".to_string(),
+                "gamemoderun".to_string(),
+                "/games/Game/game.exe".to_string(),
+                "-dx12".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn without_wrappers_the_program_is_unchanged() {
+        let (program, args) = flatten_wrappers(&[], "/bin/game", &["-v".to_string()]);
+        assert_eq!(program, "/bin/game");
+        assert_eq!(args, vec!["-v".to_string()]);
+    }
+
+    #[test]
+    fn shell_quoting_round_trips_a_command_line() {
+        assert_eq!(shell_quote("DXVK_HUD"), "DXVK_HUD");
+        assert_eq!(
+            shell_quote("/games/My Game/game.exe"),
+            "'/games/My Game/game.exe'"
+        );
+        assert_eq!(shell_quote("it's"), "'it'\\''s'");
+        assert_eq!(shell_quote(""), "''");
+
+        let command = render_command(
+            "/games/My Game/game.exe",
+            &["--name".to_string(), "it's".to_string()],
+        );
+        assert_eq!(command, "'/games/My Game/game.exe' --name 'it'\\''s'");
     }
 
     #[test]

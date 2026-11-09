@@ -51,9 +51,13 @@ state. This is the first consumer of the launch-options writer inside the GUI.
   "env": [["DXVK_HUD", "fps"], ["PROTON_LOG", "1"]],
   "wrappers": [{ "program": "gamemoderun", "args": [] }],
   "log_path": "/home/u/.local/share/pitagames/logs/shim.log",
-  "written_at": "2026-11-07T18:04:05.123Z"
+  "written_at": [2026, 311, 18, 4, 5, 123456789, 0, 0, 0]
 }
 ```
+
+`written_at` is `time`'s default tuple encoding (year, ordinal day, time, UTC
+offset); it is provenance for logs and diagnostics, not a value anything parses
+back into a date.
 
 - `env` and `wrappers` are **ordered** and may repeat: later entries win,
   matching `LaunchSpec` semantics.
@@ -133,8 +137,12 @@ panel:
 
 - lists **Automatic**, **Steam default** and every discovered build (name + kind +
   source + version), with the automatic choice marked;
-- **Save & write profile** stores the profile (with the chosen `ProtonRef`) in
-  SQLite and writes its shim file, or reports why compilation was refused;
+- embeds the **Wrappers** editor (gamemoderun, mangohud, gamescope + options,
+  and ordered custom `program + args` rows) with a live preview; see
+  `docs/m1-wrappers.md`;
+- **Save & write profile** stores the profile (with the chosen `ProtonRef` and
+  wrapper chain) in SQLite and writes its shim file, or reports why compilation
+  was refused;
 - shows Steam's process state and the current launch-options value;
 - **Route through PitaGames** applies `pitagames-shim <appid> %command%` (the
   guarded writer: refuses while Steam runs, keeps a timestamped backup, replaces
@@ -169,12 +177,16 @@ pitagames-cli profile 620 --dir /path/to/profiles
   whatever Steam's own setting says).
 - **Wrappers apply from the shim, not from a launcher-managed process tree.**
   `gamemoderun`/`mangohud`/`gamescope` are only as available as they are on PATH.
+  The wrapper editor validates the chain but does not yet check availability.
 - **The shim logs one launch line**, not a teed transcript: output tee-ing and
   process supervision are the rest of M1.
 - **Hardware untested.** No live Steam client on the RX 9070 / RX 5700 XT has run
   this yet.
 
 ## Verification
+
+> The wrapper editor (`docs/m1-wrappers.md`) later added tests on top of this
+> slice; the counts below are the profile slice's own.
 
 - `pitagames-core`: **46 tests** (was 38), including 8 `profile_file` tests (path
   naming, JSON round trip, on-disk JSON shape, missing = `None`, corrupt JSON,

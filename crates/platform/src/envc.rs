@@ -23,7 +23,9 @@ use pitagames_core::profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, Profile, ProtonRef, Upscaler, WrapperChain,
     WrapperStep,
 };
-use pitagames_core::{ProfileError, ShimProton, ShimProtonInstall};
+use pitagames_core::{
+    ProfileError, ShimProton, ShimProtonInstall, flatten_wrappers, render_command,
+};
 
 use crate::proton::ProtonInstall;
 
@@ -78,9 +80,44 @@ pub fn compile_runtime(request: CompileRequest<'_>) -> Result<CompiledRuntime, E
 
     Ok(CompiledRuntime {
         env,
-        wrappers: compile_wrappers(&profile.wrappers, request.session),
+        wrappers: wrapper_steps(&profile.wrappers, request.session),
         proton: request.proton.cloned(),
     })
+}
+
+/// Expand a [`WrapperChain`] into the ordered steps a launch execs.
+///
+/// The GUI's wrapper editor previews through this function, so ordering and the
+/// console-session gamescope suppression cannot drift from the launch path.
+#[must_use]
+pub fn wrapper_steps(chain: &WrapperChain, session: bool) -> Vec<WrapperStep> {
+    let mut wrappers = Vec::new();
+
+    if let Some(gamescope) = &chain.gamescope {
+        // Nested gamescope is a bug: the console session owns the compositor.
+        if !session {
+            wrappers.push(gamescope_step(gamescope));
+        }
+    }
+    if chain.gamemode {
+        wrappers.push(program("gamemoderun"));
+    }
+    if chain.mangohud {
+        wrappers.push(program("mangohud"));
+    }
+    wrappers.extend(chain.custom.iter().cloned());
+    wrappers
+}
+
+/// Render the compiled wrapper chain in front of `command` as a copyable line.
+///
+/// Used by the wrapper editor's live preview. `command` is usually `%command%`:
+/// the GUI does not know Steam's game command until launch.
+#[must_use]
+pub fn render_wrapper_chain(chain: &WrapperChain, session: bool, command: &str) -> String {
+    let steps = wrapper_steps(chain, session);
+    let (program, args) = flatten_wrappers(&steps, command, &[]);
+    render_command(&program, &args)
 }
 
 /// The first graphics field that M1 cannot compile, if any.
@@ -130,25 +167,6 @@ fn diagnostics_env(diagnostics: &Diagnostics, log_dir: Option<&Path>) -> Vec<(St
         env.push(("PROTON_DLSS_INDICATOR".to_string(), "1".to_string()));
     }
     env
-}
-
-fn compile_wrappers(chain: &WrapperChain, session: bool) -> Vec<WrapperStep> {
-    let mut wrappers = Vec::new();
-
-    if let Some(gamescope) = &chain.gamescope {
-        // Nested gamescope is a bug: the console session owns the compositor.
-        if !session {
-            wrappers.push(gamescope_step(gamescope));
-        }
-    }
-    if chain.gamemode {
-        wrappers.push(program("gamemoderun"));
-    }
-    if chain.mangohud {
-        wrappers.push(program("mangohud"));
-    }
-    wrappers.extend(chain.custom.iter().cloned());
-    wrappers
 }
 
 fn gamescope_step(options: &GamescopeOptions) -> WrapperStep {
@@ -353,6 +371,39 @@ mod tests {
                     args: vec!["--dls".into()],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn the_wrapper_preview_matches_the_compiled_chain() {
+        let chain = WrapperChain {
+            gamemode: true,
+            mangohud: true,
+            gamescope: Some(GamescopeOptions {
+                width: Some(2560),
+                height: Some(1440),
+                refresh_hz: None,
+                fullscreen: true,
+                extra_args: vec!["--hdr-enabled".into()],
+            }),
+            custom: vec![WrapperStep {
+                program: PathBuf::from("prism-run"),
+                args: vec!["--prefer-wayland".into(), "two words".into()],
+            }],
+        };
+
+        assert_eq!(
+            render_wrapper_chain(&chain, false, "%command%"),
+            "gamescope -w 2560 -h 1440 --fullscreen --hdr-enabled -- gamemoderun mangohud \
+             prism-run --prefer-wayland 'two words' %command%"
+        );
+        assert_eq!(
+            render_wrapper_chain(&chain, true, "%command%"),
+            "gamemoderun mangohud prism-run --prefer-wayland 'two words' %command%"
+        );
+        assert_eq!(
+            render_wrapper_chain(&WrapperChain::default(), false, "%command%"),
+            "%command%"
         );
     }
 

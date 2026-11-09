@@ -75,6 +75,7 @@ impl Profile {
             return Err(ProfileError::EmptyName);
         }
 
+        self.wrappers.validate()?;
         self.neural_rendering.validate()?;
 
         if self.neural_rendering.is_enabled() {
@@ -137,6 +138,39 @@ pub struct WrapperChain {
     pub custom: Vec<WrapperStep>,
 }
 
+impl WrapperChain {
+    /// `true` when the chain would add no process in front of the game.
+    pub fn is_empty(&self) -> bool {
+        !self.gamemode && !self.mangohud && self.gamescope.is_none() && self.custom.is_empty()
+    }
+
+    /// Reject chains that could not be exec'd safely.
+    ///
+    /// The compiler expands wrappers into `program + args` and the shim execs
+    /// the first program directly, so an empty program is a launch failure, not
+    /// a cosmetic problem. NUL bytes cannot cross `execve`, and a zero gamescope
+    /// dimension is always a typo rather than a request. Validation lives here
+    /// (not in the UI) so a profile loaded from the database or imported from a
+    /// file is held to the same rules.
+    pub fn validate(&self) -> Result<(), ProfileError> {
+        if let Some(gamescope) = &self.gamescope {
+            gamescope.validate()?;
+        }
+        for (index, step) in self.custom.iter().enumerate() {
+            if step.program.as_os_str().is_empty() {
+                return Err(ProfileError::EmptyWrapperProgram { index });
+            }
+            if contains_nul(&step.program.to_string_lossy()) {
+                return Err(ProfileError::WrapperNul { index });
+            }
+            if step.args.iter().any(|arg| arg.contains('\0')) {
+                return Err(ProfileError::WrapperNul { index });
+            }
+        }
+        Ok(())
+    }
+}
+
 /// One `program + args` step in a wrapper chain.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WrapperStep {
@@ -169,6 +203,30 @@ impl Default for GamescopeOptions {
             extra_args: Vec::new(),
         }
     }
+}
+
+impl GamescopeOptions {
+    /// Reject dimensions that gamescope would interpret as an error.
+    pub fn validate(&self) -> Result<(), ProfileError> {
+        let fields = [
+            ("width", self.width),
+            ("height", self.height),
+            ("refresh", self.refresh_hz),
+        ];
+        for (field, value) in fields {
+            if value == Some(0) {
+                return Err(ProfileError::GamescopeZero { field });
+            }
+        }
+        if self.extra_args.iter().any(|arg| arg.contains('\0')) {
+            return Err(ProfileError::GamescopeNul);
+        }
+        Ok(())
+    }
+}
+
+fn contains_nul(text: &str) -> bool {
+    text.contains('\0')
 }
 
 /// How the game's upscaling is produced.
@@ -435,6 +493,18 @@ pub enum ProfileError {
     #[error("neural-rendering route {route:?} is not available in v1")]
     RouteNotAvailable { route: NrRoute },
 
+    #[error("custom wrapper #{index} has an empty program")]
+    EmptyWrapperProgram { index: usize },
+
+    #[error("custom wrapper #{index} contains a NUL byte")]
+    WrapperNul { index: usize },
+
+    #[error("gamescope {field} must be greater than zero")]
+    GamescopeZero { field: &'static str },
+
+    #[error("gamescope arguments contain a NUL byte")]
+    GamescopeNul,
+
     #[error("{left} cannot be combined with {right}")]
     Conflict {
         left: &'static str,
@@ -637,6 +707,65 @@ mod tests {
             profile.validate(),
             Err(ProfileError::Conflict { .. })
         ));
+    }
+
+    #[test]
+    fn wrapper_chains_are_validated() {
+        let mut profile = Profile::new(game(), "Wrapped");
+        profile.wrappers = WrapperChain {
+            gamemode: true,
+            mangohud: true,
+            gamescope: Some(GamescopeOptions {
+                width: Some(2560),
+                height: Some(1440),
+                refresh_hz: Some(165),
+                fullscreen: true,
+                extra_args: vec!["--hdr-enabled".into()],
+            }),
+            custom: vec![WrapperStep {
+                program: PathBuf::from("/usr/bin/mangohud"),
+                args: vec!["--dls".into()],
+            }],
+        };
+        profile.validate().unwrap();
+        assert!(!profile.wrappers.is_empty());
+
+        profile.wrappers.custom.push(WrapperStep {
+            program: PathBuf::new(),
+            args: Vec::new(),
+        });
+        assert_eq!(
+            profile.validate(),
+            Err(ProfileError::EmptyWrapperProgram { index: 1 })
+        );
+
+        profile.wrappers.custom[1].program = PathBuf::from("wrapper\0");
+        assert_eq!(
+            profile.validate(),
+            Err(ProfileError::WrapperNul { index: 1 })
+        );
+
+        let mut profile = Profile::new(game(), "Gamescope");
+        profile.wrappers.gamescope = Some(GamescopeOptions {
+            width: Some(0),
+            ..GamescopeOptions::default()
+        });
+        assert_eq!(
+            profile.validate(),
+            Err(ProfileError::GamescopeZero { field: "width" })
+        );
+    }
+
+    #[test]
+    fn an_empty_wrapper_chain_is_reported() {
+        assert!(WrapperChain::default().is_empty());
+        assert!(
+            !WrapperChain {
+                mangohud: true,
+                ..WrapperChain::default()
+            }
+            .is_empty()
+        );
     }
 
     #[test]
