@@ -162,6 +162,33 @@ impl Game {
     }
 }
 
+/// A game the store says the account owns, whether or not the files are here.
+///
+/// This is the shape both the owned-games API client and the SQLite cache use;
+/// the library merges it with the installed scan, where an installed copy wins
+/// and keeps Steam's own playtime. `playtime` comes from the store (Steam counts
+/// it in whole minutes), so it is the only playtime a non-installed game has.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnedGame {
+    pub id: GameId,
+    pub title: String,
+    #[serde(with = "duration_secs", default)]
+    pub playtime: Duration,
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub last_played: Option<OffsetDateTime>,
+}
+
+impl OwnedGame {
+    pub fn new(id: GameId, title: impl Into<String>) -> Self {
+        Self {
+            id,
+            title: title.into(),
+            playtime: Duration::ZERO,
+            last_played: None,
+        }
+    }
+}
+
 /// `Duration` as whole seconds in JSON.
 mod duration_secs {
     use std::time::Duration;

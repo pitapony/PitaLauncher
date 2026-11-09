@@ -82,6 +82,26 @@ pub fn last_played(at: OffsetDateTime, now: OffsetDateTime) -> String {
     }
 }
 
+/// A compact "how long ago" for a cache timestamp: `"just now"`, `"4 h ago"`.
+///
+/// Used by the account view for the owned-list refresh; the detail page's
+/// `last_played` is calendar-shaped and stays separate.
+pub fn duration_ago(age: time::Duration) -> String {
+    let seconds = age.whole_seconds().max(0);
+    if seconds < 60 {
+        return "just now".to_string();
+    }
+    let minutes = seconds / 60;
+    if minutes < 60 {
+        return format!("{minutes} min ago");
+    }
+    let hours = minutes / 60;
+    if hours < 24 {
+        return format!("{hours} h ago");
+    }
+    format!("{} d ago", hours / 24)
+}
+
 fn month_short(month: Month) -> &'static str {
     match month {
         Month::January => "Jan",
@@ -153,5 +173,15 @@ mod tests {
             "same year omits it"
         );
         assert_eq!(last_played(date(2024, Month::June, 12), now), "12 Jun 2024");
+    }
+
+    #[test]
+    fn duration_ago_is_compact_and_never_negative() {
+        use time::Duration as D;
+        assert_eq!(duration_ago(-D::seconds(5)), "just now");
+        assert_eq!(duration_ago(D::seconds(30)), "just now");
+        assert_eq!(duration_ago(D::minutes(5)), "5 min ago");
+        assert_eq!(duration_ago(D::hours(4)), "4 h ago");
+        assert_eq!(duration_ago(D::hours(30)), "1 d ago");
     }
 }

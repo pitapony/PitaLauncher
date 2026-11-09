@@ -6,9 +6,10 @@
 
 use std::time::Duration;
 
-use pitagames_core::{Game, GameId, Profile};
+use pitagames_core::{Game, GameId, OwnedGame, Profile, Store};
 use pitagames_db::{
-    Db, GameRepository, MetadataRepository, ProfileRepository, StoredMetadata, StoredProfile,
+    Db, GameRepository, MetadataRepository, OwnedRepository, ProfileRepository, StoredMetadata,
+    StoredProfile,
 };
 use time::OffsetDateTime;
 
@@ -94,4 +95,35 @@ pub async fn save_metadata(db: &Db, rows: &[StoredMetadata]) -> Result<usize, St
     db.save_metadata_many(rows)
         .await
         .map_err(|error| format!("could not save store metadata: {error}"))
+}
+
+/// The cached owned-games list and when it was fetched.
+pub async fn load_owned(db: &Db) -> Result<(Vec<OwnedGame>, Option<OffsetDateTime>), String> {
+    let games = db
+        .owned_games(Store::Steam)
+        .await
+        .map_err(|error| format!("could not read the owned-games cache: {error}"))?;
+    let fetched_at = db
+        .owned_fetched_at(Store::Steam)
+        .await
+        .map_err(|error| format!("could not read the owned-games timestamp: {error}"))?;
+    Ok((games, fetched_at))
+}
+
+/// Replace the cached owned-games list with a fresh API answer.
+pub async fn save_owned(
+    db: &Db,
+    games: &[OwnedGame],
+    fetched_at: OffsetDateTime,
+) -> Result<usize, String> {
+    db.replace_owned(Store::Steam, games, fetched_at)
+        .await
+        .map_err(|error| format!("could not save the owned-games cache: {error}"))
+}
+
+/// Drop the cached owned list (used when the key is forgotten).
+pub async fn clear_owned(db: &Db) -> Result<usize, String> {
+    db.remove_owned(Store::Steam)
+        .await
+        .map_err(|error| format!("could not clear the owned-games cache: {error}"))
 }

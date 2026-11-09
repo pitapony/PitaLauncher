@@ -89,10 +89,10 @@ impl LibraryWatcher {
                     return;
                 };
                 for path in event.paths {
-                    if let Some(change) = classify(&path, op) {
-                        if raw_tx.send(change).is_err() {
-                            break;
-                        }
+                    if let Some(change) = classify(&path, op)
+                        && raw_tx.send(change).is_err()
+                    {
+                        break;
                     }
                 }
             },
@@ -127,10 +127,10 @@ impl LibraryWatcher {
                     match raw_rx.recv_timeout(debouncer.next_timeout(Instant::now())) {
                         Ok(change) => debouncer.push(change, Instant::now()),
                         Err(RecvTimeoutError::Timeout) => {
-                            if let Some(batch) = debouncer.ready(Instant::now()) {
-                                if batches.send(batch).is_err() {
-                                    break;
-                                }
+                            if let Some(batch) = debouncer.ready(Instant::now())
+                                && batches.send(batch).is_err()
+                            {
+                                break;
                             }
                         }
                         Err(RecvTimeoutError::Disconnected) => {

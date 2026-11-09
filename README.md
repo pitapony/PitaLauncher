@@ -32,14 +32,17 @@ hardware layer has been exercised in an `archlinux:latest` container.
 - **Runtime panel** — Proton picker, per-game compatibility-tool forcing, and a
   wrapper-chain editor (gamemoderun, mangohud, gamescope options and ordered
   custom `program + args` rows) with a live command preview.
+- **Owned games** — an optional Steam Web API key (desktop keyring, `0600`
+  fallback file) adds the games the account owns but has not installed to the
+  grid, each with an Install button; the list is cached in SQLite.
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
 - **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `profile`,
-  `launch-options`, `compat-tool`.
+  `launch-options`, `compat-tool`, `steam-account`.
 
 ## Not there yet
 
 - Hardware validation on the RX 9070 and RX 5700 XT.
-- Owned-games Steam Web API key, single-instance lock and the virtualized grid.
+- Single-instance lock and the virtualized grid.
 - Compatibility database, anti-cheat detection and injection gating.
 - Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR).
 - Other stores (GOG, Epic, Amazon), mod orchestration and packaging.
@@ -47,7 +50,7 @@ hardware layer has been exercised in an `archlinux:latest` container.
 ## Requirements
 
 - CachyOS or Arch Linux, x86_64.
-- Rust 1.85+ (the workspace uses edition 2024).
+- Rust 1.88+ (the workspace uses edition 2024; `keyring` 4 needs 1.88).
 - For the GUI: `webkit2gtk-4.1`, `gtk3`, `libsecret`, `sqlite`.
 - Steam installed natively. Flatpak Steam is unsupported.
 - Target GPUs: RX 9070 (RDNA 4) and RX 5700 XT (RDNA 1). Everything else ships
@@ -62,6 +65,9 @@ cargo run -p pitagames-cli -- scan
 # List the Proton builds this machine can launch games with.
 cargo run -p pitagames-cli -- proton
 
+# Check the Steam account the launcher resolved (add --refresh to call the API).
+cargo run -p pitagames-cli -- steam-account
+
 # See the shim line the launcher would write, without touching the file.
 cargo run -p pitagames-cli -- launch-options 620 --shim --dry-run
 
@@ -70,8 +76,9 @@ cargo run -p pitagames
 ```
 
 The CLI also supports `install <appid>` (hands the request to Steam and polls the
-appmanifest), `metadata <appid>` (live Steam store metadata) and
-`launch-options <appid> --set/--shim/--clear/--restore`.
+appmanifest), `metadata <appid>` (live Steam store metadata),
+`launch-options <appid> --set/--shim/--clear/--restore`, and
+`steam-account --set-key/--forget-key/--refresh`.
 
 ## Build and test
 
@@ -79,10 +86,10 @@ The GUI links against WebKitGTK and is built on Arch/CachyOS (or an
 `archlinux:latest` container). The pure-Rust crates build anywhere.
 
 ```bash
-# Pure crates: core, db, art, metadata, platform, stores, shim, cli.
+# Pure crates: core, db, art, metadata, platform, stores, secrets, shim, cli.
 cargo test -p pitagames-core -p pitagames-db -p pitagames-art \
   -p pitagames-metadata -p pitagames-platform -p pitagames-stores \
-  -p pitagames-shim -p pitagames-cli
+  -p pitagames-secrets -p pitagames-shim -p pitagames-cli
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 
@@ -102,9 +109,10 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 | `crates/core` | Domain types, launch spec, profiles, XDG paths, metadata types |
 | `crates/db` | SQLite pool, migrations and repositories |
 | `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers |
-| `crates/metadata` | Steam `appdetails` client, rate limiter and cache policy |
+| `crates/metadata` | Steam `appdetails` and `GetOwnedGames` clients, rate limiter and cache policy |
 | `crates/platform` | Proton discovery and runtime selection |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
+| `crates/secrets` | Steam Web API key storage (keyring + `0600` fallback) |
 | `crates/shim` | `pitagames-shim` launch shim |
 | `crates/cli` | Headless developer CLI |
 | `crates/app` | Dioxus desktop GUI (the only crate allowed to use RSX) |
@@ -122,6 +130,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-profile.md`](docs/m1-profile.md) — shim profile contract and runtime panel.
 - [`docs/m1-compat-tool.md`](docs/m1-compat-tool.md) — per-game compatibility-tool writer.
 - [`docs/m1-wrappers.md`](docs/m1-wrappers.md) — wrapper-chain editor and argv flattening.
+- [`docs/m1-owned-games.md`](docs/m1-owned-games.md) — Steam Web API key and the owned-games cache.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

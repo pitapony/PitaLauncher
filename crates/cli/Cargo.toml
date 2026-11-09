@@ -14,6 +14,7 @@ path = "src/main.rs"
 pitagames-core.workspace = true
 pitagames-metadata.workspace = true
 pitagames-platform.workspace = true
+pitagames-secrets.workspace = true
 pitagames-stores.workspace = true
 
 anyhow.workspace = true

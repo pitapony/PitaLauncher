@@ -1,7 +1,8 @@
 # PitaGames CI
 #
-# Pure-Rust crates (core, db, art, metadata, platform, stores, shim, cli) are linted and
-# tested on a stock Ubuntu runner. The GUI (`crates/app`) needs WebKitGTK, which
+# Pure-Rust crates (core, db, art, metadata, platform, stores, secrets, shim,
+# cli) are linted and tested on a stock Ubuntu runner. The GUI (`crates/app`)
+# needs WebKitGTK, which
 # does not exist on macOS/Windows — it is compile-checked in the same `archlinux`
 # image that the product targets, matching the AGENTS.md verification rules.
 
@@ -29,13 +30,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Formatting
-        run: cargo fmt --check -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-shim -p pitagames-cli
+        run: cargo fmt --check -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-secrets -p pitagames-shim -p pitagames-cli
 
       - name: Clippy
-        run: cargo clippy -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-shim -p pitagames-cli --all-targets -- -D warnings
+        run: cargo clippy -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-secrets -p pitagames-shim -p pitagames-cli --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-shim -p pitagames-cli
+        run: cargo test -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-stores -p pitagames-secrets -p pitagames-shim -p pitagames-cli
 
   gui:
     name: gui build (archlinux container)

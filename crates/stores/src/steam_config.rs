@@ -157,10 +157,10 @@ pub fn detect_steam_process(steam_root: &Path) -> SteamProcessState {
 ///
 /// Tests fabricate a `proc/<pid>/comm` tree; production always passes `/proc`.
 pub fn detect_steam_process_in(steam_root: &Path, proc_root: &Path) -> SteamProcessState {
-    if let Some(pid) = steam_pid_file(steam_root) {
-        if proc_root.join(pid.to_string()).is_dir() {
-            return SteamProcessState::Running { pid };
-        }
+    if let Some(pid) = steam_pid_file(steam_root)
+        && proc_root.join(pid.to_string()).is_dir()
+    {
+        return SteamProcessState::Running { pid };
     }
 
     let Ok(entries) = fs::read_dir(proc_root) else {
@@ -191,10 +191,10 @@ pub fn detect_steam_process_in(steam_root: &Path, proc_root: &Path) -> SteamProc
 fn steam_pid_file(steam_root: &Path) -> Option<u32> {
     let mut candidates = vec![steam_root.join("steam.pid")];
     // ~/.steam/steam is a symlink whose pid file lives one level up.
-    if steam_root.file_name().is_some_and(|name| name == "steam") {
-        if let Some(parent) = steam_root.parent() {
-            candidates.push(parent.join("steam.pid"));
-        }
+    if steam_root.file_name().is_some_and(|name| name == "steam")
+        && let Some(parent) = steam_root.parent()
+    {
+        candidates.push(parent.join("steam.pid"));
     }
 
     candidates.into_iter().find_map(|path| {
@@ -625,15 +625,15 @@ where
     let current_text = String::from_utf8(current.clone()).map_err(|_| Error::NotUtf8 {
         path: config.to_path_buf(),
     })?;
-    if let Some(text) = merge(&current_text, journal.previous.as_ref())? {
-        if text != current_text {
-            // This write is itself undoable: keep what the file looked like
-            // before the merge.
-            let pre_restore =
-                unique_backup_path(&options.backup_dir, stem, scope, app_id, "-pre-restore");
-            write_new_file(&pre_restore, &current)?;
-            atomic_write(config, text.as_bytes())?;
-        }
+    if let Some(text) = merge(&current_text, journal.previous.as_ref())?
+        && text != current_text
+    {
+        // This write is itself undoable: keep what the file looked like
+        // before the merge.
+        let pre_restore =
+            unique_backup_path(&options.backup_dir, stem, scope, app_id, "-pre-restore");
+        write_new_file(&pre_restore, &current)?;
+        atomic_write(config, text.as_bytes())?;
     }
     remove_journal(&journal_path);
 

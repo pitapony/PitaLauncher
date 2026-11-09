@@ -27,4 +27,4 @@ pub use profile_file::{
     load_shim_profile, read_shim_profile, remove_shim_profile, save_shim_profile,
     shim_profile_path,
 };
-pub use store::{AntiCheat, Game, GameId, Store, UnknownAntiCheat, UnknownStore};
+pub use store::{AntiCheat, Game, GameId, OwnedGame, Store, UnknownAntiCheat, UnknownStore};

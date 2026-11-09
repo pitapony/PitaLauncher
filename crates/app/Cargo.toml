@@ -16,6 +16,7 @@ pitagames-core.workspace = true
 pitagames-db.workspace = true
 pitagames-metadata.workspace = true
 pitagames-platform.workspace = true
+pitagames-secrets.workspace = true
 pitagames-stores.workspace = true
 
 dioxus.workspace = true

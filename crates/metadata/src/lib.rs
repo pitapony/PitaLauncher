@@ -1,15 +1,19 @@
 //! Store metadata: fetching, parsing, rate limiting and cache policy.
 //!
 //! This crate is framework-free and unaware of SQLite. It knows how to talk to
-//! Steam's `appdetails` endpoint, how to turn the response into
-//! [`pitagames_core::GameMetadata`], and how long a cached answer stays usable.
-//! `pitagames-db` stores those values and `crates/app` decides when to refresh.
+//! Steam's `appdetails` endpoint and to the `IPlayerService/GetOwnedGames`
+//! Web API method, how to turn the answers into
+//! [`pitagames_core::GameMetadata`] / [`pitagames_core::OwnedGame`], and how
+//! long a cached answer stays usable. `pitagames-db` stores those values and
+//! `crates/app` decides when to refresh.
 //!
 //! One appid per request: Steam's `appdetails` endpoint returns `null` for
 //! comma-separated batches (verified 2026-11), so the 200-requests-per-five-
 //! minutes budget in [`RateLimit::steam_app_details`] is the real gate for a
-//! large library.
+//! large library. The owned-games method returns the whole library in one call,
+//! so it does not use that budget.
 
+pub mod owned;
 pub mod rate;
 pub mod steam;
 pub mod text;
@@ -19,6 +23,7 @@ use std::time::Duration;
 
 use time::OffsetDateTime;
 
+pub use owned::{OwnedError, OwnedLibrary, SteamOwnedGames};
 pub use rate::{RateLimit, TokenBucket};
 pub use steam::{
     AppFailure, DEFAULT_FILTERS, DEFAULT_LANGUAGE, FailureReason, Fetched, SteamAppDetails,
@@ -26,8 +31,11 @@ pub use steam::{
 pub use text::unescape_html;
 pub use transport::{ReqwestTransport, Transport};
 
-/// The ready-to-use client: reqwest over rustls.
+/// The ready-to-use `appdetails` client: reqwest over rustls.
 pub type SteamClient = SteamAppDetails<ReqwestTransport>;
+
+/// The ready-to-use owned-games client: reqwest over rustls.
+pub type OwnedClient = SteamOwnedGames<ReqwestTransport>;
 
 /// How long a metadata answer may be reused before it is fetched again.
 ///

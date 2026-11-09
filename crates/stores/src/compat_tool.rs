@@ -261,10 +261,10 @@ fn remove_tool(
     // An object that only ever held compat pairs (one we created, or one Steam
     // wrote) goes away with them, so a set-then-remove round trip restores the
     // original layout instead of leaving `"620" { }` behind.
-    if present == app.pairs.len() {
-        if let Some(app_pair) = mapping.get(app_id) {
-            return vdf_edit::remove_pair(input, app_pair);
-        }
+    if present == app.pairs.len()
+        && let Some(app_pair) = mapping.get(app_id)
+    {
+        return vdf_edit::remove_pair(input, app_pair);
     }
 
     // The object carries unrelated keys: drop only the compat pairs, one splice

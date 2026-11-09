@@ -134,6 +134,56 @@ pub fn user_configs(steam_root: &Path) -> Vec<(String, PathBuf)> {
     user_configs_in(steam_root, &mut warnings)
 }
 
+/// The Steam account ids that have a `userdata/<id>` directory, most recently
+/// touched first.
+///
+/// The owned-games Web API needs a SteamID64, and the account Steam itself last
+/// used is the only one available without asking: Steam rewrites the active
+/// user's `userdata` tree constantly (cloud, config, localconfig), so directory
+/// mtime is a good proxy. Ties fall back to the larger id, which is stable.
+pub fn user_ids(steam_root: &Path) -> Vec<u32> {
+    let userdata = steam_root.join("userdata");
+    let entries = match fs::read_dir(&userdata) {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+
+    let mut users: Vec<(std::time::SystemTime, u32)> = Vec::new();
+    for entry in entries.flatten() {
+        let Some(id) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let touched = entry
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        users.push((touched, id));
+    }
+
+    users.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| right.1.cmp(&left.1)));
+    users.into_iter().map(|(_, id)| id).collect()
+}
+
+/// The account Steam most likely uses, or `None` when nobody has logged in.
+pub fn active_user_id(steam_root: &Path) -> Option<u32> {
+    user_ids(steam_root).into_iter().next()
+}
+
+/// The SteamID64 for a 32-bit account id: `76561197960265728 + id`.
+///
+/// Steam's Web API takes the 64-bit form; `userdata` directories are named with
+/// the 32-bit one. The offset is the individual-account universe base.
+pub fn steam_id64(account_id: u32) -> String {
+    (76_561_197_960_265_728u64 + u64::from(account_id)).to_string()
+}
+
 fn user_configs_in(steam_root: &Path, warnings: &mut Vec<String>) -> Vec<(String, PathBuf)> {
     let userdata = steam_root.join("userdata");
     let entries = match fs::read_dir(&userdata) {
@@ -255,10 +305,10 @@ pub fn parse_library_folders(input: &str) -> Result<Vec<PathBuf>, LibraryFolders
             Value::String(_) => None,
         };
 
-        if let Some(path) = path.filter(|path| !path.as_os_str().is_empty()) {
-            if !libraries.contains(&path) {
-                libraries.push(path);
-            }
+        if let Some(path) = path.filter(|path| !path.as_os_str().is_empty())
+            && !libraries.contains(&path)
+        {
+            libraries.push(path);
         }
     }
 
@@ -421,5 +471,45 @@ mod tests {
         assert!(is_tool(1628350, "Steam Linux Runtime 3.0 (sniper)"));
         assert!(is_tool(999, "Proton Experimental"));
         assert!(!is_tool(570, "Dota 2"));
+    }
+
+    #[test]
+    fn account_ids_convert_to_steam_id64() {
+        assert_eq!(steam_id64(0), "76561197960265728");
+        assert_eq!(steam_id64(12_345), "76561197960278073");
+        // A real 32-bit account id from the fixtures.
+        assert_eq!(steam_id64(223_456), "76561197960489184");
+    }
+
+    #[test]
+    fn user_ids_are_numeric_and_newest_first() {
+        let root = tempfile::tempdir().unwrap();
+        let userdata = root.path().join("userdata");
+        for name in ["12345", "223456", "not-a-user"] {
+            fs::create_dir_all(userdata.join(name)).unwrap();
+        }
+        // A plain file in userdata is not an account.
+        fs::write(userdata.join("999999"), "").unwrap();
+
+        let older = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let newer = std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000);
+        fs::File::open(userdata.join("12345"))
+            .unwrap()
+            .set_modified(newer)
+            .unwrap();
+        fs::File::open(userdata.join("223456"))
+            .unwrap()
+            .set_modified(older)
+            .unwrap();
+
+        assert_eq!(user_ids(root.path()), vec![12_345, 223_456]);
+        assert_eq!(active_user_id(root.path()), Some(12_345));
+    }
+
+    #[test]
+    fn no_userdata_directory_means_no_account() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(user_ids(root.path()).is_empty());
+        assert_eq!(active_user_id(root.path()), None);
     }
 }

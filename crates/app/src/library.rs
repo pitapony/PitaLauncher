@@ -8,8 +8,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pitagames_art::ArtRequest;
-use pitagames_core::Game;
 use pitagames_core::launch::{steam_install, steam_run};
+use pitagames_core::{Game, OwnedGame};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_stores::{InstallPhase, scan_steam};
@@ -24,6 +24,9 @@ pub struct GameEntry {
     pub phase: InstallPhase,
     /// Cached store metadata, including the negative "no data" answer.
     pub metadata: Option<StoredMetadata>,
+    /// True for a row that came from the owned-games API rather than a manifest.
+    /// The grid behaves the same; only the metadata budget and the subtitle care.
+    pub owned: bool,
 }
 
 impl GameEntry {
@@ -94,6 +97,36 @@ impl GameEntry {
     }
 }
 
+/// The owned-games side of the library: whether a key is being used, what the
+/// last refresh said and what is in flight.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct OwnedSummary {
+    /// `game_count` from the last API answer; `None` until one arrives.
+    pub total: Option<usize>,
+    /// When the owned list was last refreshed successfully.
+    pub fetched_at: Option<OffsetDateTime>,
+    /// True while a refresh is running.
+    pub pending: bool,
+    /// Non-fatal refresh problems (wrong key, private profile, offline).
+    pub warnings: Vec<String>,
+}
+
+impl OwnedSummary {
+    pub fn fetch_age(&self, now: OffsetDateTime) -> Option<time::Duration> {
+        self.fetched_at.map(|fetched_at| now - fetched_at)
+    }
+}
+
+/// How many owned-but-not-installed games may get a store metadata request in
+/// one run.
+///
+/// The `appdetails` budget (200 requests / 5 minutes) makes refreshing a
+/// 1,000-game account in one go impolite. New owned rows are fetched first and
+/// then drop out of the candidate list until their answer goes stale, so a
+/// large library drains over a few launches instead of hammering Steam. Every
+/// installed game is always refreshed; only the owned tail is capped.
+pub const OWNED_METADATA_PER_RUN: usize = 100;
+
 /// The library as loaded, plus warnings from the scan.
 #[derive(Debug, Clone, Default)]
 pub struct Library {
@@ -107,6 +140,8 @@ pub struct Library {
     pub steam_root: Option<PathBuf>,
     /// Every library folder scanned; install trackers poll these.
     pub libraries: Vec<PathBuf>,
+    /// The Steam account's owned games, when a key is configured.
+    pub owned: OwnedSummary,
 }
 
 impl Library {
@@ -128,12 +163,7 @@ impl Library {
                 .push("No Steam library found on this machine".to_string());
         }
 
-        merged.games.sort_by(|left, right| {
-            left.title()
-                .to_lowercase()
-                .cmp(&right.title().to_lowercase())
-                .then_with(|| left.app_id().cmp(right.app_id()))
-        });
+        merged.sort();
 
         merged
     }
@@ -158,6 +188,7 @@ impl Library {
                         game,
                         phase,
                         metadata: None,
+                        owned: false,
                     }
                 })
                 .collect();
@@ -169,6 +200,7 @@ impl Library {
             metadata_pending: false,
             steam_root: Some(steam_root.to_path_buf()),
             libraries: report.libraries,
+            owned: OwnedSummary::default(),
         }
     }
 
@@ -251,18 +283,101 @@ impl Library {
         }
     }
 
+    /// Fold the account's owned library into the grid.
+    ///
+    /// Installed rows win: the scan knows the install state, the path and
+    /// Steam's own playtime from `localconfig.vdf`, which is more precise than
+    /// the API's whole minutes. An owned game that is not installed becomes a
+    /// `NotInstalled` row, so its card offers Install. `total` is the
+    /// `game_count` the API reported (it can exceed the rows Steam returned).
+    ///
+    /// The method is idempotent: startup merges the cached list, a refresh
+    /// merges the new answer over the same rows.
+    pub fn apply_owned(&mut self, games: &[OwnedGame], total: usize, fetched_at: OffsetDateTime) {
+        for owned in games {
+            match self
+                .games
+                .iter_mut()
+                .find(|entry| entry.game.id == owned.id)
+            {
+                Some(entry) => {
+                    entry.owned = true;
+                    if entry.game.playtime.is_zero() {
+                        entry.game.playtime = owned.playtime;
+                    }
+                    if entry.game.last_played.is_none() {
+                        entry.game.last_played = owned.last_played;
+                    }
+                }
+                None => {
+                    let mut game = Game::new(owned.id.clone(), owned.title.clone());
+                    game.playtime = owned.playtime;
+                    game.last_played = owned.last_played;
+                    self.games.push(GameEntry {
+                        game,
+                        phase: InstallPhase::NotInstalled,
+                        metadata: None,
+                        owned: true,
+                    });
+                }
+            }
+        }
+
+        self.owned.total = Some(total);
+        self.owned.fetched_at = Some(fetched_at);
+        self.sort();
+    }
+
+    /// Record a refresh failure without dropping the cached rows.
+    pub fn owned_failed(&mut self, message: String) {
+        self.owned.warnings.push(message);
+        self.owned.pending = false;
+    }
+
+    /// Drop every owned-only row, keeping the scanned library.
+    ///
+    /// Called when the API key is forgotten: the cache is cleared in SQLite in
+    /// the same gesture, so the next launch does not resurrect the rows.
+    pub fn drop_owned(&mut self) {
+        self.games
+            .retain(|entry| entry.game.installed || !entry.owned);
+        self.owned = OwnedSummary::default();
+        self.sort();
+    }
+
+    fn sort(&mut self) {
+        self.games.sort_by(|left, right| {
+            left.title()
+                .to_lowercase()
+                .cmp(&right.title().to_lowercase())
+                .then_with(|| left.app_id().cmp(right.app_id()))
+        });
+    }
+
     /// Appids whose cached answer is missing or older than `policy`.
     ///
+    /// Installed games come first and are never capped; owned-but-not-installed
+    /// games follow, up to `owned_cap` per run (see [`OWNED_METADATA_PER_RUN`]).
     /// Returned in library order, deduplicated; non-numeric ids are skipped
     /// (Steam appids always parse, other stores will get their own path).
-    pub fn metadata_candidates(&self, policy: CachePolicy, now: OffsetDateTime) -> Vec<u32> {
-        let mut ids = Vec::new();
-        for entry in &self.games {
-            let fresh = entry
+    pub fn metadata_candidates(
+        &self,
+        policy: CachePolicy,
+        now: OffsetDateTime,
+        owned_cap: usize,
+    ) -> Vec<u32> {
+        let is_fresh = |entry: &GameEntry| {
+            entry
                 .metadata
                 .as_ref()
-                .is_some_and(|row| policy.is_fresh(row.fetched_at, row.metadata.is_some(), now));
-            if fresh {
+                .is_some_and(|row| policy.is_fresh(row.fetched_at, row.metadata.is_some(), now))
+        };
+
+        let mut ids = Vec::new();
+        let mut owned_queued = 0usize;
+
+        for entry in self.games.iter().filter(|entry| entry.game.installed) {
+            if is_fresh(entry) {
                 continue;
             }
             let Ok(app_id) = entry.game.id.store_id.parse::<u32>() else {
@@ -272,6 +387,23 @@ impl Library {
                 ids.push(app_id);
             }
         }
+
+        for entry in self.games.iter().filter(|entry| !entry.game.installed) {
+            if owned_queued >= owned_cap {
+                break;
+            }
+            if is_fresh(entry) {
+                continue;
+            }
+            let Ok(app_id) = entry.game.id.store_id.parse::<u32>() else {
+                continue;
+            };
+            if !ids.contains(&app_id) {
+                ids.push(app_id);
+                owned_queued += 1;
+            }
+        }
+
         ids
     }
 
@@ -331,6 +463,7 @@ mod tests {
             game,
             phase,
             metadata: None,
+            owned: false,
         }
     }
 
@@ -351,6 +484,7 @@ mod tests {
             metadata_pending: false,
             steam_root: None,
             libraries: Vec::new(),
+            owned: OwnedSummary::default(),
         }
     }
 
@@ -452,6 +586,7 @@ mod tests {
             metadata_pending: false,
             steam_root: Some(PathBuf::from("/steam")),
             libraries: vec![PathBuf::from("/steam")],
+            owned: OwnedSummary::default(),
         });
         base.absorb(Library {
             games: vec![
@@ -463,6 +598,7 @@ mod tests {
             metadata_pending: true,
             steam_root: Some(PathBuf::from("/steam2")),
             libraries: vec![PathBuf::from("/steam"), PathBuf::from("/other")],
+            owned: OwnedSummary::default(),
         });
 
         assert_eq!(base.games.len(), 2);
@@ -543,7 +679,11 @@ mod tests {
     fn every_game_without_cached_metadata_is_a_candidate() {
         let library = library();
         assert_eq!(
-            library.metadata_candidates(CachePolicy::DEFAULT, OffsetDateTime::UNIX_EPOCH),
+            library.metadata_candidates(
+                CachePolicy::DEFAULT,
+                OffsetDateTime::UNIX_EPOCH,
+                usize::MAX
+            ),
             vec![570, 620, 999]
         );
     }
@@ -563,7 +703,7 @@ mod tests {
         ));
 
         assert_eq!(
-            library.metadata_candidates(CachePolicy::DEFAULT, now),
+            library.metadata_candidates(CachePolicy::DEFAULT, now, usize::MAX),
             vec![620],
             "fresh positive and fresh negative rows are reused"
         );
@@ -574,7 +714,7 @@ mod tests {
             false,
         ));
         assert_eq!(
-            library.metadata_candidates(CachePolicy::DEFAULT, now),
+            library.metadata_candidates(CachePolicy::DEFAULT, now, usize::MAX),
             vec![620, 999],
             "an expired negative answer is retried"
         );
@@ -610,5 +750,126 @@ mod tests {
             requests.iter().all(|request| request.url.contains("cdn")),
             "only the game with metadata contributes art"
         );
+    }
+
+    fn owned(app_id: &str, title: &str, minutes: u64) -> OwnedGame {
+        let mut game = OwnedGame::new(GameId::new(Store::Steam, app_id), title);
+        game.playtime = Duration::from_secs(minutes * 60);
+        game
+    }
+
+    #[test]
+    fn owned_games_join_the_grid_without_overwriting_installed_rows() {
+        let mut library = library();
+        let portal_playtime = library.games[1].playtime();
+        let fetched_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+
+        library.apply_owned(
+            &[
+                owned("620", "Portal 2", 999),
+                owned("440", "Team Fortress 2", 120),
+                owned("400", "Half-Life", 0),
+            ],
+            3,
+            fetched_at,
+        );
+
+        let portal = library
+            .games
+            .iter()
+            .find(|entry| entry.app_id() == "620")
+            .unwrap();
+        assert!(portal.owned);
+        assert!(portal.game.installed, "the scan row stays installed");
+        assert_eq!(
+            portal.playtime(),
+            portal_playtime,
+            "Steam's localconfig playtime beats the API's whole minutes"
+        );
+
+        let tf2 = library
+            .games
+            .iter()
+            .find(|entry| entry.app_id() == "440")
+            .unwrap();
+        assert!(tf2.owned);
+        assert!(!tf2.game.installed);
+        assert_eq!(tf2.phase, InstallPhase::NotInstalled);
+        assert!(tf2.can_install(), "an owned game offers Install");
+        assert_eq!(tf2.playtime(), Duration::from_secs(120 * 60));
+        assert_eq!(tf2.game.last_played, None);
+
+        assert_eq!(
+            library
+                .games
+                .iter()
+                .map(|entry| entry.title())
+                .collect::<Vec<_>>(),
+            [
+                "Dota 2",
+                "Half-Life",
+                "portal",
+                "Team Fortress 2",
+                "Uninstalled Demo"
+            ],
+            "the merged grid is sorted by title"
+        );
+        assert_eq!(library.owned.total, Some(3));
+        assert_eq!(library.owned.fetched_at, Some(fetched_at));
+    }
+
+    #[test]
+    fn merging_the_same_owned_list_twice_changes_nothing() {
+        let mut library = library();
+        let fetched_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let owned = [owned("440", "Team Fortress 2", 120)];
+
+        library.apply_owned(&owned, 1, fetched_at);
+        let once = library.games.clone();
+        library.apply_owned(&owned, 1, fetched_at);
+        assert_eq!(library.games, once);
+    }
+
+    #[test]
+    fn only_the_owned_tail_is_capped_for_metadata() {
+        let mut library = Library::default();
+        library
+            .games
+            .push(entry("10", "Installed A", InstallPhase::Installed, true));
+        library
+            .games
+            .push(entry("11", "Installed B", InstallPhase::Installed, true));
+        library
+            .games
+            .push(entry("20", "Owned A", InstallPhase::NotInstalled, false));
+        library
+            .games
+            .push(entry("21", "Owned B", InstallPhase::NotInstalled, false));
+        library
+            .games
+            .push(entry("22", "Owned C", InstallPhase::NotInstalled, false));
+
+        assert_eq!(
+            library.metadata_candidates(CachePolicy::DEFAULT, OffsetDateTime::UNIX_EPOCH, 2),
+            vec![10, 11, 20, 21],
+            "installed games are always refreshed; the owned tail is capped"
+        );
+        assert_eq!(
+            library.metadata_candidates(CachePolicy::DEFAULT, OffsetDateTime::UNIX_EPOCH, 0),
+            vec![10, 11],
+        );
+    }
+
+    #[test]
+    fn an_owned_refresh_failure_keeps_the_cached_rows() {
+        let mut library = library();
+        let before = library.games.len();
+
+        library.owned.pending = true;
+        library.owned_failed("Steam rejected the API key".into());
+
+        assert_eq!(library.games.len(), before);
+        assert!(!library.owned.pending);
+        assert_eq!(library.owned.warnings, ["Steam rejected the API key"]);
     }
 }

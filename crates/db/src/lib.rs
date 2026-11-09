@@ -12,7 +12,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use pitagames_core::{AntiCheat, Game, GameId, GameMetadata, Profile, Store};
+use pitagames_core::{AntiCheat, Game, GameId, GameMetadata, OwnedGame, Profile, Store};
 use sqlx::sqlite::{
     SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow, SqliteSynchronous,
 };
@@ -175,6 +175,35 @@ pub trait MetadataRepository {
     async fn metadata_rows(&self) -> Result<Vec<StoredMetadata>>;
 
     async fn remove_metadata(&self, game: &GameId) -> Result<bool>;
+}
+
+/// The owned-games cache: what an account owns, installed or not.
+///
+/// One account per store for now, so rows are scoped by store and not by
+/// SteamID; a future multi-account view will add the account column with a
+/// migration rather than guessing now.
+#[async_trait]
+pub trait OwnedRepository {
+    /// Replace the whole cached list for `store` in one transaction.
+    ///
+    /// A purchase adds a row, a refund removes one; replacing (rather than
+    /// upserting) is what keeps the cache equal to the last API answer.
+    /// Returns the number of rows written.
+    async fn replace_owned(
+        &self,
+        store: Store,
+        games: &[OwnedGame],
+        fetched_at: OffsetDateTime,
+    ) -> Result<usize>;
+
+    /// The cached list, ordered case-insensitively by title.
+    async fn owned_games(&self, store: Store) -> Result<Vec<OwnedGame>>;
+
+    /// When the cache was last replaced; `None` when it has never been filled.
+    async fn owned_fetched_at(&self, store: Store) -> Result<Option<OffsetDateTime>>;
+
+    /// Drop the cached list. Returns how many rows were removed.
+    async fn remove_owned(&self, store: Store) -> Result<usize>;
 }
 
 const UPSERT_GAME: &str = r#"
@@ -427,6 +456,93 @@ impl MetadataRepository for Db {
     }
 }
 
+#[async_trait]
+impl OwnedRepository for Db {
+    async fn replace_owned(
+        &self,
+        store: Store,
+        games: &[OwnedGame],
+        fetched_at: OffsetDateTime,
+    ) -> Result<usize> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM owned_games WHERE store = ?")
+            .bind(store.as_str())
+            .execute(&mut *tx)
+            .await?;
+
+        let mut written = 0usize;
+        for game in games {
+            let result = sqlx::query(
+                "INSERT INTO owned_games (store, store_id, title, playtime_secs, last_played, fetched_at)
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT (store, store_id) DO UPDATE SET
+                     title         = excluded.title,
+                     playtime_secs = excluded.playtime_secs,
+                     last_played   = excluded.last_played,
+                     fetched_at    = excluded.fetched_at",
+            )
+            .bind(game.id.store.as_str())
+            .bind(&game.id.store_id)
+            .bind(&game.title)
+            .bind(game.playtime.as_secs() as i64)
+            .bind(game.last_played.map(OffsetDateTime::unix_timestamp))
+            .bind(fetched_at.unix_timestamp())
+            .execute(&mut *tx)
+            .await?;
+            written += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(written)
+    }
+
+    async fn owned_games(&self, store: Store) -> Result<Vec<OwnedGame>> {
+        let rows = sqlx::query(
+            "SELECT store, store_id, title, playtime_secs, last_played
+             FROM owned_games
+             WHERE store = ?
+             ORDER BY title COLLATE NOCASE, store_id",
+        )
+        .bind(store.as_str())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter().map(owned_from_row).collect()
+    }
+
+    async fn owned_fetched_at(&self, store: Store) -> Result<Option<OffsetDateTime>> {
+        let fetched_at: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(fetched_at) FROM owned_games WHERE store = ?")
+                .bind(store.as_str())
+                .fetch_one(&self.pool)
+                .await?;
+        timestamp(fetched_at, "owned_games.fetched_at")
+    }
+
+    async fn remove_owned(&self, store: Store) -> Result<usize> {
+        let result = sqlx::query("DELETE FROM owned_games WHERE store = ?")
+            .bind(store.as_str())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+}
+
+fn owned_from_row(row: &SqliteRow) -> Result<OwnedGame> {
+    let store: String = row.try_get("store")?;
+    let store_id: String = row.try_get("store_id")?;
+    let playtime_secs: i64 = row.try_get("playtime_secs")?;
+
+    Ok(OwnedGame {
+        id: GameId::new(Store::from_str(&store)?, store_id),
+        title: row.try_get("title")?,
+        playtime: Duration::from_secs(u64::try_from(playtime_secs).map_err(|_| Error::Data {
+            column: "owned_games.playtime_secs",
+            message: format!("negative value {playtime_secs}"),
+        })?),
+        last_played: timestamp(row.try_get("last_played")?, "owned_games.last_played")?,
+    })
+}
+
 fn game_from_row(row: &SqliteRow) -> Result<Game> {
     let store: String = row.try_get("store")?;
     let store_id: String = row.try_get("store_id")?;
@@ -483,16 +599,16 @@ fn metadata_from_row(row: &SqliteRow) -> Result<StoredMetadata> {
         })?;
 
     let expected = GameId::new(Store::from_str(&store)?, store_id);
-    if let Some(metadata) = &metadata {
-        if metadata.game != expected {
-            return Err(Error::Data {
-                column: "game_metadata.payload_json",
-                message: format!(
-                    "payload identifies {} / {:?}, row is {} / {:?}",
-                    metadata.game.store, metadata.game.store_id, expected.store, expected.store_id
-                ),
-            });
-        }
+    if let Some(metadata) = &metadata
+        && metadata.game != expected
+    {
+        return Err(Error::Data {
+            column: "game_metadata.payload_json",
+            message: format!(
+                "payload identifies {} / {:?}, row is {} / {:?}",
+                metadata.game.store, metadata.game.store_id, expected.store, expected.store_id
+            ),
+        });
     }
 
     Ok(StoredMetadata {
@@ -599,8 +715,8 @@ mod tests {
     use super::*;
     use pitagames_core::{
         Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, ModelSource,
-        NeuralRendering, NrBackend, NrModel, NrProcessing, NrRoute, PkgArch, ProtonRef, Upscaler,
-        WrapperChain, WrapperStep,
+        NeuralRendering, NrBackend, NrModel, NrProcessing, NrRoute, OwnedGame, PkgArch, ProtonRef,
+        Upscaler, WrapperChain, WrapperStep,
     };
     use std::collections::BTreeMap;
 
@@ -1037,5 +1153,136 @@ mod tests {
 
         let error = db.games().await.unwrap_err();
         assert!(matches!(error, Error::UnknownStore(_)), "{error}");
+    }
+
+    fn owned(app_id: &str, title: &str, minutes: u64) -> OwnedGame {
+        let mut game = OwnedGame::new(GameId::new(Store::Steam, app_id), title);
+        game.playtime = Duration::from_secs(minutes * 60);
+        game
+    }
+
+    #[tokio::test]
+    async fn owned_games_round_trip_and_are_sorted() {
+        let db = Db::open_in_memory().await.unwrap();
+        let fetched_at = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let mut portal = owned("620", "portal 2", 412);
+        portal.last_played = Some(OffsetDateTime::from_unix_timestamp(1_710_000_000).unwrap());
+
+        let count = db
+            .replace_owned(
+                Store::Steam,
+                &[
+                    owned("570", "Dota 2", 0),
+                    portal.clone(),
+                    owned("400", "Half-Life", 5),
+                ],
+                fetched_at,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(count, 3);
+        let games = db.owned_games(Store::Steam).await.unwrap();
+        assert_eq!(
+            games
+                .iter()
+                .map(|game| game.title.as_str())
+                .collect::<Vec<_>>(),
+            ["Dota 2", "Half-Life", "portal 2"]
+        );
+        assert_eq!(games[2], portal);
+        assert_eq!(
+            db.owned_fetched_at(Store::Steam).await.unwrap(),
+            Some(fetched_at)
+        );
+        assert_eq!(
+            db.owned_fetched_at(Store::Gog).await.unwrap(),
+            None,
+            "no cache for a store that was never fetched"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_drops_games_no_longer_owned() {
+        let db = Db::open_in_memory().await.unwrap();
+        let first = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+        let second = OffsetDateTime::from_unix_timestamp(1_700_086_400).unwrap();
+
+        db.replace_owned(
+            Store::Steam,
+            &[owned("620", "Portal 2", 10), owned("570", "Dota 2", 0)],
+            first,
+        )
+        .await
+        .unwrap();
+        db.replace_owned(Store::Steam, &[owned("620", "Portal 2", 12)], second)
+            .await
+            .unwrap();
+
+        let games = db.owned_games(Store::Steam).await.unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].playtime, Duration::from_secs(12 * 60));
+        assert_eq!(
+            db.owned_fetched_at(Store::Steam).await.unwrap(),
+            Some(second)
+        );
+    }
+
+    #[tokio::test]
+    async fn an_empty_owned_list_clears_the_cache() {
+        let db = Db::open_in_memory().await.unwrap();
+        let fetched_at = OffsetDateTime::UNIX_EPOCH;
+        db.replace_owned(Store::Steam, &[owned("620", "Portal 2", 10)], fetched_at)
+            .await
+            .unwrap();
+
+        db.replace_owned(Store::Steam, &[], fetched_at)
+            .await
+            .unwrap();
+        assert!(db.owned_games(Store::Steam).await.unwrap().is_empty());
+        assert_eq!(db.owned_fetched_at(Store::Steam).await.unwrap(), None);
+
+        db.replace_owned(Store::Steam, &[owned("620", "Portal 2", 10)], fetched_at)
+            .await
+            .unwrap();
+        assert_eq!(db.remove_owned(Store::Steam).await.unwrap(), 1);
+        assert_eq!(db.remove_owned(Store::Steam).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn the_owned_cache_is_scoped_per_store() {
+        let db = Db::open_in_memory().await.unwrap();
+        let fetched_at = OffsetDateTime::UNIX_EPOCH;
+        let mut gog = owned("1234", "GOG Game", 0);
+        gog.id.store = Store::Gog;
+
+        db.replace_owned(Store::Steam, &[owned("620", "Portal 2", 0)], fetched_at)
+            .await
+            .unwrap();
+        db.replace_owned(Store::Gog, &[gog], fetched_at)
+            .await
+            .unwrap();
+        db.replace_owned(Store::Gog, &[], fetched_at).await.unwrap();
+
+        assert_eq!(db.owned_games(Store::Steam).await.unwrap().len(), 1);
+        assert!(db.owned_games(Store::Gog).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_owned_row_is_reported() {
+        let db = Db::open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO owned_games (store, store_id, title, playtime_secs, fetched_at)
+             VALUES ('steam', '620', 'Portal 2', -5, 0)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let error = db.owned_games(Store::Steam).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Data { column, .. } if column == "owned_games.playtime_secs"),
+            "{error}"
+        );
     }
 }

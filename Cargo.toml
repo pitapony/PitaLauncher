@@ -7,6 +7,7 @@ members = [
     "crates/stores",
     "crates/metadata",
     "crates/platform",
+    "crates/secrets",
     "crates/shim",
     "crates/cli",
     "crates/app",
@@ -15,7 +16,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 
 [workspace.dependencies]
@@ -25,6 +26,7 @@ pitagames-art = { path = "crates/art" }
 pitagames-stores = { path = "crates/stores" }
 pitagames-metadata = { path = "crates/metadata" }
 pitagames-platform = { path = "crates/platform" }
+pitagames-secrets = { path = "crates/secrets" }
 
 anyhow = "1.0"
 async-trait = "0.1"

@@ -16,6 +16,7 @@ use pitagames_core::{
     shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
+use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
 use pitagames_stores::steam::{self, ScanReport};
@@ -52,6 +53,7 @@ fn run() -> Result<()> {
         "profile" => profile(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
+        "steam-account" => steam_account(&args.collect::<Vec<_>>()),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -677,6 +679,236 @@ fn profile(args: &[String]) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Read or manage the Steam Web API key and the account it unlocks.
+///
+/// The key is the only secret PitaGames stores; this command is how it is set
+/// on a headless box, and how a key is checked before the GUI is involved. It
+/// reads and writes through the same `pitagames-secrets` chain the GUI uses, so
+/// `--set-key` here is visible there immediately.
+///
+/// `--refresh` calls `IPlayerService/GetOwnedGames` once and prints the result.
+/// It deliberately does not touch the SQLite cache: the GUI owns that, and a
+/// diagnostic must not leave state behind.
+fn steam_account(args: &[String]) -> Result<()> {
+    let parsed = parse_steam_account_args(args)?;
+    if parsed.help {
+        println!("{}", steam_account_usage());
+        return Ok(());
+    }
+
+    let root = parsed.steam_root.clone().or_else(discover_steam_root);
+
+    if let Some(raw) = parsed.set_key.clone() {
+        let key = if raw == "-" { read_stdin_key()? } else { raw };
+        let key = SteamApiKey::parse(&key).context("not a usable Steam Web API key")?;
+        let store =
+            SteamKeyStore::default_chain().context("no config directory to store the key in")?;
+        let saved = store.save(&key).context("could not store the key")?;
+        for warning in &saved.warnings {
+            eprintln!("warning: {warning}");
+        }
+        println!(
+            "Stored the key in the {} as {}.",
+            saved.backend,
+            key.masked()
+        );
+    }
+
+    if parsed.forget {
+        let store =
+            SteamKeyStore::default_chain().context("no config directory to remove the key from")?;
+        let forgotten = store.forget().context("could not remove the key")?;
+        for warning in &forgotten.warnings {
+            eprintln!("warning: {warning}");
+        }
+        if forgotten.removed {
+            println!("Removed the stored key.");
+        } else {
+            println!("No key was stored.");
+        }
+    }
+
+    let status = match SteamKeyStore::default_chain() {
+        Some(store) => store.load().context("could not read the stored key")?,
+        None => pitagames_secrets::KeyStatus {
+            key: None,
+            backend: None,
+            warnings: vec!["no config directory (HOME and XDG_CONFIG_HOME are unset)".into()],
+        },
+    };
+    let account_id = root.as_deref().and_then(steam::active_user_id);
+    let steam_id = account_id.map(steam::steam_id64);
+    let limit = parsed.limit;
+    let json = parsed.json;
+
+    let owned = if parsed.refresh {
+        let key = status
+            .key
+            .as_ref()
+            .context("no Steam Web API key is configured; run `steam-account --set-key`")?;
+        let steam_id = steam_id
+            .clone()
+            .context("no Steam account found in userdata; sign into Steam once")?;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .context("could not start the async runtime")?;
+        let client = pitagames_metadata::OwnedClient::new()
+            .context("could not build the owned-games client")?;
+        Some(
+            runtime
+                .block_on(client.fetch(key.expose_secret(), &steam_id))
+                .context("the owned-games request failed")?,
+        )
+    } else {
+        None
+    };
+
+    if json {
+        let payload = serde_json::json!({
+            "steam_root": root,
+            "account_id": account_id,
+            "steam_id": steam_id,
+            "configured": status.is_configured(),
+            "backend": status.backend.map(|backend| backend.as_str()),
+            "masked_key": status.key.as_ref().map(SteamApiKey::masked),
+            "warnings": status.warnings,
+            "owned": owned.as_ref().map(|owned| serde_json::json!({
+                "game_count": owned.game_count,
+                "games": owned.games,
+            })),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    match root.as_deref() {
+        Some(root) => println!("Steam root:  {}", root.display()),
+        None => println!("Steam root:  (none found)"),
+    }
+    match (&status.key, status.backend) {
+        (Some(key), Some(backend)) => println!("Key:         {} ({backend})", key.masked()),
+        _ => println!("Key:         not configured — the library is installed-only"),
+    }
+    match (&steam_id, account_id) {
+        (Some(id), Some(account_id)) => {
+            println!("SteamID:     {id} (Steam userdata account {account_id})");
+        }
+        _ => println!("SteamID:     (no account in userdata; sign into Steam once)"),
+    }
+    for warning in &status.warnings {
+        println!("Warning:     {warning}");
+    }
+
+    if let Some(owned) = owned {
+        println!();
+        println!(
+            "Owned games: {} ({} rows returned)",
+            owned.game_count,
+            owned.games.len()
+        );
+        for game in owned.games.iter().take(limit) {
+            println!("  {}  {}", game.id.store_id, game.title);
+        }
+        if owned.games.len() > limit {
+            println!("  …and {} more", owned.games.len() - limit);
+        }
+    }
+
+    Ok(())
+}
+
+/// Read one line from stdin, for `--set-key -`.
+fn read_stdin_key() -> Result<String> {
+    use std::io::Read as _;
+
+    let mut buffer = String::new();
+    std::io::stdin()
+        .read_to_string(&mut buffer)
+        .context("could not read the key from stdin")?;
+    Ok(buffer.trim().to_string())
+}
+
+/// Parsed `steam-account` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SteamAccountArgs {
+    steam_root: Option<PathBuf>,
+    json: bool,
+    set_key: Option<String>,
+    forget: bool,
+    refresh: bool,
+    limit: usize,
+    help: bool,
+}
+
+fn parse_steam_account_args(args: &[String]) -> Result<SteamAccountArgs> {
+    let mut parsed = SteamAccountArgs {
+        limit: 25,
+        ..SteamAccountArgs::default()
+    };
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--forget-key" => parsed.forget = true,
+            "--refresh" => parsed.refresh = true,
+            "--steam-root" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--steam-root requires a path")?;
+                parsed.steam_root = Some(PathBuf::from(value));
+            }
+            "--set-key" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--set-key requires a key, or `-` to read stdin")?;
+                parsed.set_key = Some(value.clone());
+            }
+            "--limit" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--limit requires a number")?;
+                parsed.limit = value
+                    .parse()
+                    .with_context(|| format!("`{value}` is not a number"))?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--steam-root=") => {
+                let value = &arg["--steam-root=".len()..];
+                if value.is_empty() {
+                    bail!("--steam-root requires a path");
+                }
+                parsed.steam_root = Some(PathBuf::from(value));
+            }
+            _ if arg.starts_with("--set-key=") => {
+                let value = &arg["--set-key=".len()..];
+                if value.is_empty() {
+                    bail!("--set-key requires a key, or `-` to read stdin");
+                }
+                parsed.set_key = Some(value.to_string());
+            }
+            _ if arg.starts_with("--limit=") => {
+                let value = &arg["--limit=".len()..];
+                parsed.limit = value
+                    .parse()
+                    .with_context(|| format!("`{value}` is not a number"))?;
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `steam-account`\n\n{}",
+                steam_account_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
 }
 
 /// Read or write one app's Steam launch options.
@@ -1633,7 +1865,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -1714,6 +1946,23 @@ fn compat_tool_usage() -> String {
         .to_string()
 }
 
+fn steam_account_usage() -> String {
+    "USAGE:\n    pitagames-cli steam-account [options]\n\n\
+     OPTIONS:\n    \
+     --steam-root <path>    Steam root to read userdata from (default: auto-detect)\n    \
+     --set-key <key>        Validate and store a Steam Web API key; `-` reads stdin\n    \
+     --forget-key           Remove the stored key from every store\n    \
+     --refresh              Fetch and print the account's owned games (live)\n    \
+     --limit <n>            Titles to print with --refresh (default: 25)\n    \
+     --json                 Print the account state as JSON\n    \
+     -h, --help             Show this help\n\n\
+     The key is validated as 32 hex characters, stored in the desktop keyring when\n\
+     one is available (a 0600 file under the config directory otherwise) and read\n\
+     back in the order environment, keyring, file. It is only ever sent to\n\
+     api.steampowered.com. Create one at steamcommunity.com/dev/apikey."
+        .to_string()
+}
+
 fn metadata_usage() -> String {
     "USAGE:\n    pitagames-cli metadata <appid>... [--language <code>] [--json]\n\n\
      ARGS:\n    \
@@ -1751,6 +2000,48 @@ fn scan_usage() -> String {
 mod tests {
     use super::*;
     use pitagames_stores::{InstallPhase, install::InstallProgress};
+
+    #[test]
+    fn parses_steam_account_actions_and_targets() {
+        let parsed = parse_steam_account_args(&[
+            "--steam-root=/steam".to_string(),
+            "--set-key".to_string(),
+            "-".to_string(),
+            "--refresh".to_string(),
+            "--limit".to_string(),
+            "5".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.steam_root, Some(PathBuf::from("/steam")));
+        assert_eq!(parsed.set_key.as_deref(), Some("-"));
+        assert!(parsed.refresh && parsed.json && !parsed.forget && !parsed.help);
+        assert_eq!(parsed.limit, 5);
+
+        let plain = parse_steam_account_args(&[]).unwrap();
+        assert_eq!(
+            plain,
+            SteamAccountArgs {
+                limit: 25,
+                ..SteamAccountArgs::default()
+            }
+        );
+
+        let forget =
+            parse_steam_account_args(&["--forget-key".to_string(), "--help".to_string()]).unwrap();
+        assert!(forget.forget && forget.help);
+
+        let error = parse_steam_account_args(&["--limit".to_string(), "many".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("not a number"), "{error}");
+
+        let error = parse_steam_account_args(&["extra".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected argument"), "{error}");
+    }
 
     #[test]
     fn parses_launch_options_actions_and_targets() {
