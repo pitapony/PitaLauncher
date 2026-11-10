@@ -7,6 +7,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -15,6 +16,7 @@ use pitagames_core::{
     Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
     shim_launch_options, shim_profile_path, steam_install,
 };
+use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::compat_tool::CompatTool;
@@ -50,6 +52,7 @@ fn run() -> Result<()> {
         "install" => install(&args.collect::<Vec<_>>()),
         "metadata" => metadata(&args.collect::<Vec<_>>()),
         "proton" => proton(&args.collect::<Vec<_>>()),
+        "compat" => compat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
@@ -1702,6 +1705,334 @@ fn display_compat(tool: Option<&CompatTool>) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// compat
+// ---------------------------------------------------------------------------
+
+/// Read the shipped compatibility database.
+///
+/// With no arguments, list every entry. With `<store> <id>`, print one entry in
+/// detail. `--shipped`/`--user` point at fixture directories instead of the
+/// installed database, so the loader and its merge rules can be exercised
+/// without a package install.
+fn compat(args: &[String]) -> Result<()> {
+    let parsed = parse_compat_args(args)?;
+    if parsed.help {
+        println!("{}", compat_usage());
+        return Ok(());
+    }
+
+    let shipped = if parsed.shipped.is_empty() {
+        pitagames_platform::compat::default_shipped_dirs()
+    } else {
+        parsed.shipped.clone()
+    };
+    let user = if parsed.user.is_empty() {
+        pitagames_platform::compat::default_user_dirs()
+    } else {
+        parsed.user.clone()
+    };
+
+    let db = CompatDb::load_from(&shipped, &user);
+    for warning in db.warnings() {
+        eprintln!("warning: {warning}");
+    }
+
+    let identity = match parsed.positional.as_slice() {
+        [] => None,
+        [store, id] => Some(GameId::new(
+            Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+            id.clone(),
+        )),
+        [_] => bail!(
+            "expected `<store> <id>` or no positional arguments\n\n{}",
+            compat_usage()
+        ),
+        _ => bail!("too many positional arguments\n\n{}", compat_usage()),
+    };
+
+    match identity {
+        Some(id) => {
+            let entry = db.get(&id).with_context(|| {
+                format!(
+                    "no compat entry for {}:{} in {} file(s)",
+                    id.store.as_str(),
+                    id.store_id,
+                    db.files().len()
+                )
+            })?;
+            if parsed.json {
+                let payload = serde_json::json!({ "entry": entry, "warnings": db.warnings() });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                for line in compat_detail_lines(entry) {
+                    println!("{line}");
+                }
+            }
+        }
+        None => {
+            if parsed.json {
+                let entries: Vec<&CompatEntry> = db.entries().collect();
+                let payload = serde_json::json!({ "entries": entries, "warnings": db.warnings() });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                for line in compat_list_lines(&db) {
+                    println!("{line}");
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed `compat` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CompatArgs {
+    positional: Vec<String>,
+    shipped: Vec<PathBuf>,
+    user: Vec<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_compat_args(args: &[String]) -> Result<CompatArgs> {
+    let mut parsed = CompatArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--shipped" | "--user" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                append_compat_dir(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--shipped=") || arg.starts_with("--user=") => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                append_compat_dir(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
+            other => bail!(
+                "unexpected argument `{other}` for `compat`\n\n{}",
+                compat_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn append_compat_dir(parsed: &mut CompatArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--shipped" => parsed.shipped.push(PathBuf::from(value)),
+        "--user" => parsed.user.push(PathBuf::from(value)),
+        other => bail!("internal error: unknown compat flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn compat_list_lines(db: &CompatDb) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Compat DB: {} entries from {} file(s)",
+        db.len(),
+        db.files().len()
+    )];
+    if db.is_empty() {
+        lines.push("No entries loaded.".to_string());
+        lines.push(
+            "Pass --shipped <dir> to point at a checkout, or install the package data.".to_string(),
+        );
+        return lines;
+    }
+
+    let width = db
+        .entries()
+        .map(|entry| entry.title.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(24);
+
+    for entry in db.entries() {
+        let verified = if entry.verified.is_empty() {
+            "unverified".to_string()
+        } else {
+            entry
+                .verified
+                .iter()
+                .map(|arch| arch.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let supported = if entry.upscaling.supported.is_empty() {
+            "-".to_string()
+        } else {
+            entry
+                .upscaling
+                .supported
+                .iter()
+                .map(|api| api.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        let rdna4 = entry
+            .recommended(pitagames_platform::compat::Arch::Rdna4)
+            .map(|id| id.as_str())
+            .unwrap_or("-");
+        lines.push(format!(
+            "  {:<16} {:<width$}  {:<10}  {:<16}  {rdna4}",
+            format!("{}:{}", entry.id.store.as_str(), entry.id.store_id),
+            fit(&entry.title, width),
+            verified,
+            supported,
+            width = width,
+        ));
+    }
+    lines
+}
+
+fn compat_detail_lines(entry: &CompatEntry) -> Vec<String> {
+    let mut lines = vec![format!(
+        "{}  [{}:{}]",
+        entry.title,
+        entry.id.store.as_str(),
+        entry.id.store_id
+    )];
+
+    lines.push(format!("Anti-cheat:   {}", entry.anticheat.as_str()));
+    if let Some(engine) = &entry.engine {
+        lines.push(format!("Engine:       {engine}"));
+    }
+    let verified = if entry.verified.is_empty() {
+        "not tested by us".to_string()
+    } else {
+        entry
+            .verified
+            .iter()
+            .map(|arch| arch.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(format!("Verified:     {verified}"));
+
+    lines.push(String::new());
+    lines.push("Upscaling:".to_string());
+    let supported = if entry.upscaling.supported.is_empty() {
+        "(none listed)".to_string()
+    } else {
+        entry
+            .upscaling
+            .supported
+            .iter()
+            .map(|api| api.label())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    lines.push(format!("  supported:     {supported}"));
+    if !entry.upscaling.recommended.is_empty() {
+        lines.push("  recommended:".to_string());
+        for (arch, id) in &entry.upscaling.recommended {
+            lines.push(format!("    {} -> {}", arch.label(), id.as_str()));
+        }
+    }
+    if let Some(dll) = entry.upscaling.preferred_dll {
+        lines.push(format!("  preferred dll: {}", dll.file_name()));
+    }
+    if let Some(helixsr) = &entry.upscaling.helixsr {
+        let modes = helixsr
+            .modes
+            .iter()
+            .map(|mode| mode.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        match helixsr.preferred {
+            Some(preferred) => lines.push(format!(
+                "  helixsr:       {modes} (preferred {})",
+                preferred.label()
+            )),
+            None => lines.push(format!("  helixsr:       {modes}")),
+        }
+    }
+    if let Some(notes) = &entry.upscaling.notes {
+        lines.push(format!("  notes:         {notes}"));
+    }
+
+    if !entry.runtime.wrappers.is_empty()
+        || !entry.runtime.env.is_empty()
+        || !entry.runtime.known_issues.is_empty()
+    {
+        lines.push(String::new());
+        lines.push("Runtime:".to_string());
+        if !entry.runtime.wrappers.is_empty() {
+            let wrappers = entry
+                .runtime
+                .wrappers
+                .iter()
+                .map(|wrapper| wrapper.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("  wrappers:      {wrappers}"));
+        }
+        for (key, value) in &entry.runtime.env {
+            lines.push(format!("  env:           {key}={value}"));
+        }
+        for issue in &entry.runtime.known_issues {
+            lines.push(format!("  known issue:   {issue}"));
+        }
+    }
+
+    if let Some(neural) = &entry.neural_rendering {
+        lines.push(String::new());
+        lines.push("Neural rendering:".to_string());
+        lines.push(format!("  backend:       {}", neural.backend.label()));
+        lines.push(format!("  route:         {}", neural.route.describe()));
+        if let Some(mesa) = neural.min_mesa {
+            lines.push(format!("  min mesa:      {mesa}"));
+        }
+        if let Some(version) = &neural.dlssnr_min_version {
+            lines.push(format!("  dlssnr:        {version}"));
+        }
+        for (arch, scale) in &neural.model_scale_default {
+            lines.push(format!("  model scale:   {} = {scale}%", arch.label()));
+        }
+        lines.push(format!(
+            "  requires 64-bit: {}",
+            if neural.requires_64bit { "yes" } else { "no" }
+        ));
+        if let Some(notes) = &neural.notes {
+            lines.push(format!("  notes:         {notes}"));
+        }
+    }
+
+    lines
+}
+
+fn compat_usage() -> String {
+    "USAGE:\n    pitagames-cli compat [<store> <id>] [--shipped <dir>]... [--user <dir>]... [--json]\n\n\
+     ARGS:\n    \
+     <store> <id>           Show one entry, e.g. `compat steam 1091500`\n\n\
+     OPTIONS:\n    \
+     --shipped <dir>        Read shipped entries from this directory (repeatable)\n    \
+     --user <dir>           Read user overrides from this directory (repeatable)\n    \
+     --json                 Print entries as JSON\n    \
+     -h, --help             Show this help\n\n\
+     With no arguments every entry is listed. Without --shipped/--user the default\n\
+     locations are used: /usr/share/pitagames/compat, a copy under the data\n\
+     directory, then the user overrides in $XDG_CONFIG_HOME/pitagames/compat.\n\
+     Set PITAGAMES_COMPAT_DIR to replace the shipped directories."
+        .to_string()
+}
+
 /// Run a `LaunchSpec` without a shell.
 fn spawn(spec: &LaunchSpec) -> std::io::Result<()> {
     let mut command = Command::new(&spec.program);
@@ -1865,7 +2196,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -2381,5 +2712,102 @@ mod tests {
                 .any(|line| line.contains("No Proton installations"))
         );
         assert!(!lines.iter().any(|line| line.contains("Auto selects")));
+    }
+
+    #[test]
+    fn parses_compat_arguments() {
+        let parsed = parse_compat_args(&[
+            "steam".to_string(),
+            "1091500".to_string(),
+            "--shipped".to_string(),
+            "/compat".to_string(),
+            "--user=/overrides".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.positional, ["steam", "1091500"]);
+        assert_eq!(parsed.shipped, vec![PathBuf::from("/compat")]);
+        assert_eq!(parsed.user, vec![PathBuf::from("/overrides")]);
+        assert!(parsed.json && !parsed.help);
+
+        let list = parse_compat_args(&[]).unwrap();
+        assert_eq!(list, CompatArgs::default());
+
+        for args in [vec!["--shipped"], vec!["--shipped="], vec!["--bogus"]] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_compat_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        assert!(parse_compat_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn renders_one_compat_entry() {
+        let entry = CompatEntry::from_toml(
+            r#"
+[game]
+store = "steam"
+store_id = "1091500"
+title = "Cyberpunk 2077"
+engine = "REDengine"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr3"]
+recommended = { rdna4 = "dlss_to_fsr4" }
+preferred_dll = "dbghelp.dll"
+
+[neural_rendering]
+min_mesa = "26.2"
+model_scale_default = { rdna4 = 100 }
+"#,
+        )
+        .unwrap();
+
+        let lines = compat_detail_lines(&entry);
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("Cyberpunk 2077  [steam:1091500]"),
+            "{joined}"
+        );
+        assert!(joined.contains("Engine:       REDengine"), "{joined}");
+        assert!(
+            joined.contains("RDNA 4 (RX 9000) -> dlss_to_fsr4"),
+            "{joined}"
+        );
+        assert!(joined.contains("preferred dll: dbghelp.dll"), "{joined}");
+        assert!(joined.contains("Neural rendering:"), "{joined}");
+        assert!(joined.contains("min mesa:      26.2"), "{joined}");
+    }
+
+    #[test]
+    fn lists_a_compat_database_and_reports_an_empty_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let shipped = dir.path().join("shipped");
+        std::fs::create_dir_all(&shipped).unwrap();
+        std::fs::write(
+            shipped.join("a.toml"),
+            r#"
+[game]
+store = "steam"
+store_id = "1"
+title = "Game"
+verified = ["rdna4"]
+"#,
+        )
+        .unwrap();
+
+        let db = CompatDb::load_from(&[shipped], &[]);
+        let lines = compat_list_lines(&db);
+        assert!(lines[0].contains("1 entries from 1 file(s)"), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("steam:1")));
+
+        let empty = CompatDb::load_from(&[dir.path().join("missing")], &[]);
+        assert!(
+            compat_list_lines(&empty)
+                .iter()
+                .any(|line| line.contains("No entries loaded"))
+        );
     }
 }

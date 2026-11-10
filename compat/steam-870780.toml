@@ -1,0 +1,23 @@
+# Control is a good NR showcase: it is D3D12 with DLSS, which the OptiScaler
+# route needs.
+[game]
+store = "steam"
+store_id = "870780"
+title = "Control Ultimate Edition"
+engine = "Northlight"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr2"]
+recommended = { rdna4 = "dlss_to_fsr4", rdna1 = "hlx_dlss", rtx = "dlss_native", arc = "dlss_to_xess" }
+preferred_dll = "dbghelp.dll"
+helixsr = { modes = ["scaler"], preferred = "scaler" }
+
+[neural_rendering]
+backend = "auto"
+route = "optiscaler"
+min_mesa = "26.2"
+dlssnr_min_version = "0.0.8"
+model_scale_default = { rdna4 = 100, rdna3 = 50 }
+requires_64bit = true

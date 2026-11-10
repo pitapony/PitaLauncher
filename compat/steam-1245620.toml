@@ -1,0 +1,15 @@
+# No native DLSS/FSR hook; the compositor is the honest fallback.
+[game]
+store = "steam"
+store_id = "1245620"
+title = "ELDEN RING"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = []
+recommended = { rdna4 = "system_fsr", rdna1 = "system_fsr", rtx = "native", arc = "native" }
+notes = "No native upscaler; gamescope system FSR or an OptiScaler hook is the only path"
+
+[runtime]
+known_issues = ["Uncapped framerate distorts physics; cap to 60 or 120"]

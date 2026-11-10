@@ -1,0 +1,28 @@
+# Cyberpunk 2077 — the reference title for the RDNA 4 path: FSR 4 via
+# OptiScaler and, optionally, DLSSNR neural rendering on top.
+[game]
+store = "steam"
+store_id = "1091500"
+title = "Cyberpunk 2077"
+engine = "REDengine"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr3", "xess"]
+recommended = { rdna4 = "dlss_to_fsr4", rdna1 = "hlx_dlss", rtx = "dlss_native", arc = "dlss_to_xess" }
+preferred_dll = "dbghelp.dll"
+helixsr = { modes = ["scaler", "fsr31_dropin"], preferred = "scaler" }
+notes = "FSR 4 needs PROTON_FSR4_UPGRADE >= 4.0.3 for MLFG"
+
+[runtime]
+known_issues = ["HDR + gamescope needs --hdr-enabled"]
+
+[neural_rendering]
+backend = "auto"
+route = "optiscaler"
+min_mesa = "26.2"
+dlssnr_min_version = "0.0.8"
+model_scale_default = { rdna4 = 100, rdna3 = 50 }
+requires_64bit = true
+notes = "End = NR Control, Insert = OptiScaler"

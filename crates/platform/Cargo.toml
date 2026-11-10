@@ -10,6 +10,7 @@ description = "Host platform detection for PitaGames: Proton discovery, GPU and 
 pitagames-core.workspace = true
 serde.workspace = true
 thiserror.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true

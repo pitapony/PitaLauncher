@@ -6,6 +6,7 @@
 //! which the GUI, the CLI and the shim must all agree on byte for byte.
 
 pub mod launch;
+pub mod lock;
 pub mod metadata;
 pub mod paths;
 pub mod profile;
@@ -16,6 +17,7 @@ pub use launch::{
     LaunchSpec, SHIM_PROGRAM, TokenizeError, flatten_wrappers, render_command, shell_quote,
     shim_launch_options, steam_install, steam_run, strip_shim_launch_options, tokenize_command,
 };
+pub use lock::{InstanceLock, LockError};
 pub use metadata::{AppKind, GameMetadata, Platforms};
 pub use profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, ModelSource, NeuralRendering,

@@ -1,0 +1,13 @@
+[game]
+store = "steam"
+store_id = "668580"
+title = "Atomic Heart"
+engine = "Unreal Engine 4"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr2", "xess"]
+recommended = { rdna4 = "dlss_to_fsr4", rdna1 = "hlx_dlss", rtx = "dlss_native", arc = "xess_upgrade" }
+preferred_dll = "dxgi.dll"
+helixsr = { modes = ["scaler"], preferred = "scaler" }

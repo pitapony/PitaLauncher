@@ -1,0 +1,13 @@
+[game]
+store = "steam"
+store_id = "1643320"
+title = "S.T.A.L.K.E.R. 2: Heart of Chornobyl"
+engine = "Unreal Engine 5"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr3", "xess"]
+recommended = { rdna4 = "dlss_to_fsr4", rdna1 = "hlx_dlss", rtx = "dlss_native", arc = "xess_upgrade" }
+preferred_dll = "dxgi.dll"
+helixsr = { modes = ["scaler"], preferred = "scaler" }

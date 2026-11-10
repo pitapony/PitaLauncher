@@ -50,6 +50,15 @@ pub fn profiles_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("profiles"))
 }
 
+/// `<XDG_DATA_HOME>/pitagames/pitagames.lock`: the single-instance lock file.
+///
+/// It sits next to the database because that is the resource two instances would
+/// race over. The file is never deleted and only ever carries the holder's pid;
+/// the lock itself is the `flock`, not the file's existence.
+pub fn lock_file() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("pitagames.lock"))
+}
+
 /// `<XDG_DATA_HOME>/pitagames/logs`.
 pub fn logs_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("logs"))
@@ -59,6 +68,16 @@ pub fn logs_dir() -> Option<PathBuf> {
 /// restore journals.
 pub fn steam_backup_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("backups").join("steam"))
+}
+
+/// `<XDG_CONFIG_HOME>/pitagames/compat`: user overrides of the shipped compat DB.
+///
+/// A file here with the same game id as a shipped entry overrides it field by
+/// field; a game with no shipped entry is added to the database. The shipped
+/// entries live at `/usr/share/pitagames/compat` (and a synced copy under the
+/// data directory), never here.
+pub fn compat_dir() -> Option<PathBuf> {
+    config_dir().map(|base| base.join("compat"))
 }
 
 /// Candidate Steam roots, most likely first, without checking existence.

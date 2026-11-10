@@ -1,0 +1,13 @@
+[game]
+store = "steam"
+store_id = "2322010"
+title = "God of War Ragnarök"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr31", "xess"]
+recommended = { rdna4 = "fsr4_upgrade", rdna1 = "hlx_fsr4", rtx = "dlss_native", arc = "xess_upgrade" }
+preferred_dll = "dxgi.dll"
+helixsr = { modes = ["scaler", "fsr31_dropin"], preferred = "fsr31_dropin" }
+notes = "Native FSR 3.1 upgrades in place; the drop-in is the cleanest RDNA 1 path"

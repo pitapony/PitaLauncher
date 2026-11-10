@@ -1,0 +1,12 @@
+[game]
+store = "steam"
+store_id = "1895880"
+title = "Ratchet & Clank: Rift Apart"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr31", "xess"]
+recommended = { rdna4 = "fsr4_upgrade", rdna1 = "hlx_fsr4", rtx = "dlss_native", arc = "xess_upgrade" }
+preferred_dll = "dxgi.dll"
+helixsr = { modes = ["scaler", "fsr31_dropin"], preferred = "fsr31_dropin" }

@@ -16,7 +16,9 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+# 1.89 for `std::fs::File::try_lock` (the single-instance lock); keyring 4 set
+# the old 1.88 floor and edition 2024 gives let-chains.
+rust-version = "1.89"
 license = "MIT"
 
 [workspace.dependencies]
@@ -33,6 +35,7 @@ async-trait = "0.1"
 axum = "0.8"
 notify = "8"
 rand = "0.8"
+toml = "0.8"
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",

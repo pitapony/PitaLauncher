@@ -30,6 +30,7 @@ mod art;
 mod detail;
 mod downloads;
 mod format;
+mod grid;
 mod library;
 mod persist;
 mod runtime;
@@ -37,6 +38,11 @@ mod steam_account;
 mod wrappers;
 
 fn main() {
+    // One launcher at a time. Two instances would scan the same libraries and
+    // race over Steam's config files; the lock is held for the whole run and
+    // released by the kernel when this process exits.
+    let _lock = take_instance_lock();
+
     // A desktop window, not fullscreen: the 10-foot console shell is M2.5.
     let window = dioxus::desktop::WindowBuilder::new()
         .with_title("PitaGames")
@@ -45,6 +51,36 @@ fn main() {
     dioxus::LaunchBuilder::desktop()
         .with_cfg(dioxus::desktop::Config::new().with_window(window))
         .launch(App);
+}
+
+/// Take the single-instance lock, or exit if another launcher holds it.
+///
+/// A missing data directory (`HOME` unset) is a warning, not a hard stop: the
+/// launcher still runs, it just cannot lock. A genuine I/O failure is fatal —
+/// continuing unlocked would allow the very race the lock exists to prevent.
+fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
+    let Some(path) = pitagames_core::paths::lock_file() else {
+        eprintln!(
+            "[pitagames] no data directory (HOME is unset); running without the single-instance lock"
+        );
+        return None;
+    };
+
+    match pitagames_core::InstanceLock::acquire(&path) {
+        Ok(lock) => Some(lock),
+        Err(pitagames_core::LockError::AlreadyRunning { path, pid }) => {
+            match pid {
+                Some(pid) => eprintln!("PitaGames is already running (pid {pid})."),
+                None => eprintln!("PitaGames is already running."),
+            }
+            eprintln!("Another instance holds {}.", path.display());
+            std::process::exit(0);
+        }
+        Err(error) => {
+            eprintln!("[pitagames] could not take the single-instance lock: {error}");
+            std::process::exit(1);
+        }
+    }
 }
 
 /// Which top-level list the window shows.
@@ -110,7 +146,7 @@ fn App() -> Element {
     // after it opens shows up without a second copy of the game.
     let mut selected_game = use_signal(|| None::<GameId>);
     let mut query = use_signal(String::new);
-    let mut notice = use_signal(String::new);
+    let notice = use_signal(String::new);
     // Art is optional: until the cache/server is up, cards show placeholders.
     let mut art_state = use_signal(|| None::<std::sync::Arc<art::ArtContext>>);
     // Bumped whenever a new image lands on disk; re-renders the <img> sources.
@@ -310,7 +346,6 @@ fn App() -> Element {
     let nothing_tracked = downloads_snapshot.rows().is_empty();
     let has_finished = !finished_downloads.is_empty();
     let current_view = view();
-    let events_sender: Option<UnboundedSender<DownloadEvent>> = (*events.read()).clone();
     let db_handle = (*db_state.read()).clone();
     let owned_summary = snapshot
         .as_ref()
@@ -334,213 +369,20 @@ fn App() -> Element {
         }
     };
 
-    let library_body = match snapshot {
-        None => rsx! {
-            div {
-                style: "padding:32px;color:#78788a;",
-                "Scanning Steam libraries…"
-            }
-        },
-        Some(library) => {
-            let needle = query.read().to_string();
-            let matches: Vec<library::GameEntry> =
-                library.filtered(&needle).into_iter().cloned().collect();
-            let libraries = library.libraries.clone();
-            let warning_count = library.warnings.len();
-            let metadata_notes = library.metadata_warnings.clone();
-            let metadata_warning_count = metadata_notes.len();
-            let has_games = !library.games.is_empty();
-
-            rsx! {
-                if warning_count > 0 {
-                    div {
-                        style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:12px;",
-                        "{warning_count} scan warning(s) — run `pitagames-cli scan --json` for detail."
-                    }
-                }
-
-                if metadata_warning_count > 0 {
-                    div {
-                        style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;display:flex;flex-direction:column;gap:4px;",
-                        for note in metadata_notes.iter().take(2) {
-                            span { "{note}" }
-                        }
-                        if metadata_warning_count > 2 {
-                            span { "…and {metadata_warning_count - 2} more metadata warning(s)." }
-                        }
-                    }
-                }
-
-                if !has_games {
-                    div {
-                        style: "padding:48px 32px;color:#78788a;",
-                        "No installed Steam games found."
-                    }
-                } else if matches.is_empty() {
-                    div {
-                        style: "padding:48px 32px;color:#78788a;",
-                        "Nothing matches \"{query}\"."
-                    }
-                } else {
-                    div {
-                        style: "display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:16px;padding:0 32px 40px;align-content:start;",
-                        for entry in matches {
-                            {
-                                // Every closure below needs owned data: rsx
-                                // children outlive this iteration.
-                                let app_id = entry.app_id().to_string();
-                                let title = entry.title().to_string();
-                                let game_id = entry.game.id.clone();
-                                let art_url = art_context.as_ref().and_then(|context| {
-                                    let metadata = entry.store_metadata();
-                                    context.url_for(
-                                        &[
-                                            metadata
-                                                .and_then(|metadata| metadata.capsule_image.as_deref()),
-                                            metadata
-                                                .and_then(|metadata| metadata.header_image.as_deref()),
-                                        ],
-                                        pitagames_art::ArtSize::Grid,
-                                    )
-                                });
-                                // Placeholder letter while the art downloads: an
-                                // empty box would look like a missing image.
-                                let initial = title
-                                    .chars()
-                                    .next()
-                                    .map(|first| first.to_uppercase().to_string())
-                                    .unwrap_or_default();
-                                let playtime = entry.playtime();
-                                let meta = entry.meta_line();
-                                let status = entry.status_label().unwrap_or_default();
-                                let can_play = entry.can_play();
-                                let show_play = entry.game.installed;
-                                let can_install = entry.can_install();
-                                let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
-                                    "Update"
-                                } else {
-                                    "Install"
-                                };
-                                let tracked = downloads_snapshot
-                                    .get(&app_id)
-                                    .is_some_and(|row| !row.state.is_finished());
-
-                                let play_id = app_id.clone();
-                                let play_db = db_handle.clone();
-                                let play_game_id = game_id.clone();
-                                let install_id = app_id.clone();
-                                let install_title = title.clone();
-                                let install_sender = events_sender.clone();
-                                let install_enabled = install_sender.is_some();
-                                let install_libraries = libraries.clone();
-                                let open_id = game_id.clone();
-
-                                rsx! {
-                                    div {
-                                        key: "{app_id}",
-                                        onclick: move |_| {
-                                            selected_game.set(Some(open_id.clone()));
-                                            view.set(View::Detail);
-                                        },
-                                        style: "display:flex;flex-direction:column;gap:6px;padding:14px;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;",
-
-                                        if let Some(url) = art_url {
-                                            img {
-                                                src: "{url}",
-                                                alt: "",
-                                                style: "width:100%;aspect-ratio:231/87;object-fit:cover;border-radius:8px;display:block;background:#2c2c38;",
-                                            }
-                                        } else {
-                                            div {
-                                                style: "width:100%;aspect-ratio:231/87;border-radius:8px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#26263a,#191922);color:#414158;font-size:26px;font-weight:600;",
-                                                "{initial}"
-                                            }
-                                        }
-
-                                        div {
-                                            style: "font-size:14px;font-weight:600;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
-                                            title: "{title}",
-                                            "{title}"
-                                        }
-
-                                        if !status.is_empty() {
-                                            div {
-                                                style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#d8b070;",
-                                                "{status}"
-                                            }
-                                        }
-
-                                        div {
-                                            style: "font-size:11px;color:#78788a;",
-                                            "{meta}"
-                                        }
-
-                                        div {
-                                            style: "display:flex;gap:8px;margin-top:auto;padding-top:8px;",
-
-                                            if show_play {
-                                                button {
-                                                    disabled: !can_play,
-                                                onclick: move |event| {
-                                                    // The card itself opens the detail page;
-                                                    // the buttons below only do their own action.
-                                                    event.stop_propagation();
-                                                    // Pointer clicks are M0-only; controller
-                                                    // navigation through gilrs arrives in M2.5.
-                                                    notice.set(String::new());
-                                                    if let Err(error) = library::spawn_steam(&play_id) {
-                                                        notice.set(format!("Could not ask Steam to run appid {play_id}: {error}"));
-                                                        return;
-                                                    }
-                                                    if let Some(db) = play_db.clone() {
-                                                        let id = play_game_id.clone();
-                                                        spawn(async move {
-                                                            if let Err(error) = persist::record_launch(&db, &id, playtime).await {
-                                                                notice.set(error);
-                                                            }
-                                                        });
-                                                    }
-                                                },
-                                                    style: button_style(can_play, "#2e3a56", "#ffffff"),
-                                                    "Play"
-                                                }
-                                            }
-
-                                            if can_install {
-                                                button {
-                                                    disabled: !install_enabled,
-                                                    onclick: move |event| {
-                                                        event.stop_propagation();
-                                                        notice.set(String::new());
-                                                        if let Err(error) = library::spawn_install(&install_id) {
-                                                            notice.set(format!("Could not ask Steam to install appid {install_id}: {error}"));
-                                                            return;
-                                                        }
-                                                        match install_sender.as_ref() {
-                                                            Some(sender) => {
-                                                                start_download(board, sender, &install_libraries, &install_id, &install_title);
-                                                                view.set(View::Downloads);
-                                                            }
-                                                            None => notice.set("Downloads are not ready yet; try again in a moment.".to_string()),
-                                                        }
-                                                    },
-                                                    style: button_style(install_enabled, "#243024", "#d8e8d0"),
-                                                    "{install_label}"
-                                                }
-                                            } else if tracked {
-                                                span {
-                                                    style: "flex:1;align-self:center;font-size:11px;color:#7a9ad6;",
-                                                    "in downloads"
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    // The grid is a child component so scroll-position changes re-render only
+    // it, never the whole window (and never clone the library per scroll tick).
+    let library_body = rsx! {
+        LibraryGrid {
+            library: library_state,
+            query,
+            art_state,
+            art_revision,
+            board,
+            view,
+            selected_game,
+            notice,
+            events,
+            db: db_state,
         }
     };
 
@@ -665,7 +507,7 @@ fn App() -> Element {
 
     rsx! {
         div {
-            style: "display:flex;flex-direction:column;min-height:100vh;background:#14141c;color:#e8e8ee;font-family:sans-serif;",
+            style: "display:flex;flex-direction:column;height:100vh;overflow:hidden;background:#14141c;color:#e8e8ee;font-family:sans-serif;",
 
             header {
                 style: "display:flex;align-items:baseline;gap:24px;padding:20px 32px 12px;",
@@ -724,30 +566,355 @@ fn App() -> Element {
             }
 
             if current_view == View::Detail {
-                if let Some(entry) = detail_entry {
-                    detail::Detail {
-                        key: "{entry.app_id()}",
-                        entry,
-                        db: detail::DbHandle(db_handle.clone()),
-                        view,
-                        hero: hero_url,
-                        steam_root: steam_root.clone(),
-                        proton: proton_report.clone(),
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    if let Some(entry) = detail_entry {
+                        detail::Detail {
+                            key: "{entry.app_id()}",
+                            entry,
+                            db: detail::DbHandle(db_handle.clone()),
+                            view,
+                            hero: hero_url,
+                            steam_root: steam_root.clone(),
+                            proton: proton_report.clone(),
+                        }
                     }
                 }
             } else if current_view == View::Downloads {
-                {downloads_body}
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    {downloads_body}
+                }
             } else if current_view == View::Account {
-                account::AccountView {
-                    account: account_state,
-                    owned: owned_summary,
-                    steam_root: steam_root.clone(),
-                    db: detail::DbHandle(db_handle.clone()),
-                    metadata: metadata_queue,
-                    library: library_state,
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    account::AccountView {
+                        account: account_state,
+                        owned: owned_summary,
+                        steam_root: steam_root.clone(),
+                        db: detail::DbHandle(db_handle.clone()),
+                        metadata: metadata_queue,
+                        library: library_state,
+                    }
                 }
             } else {
                 {library_body}
+            }
+        }
+    }
+}
+
+/// Props for [`LibraryGrid`].
+///
+/// Every field is a `Signal` so the grid can read state without cloning it and
+/// write the pieces it owns (selection, view, notices) without callbacks.
+#[derive(Props, Clone, PartialEq)]
+struct LibraryGridProps {
+    pub library: Signal<Option<Library>>,
+    pub query: Signal<String>,
+    pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
+    pub art_revision: Signal<u64>,
+    pub board: Signal<Downloads>,
+    pub view: Signal<View>,
+    pub selected_game: Signal<Option<GameId>>,
+    pub notice: Signal<String>,
+    pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
+    pub db: Signal<Option<pitagames_db::Db>>,
+}
+
+/// The windowed library grid.
+///
+/// Scroll offset and viewport size live here rather than in `App`, so a scroll
+/// tick re-renders this component alone instead of cloning the whole library
+/// (and rebuilding the header) on every event. Only the rows inside the
+/// viewport plus [`grid::OVERSCAN_ROWS`] are drawn; a full-height sizer keeps
+/// the scrollbar and the scroll offset honest.
+#[allow(non_snake_case)]
+fn LibraryGrid(props: LibraryGridProps) -> Element {
+    let library = props.library;
+    let query = props.query;
+    let art_state = props.art_state;
+    let art_revision = props.art_revision;
+    let board = props.board;
+    // Signal setters need `&mut`; signals are Copy, so rebind locally and the
+    // `move` closures below each get their own mutable copy.
+    let mut view = props.view;
+    let mut selected_game = props.selected_game;
+    let mut notice = props.notice;
+    let events = props.events;
+    let db = props.db;
+
+    let mut scroll_top = use_signal(|| 0.0f64);
+    let mut viewport_width = use_signal(|| 0.0f64);
+    let mut viewport_height = use_signal(|| 0.0f64);
+
+    // Reading the revision makes a capsule that just finished downloading
+    // repaint without re-rendering the whole window.
+    let _ = art_revision();
+
+    let library_guard = library.read();
+    let Some(state) = library_guard.as_ref() else {
+        return rsx! {
+            div {
+                style: "padding:32px;color:#78788a;",
+                "Scanning Steam libraries…"
+            }
+        };
+    };
+
+    let needle = query.read().to_string();
+    let matches: Vec<&library::GameEntry> = state.filtered(&needle);
+    let geometry = grid::GridGeometry::for_width(viewport_width());
+    let window = grid::window(
+        matches.len(),
+        geometry,
+        scroll_top(),
+        viewport_height(),
+        grid::OVERSCAN_ROWS,
+    );
+    let visible = window.slice(&matches);
+
+    let art_context = art_state.read().clone();
+    let downloads_snapshot: Downloads = (*board.read()).clone();
+    let libraries = state.libraries.clone();
+    let events_sender: Option<UnboundedSender<DownloadEvent>> = (*events.read()).clone();
+    let db_handle = (*db.read()).clone();
+
+    let warning_count = state.warnings.len();
+    let metadata_notes = state.metadata_warnings.clone();
+    let metadata_warning_count = metadata_notes.len();
+    let has_games = !state.games.is_empty();
+
+    // Bound as locals so the RSX format strings only interpolate identifiers.
+    let columns = geometry.columns;
+    let row_gap = grid::ROW_GAP;
+    let column_gap = grid::COLUMN_GAP;
+    let h_padding = grid::H_PADDING;
+    let card_height = geometry.art_height() + grid::TILE_CHROME;
+    let total_height = window.total_height;
+    let offset_y = window.offset_y;
+
+    rsx! {
+        if warning_count > 0 {
+            div {
+                style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:12px;",
+                "{warning_count} scan warning(s) — run `pitagames-cli scan --json` for detail."
+            }
+        }
+
+        if metadata_warning_count > 0 {
+            div {
+                style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;display:flex;flex-direction:column;gap:4px;",
+                for note in metadata_notes.iter().take(2) {
+                    span { "{note}" }
+                }
+                if metadata_warning_count > 2 {
+                    span { "…and {metadata_warning_count - 2} more metadata warning(s)." }
+                }
+            }
+        }
+
+        if !has_games {
+            div {
+                style: "flex:1;padding:48px 32px;color:#78788a;",
+                "No installed Steam games found."
+            }
+        } else if window.is_empty() {
+            div {
+                style: "flex:1;padding:48px 32px;color:#78788a;",
+                "Nothing matches \"{needle}\"."
+            }
+        } else {
+            // The scroll viewport fills the window; the page itself never
+            // scrolls, so `onscroll` reports this container's offset.
+            div {
+                style: "flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;",
+                onscroll: move |event| {
+                    scroll_top.set(event.scroll_top());
+                    if event.client_height() > 0 {
+                        viewport_height.set(event.client_height() as f64);
+                    }
+                    if event.client_width() > 0 {
+                        viewport_width.set(event.client_width() as f64);
+                    }
+                },
+                onresize: move |event| {
+                    // The content box matches `clientWidth`/`clientHeight` on
+                    // the first measurement (no padding, scrollbar excluded).
+                    if let Ok(size) = event.get_content_box_size() {
+                        if size.width > 0.0 {
+                            viewport_width.set(size.width);
+                        }
+                        if size.height > 0.0 {
+                            viewport_height.set(size.height);
+                        }
+                    }
+                },
+
+                div {
+                    // Full-height sizer. Its height covers every row, so the
+                    // scrollbar is accurate while only the window is drawn.
+                    style: "position:relative;height:{total_height}px;",
+
+                    div {
+                        style: "position:absolute;left:0;right:0;top:{offset_y}px;display:grid;grid-template-columns:repeat({columns},minmax(0,1fr));gap:{row_gap}px {column_gap}px;padding:0 {h_padding}px;",
+
+                        for entry in visible {
+                            {
+                                // Every closure below needs owned data: rsx
+                                // children outlive this iteration.
+                                let app_id = entry.app_id().to_string();
+                                let title = entry.title().to_string();
+                                let game_id = entry.game.id.clone();
+                                let art_url = art_context.as_ref().and_then(|context| {
+                                    let metadata = entry.store_metadata();
+                                    context.url_for(
+                                        &[
+                                            metadata
+                                                .and_then(|metadata| metadata.capsule_image.as_deref()),
+                                            metadata
+                                                .and_then(|metadata| metadata.header_image.as_deref()),
+                                        ],
+                                        pitagames_art::ArtSize::Grid,
+                                    )
+                                });
+                                // Placeholder letter while the art downloads: an
+                                // empty box would look like a missing image.
+                                let initial = title
+                                    .chars()
+                                    .next()
+                                    .map(|first| first.to_uppercase().to_string())
+                                    .unwrap_or_default();
+                                let playtime = entry.playtime();
+                                let meta = entry.meta_line();
+                                let status = entry.status_label().unwrap_or_default();
+                                let can_play = entry.can_play();
+                                let show_play = entry.game.installed;
+                                let can_install = entry.can_install();
+                                let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
+                                    "Update"
+                                } else {
+                                    "Install"
+                                };
+                                let tracked = downloads_snapshot
+                                    .get(&app_id)
+                                    .is_some_and(|row| !row.state.is_finished());
+
+                                let play_id = app_id.clone();
+                                let play_db = db_handle.clone();
+                                let play_game_id = game_id.clone();
+                                let install_id = app_id.clone();
+                                let install_title = title.clone();
+                                let install_sender = events_sender.clone();
+                                let install_enabled = install_sender.is_some();
+                                let install_libraries = libraries.clone();
+                                let open_id = game_id.clone();
+
+                                rsx! {
+                                    div {
+                                        key: "{app_id}",
+                                        onclick: move |_| {
+                                            selected_game.set(Some(open_id.clone()));
+                                            view.set(View::Detail);
+                                        },
+                                        style: "display:flex;flex-direction:column;gap:6px;padding:14px;box-sizing:border-box;height:{card_height}px;overflow:hidden;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;",
+
+                                        if let Some(url) = art_url {
+                                            img {
+                                                src: "{url}",
+                                                alt: "",
+                                                style: "width:100%;aspect-ratio:231/87;object-fit:cover;border-radius:8px;display:block;background:#2c2c38;",
+                                            }
+                                        } else {
+                                            div {
+                                                style: "width:100%;aspect-ratio:231/87;border-radius:8px;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#26263a,#191922);color:#414158;font-size:26px;font-weight:600;",
+                                                "{initial}"
+                                            }
+                                        }
+
+                                        div {
+                                            style: "font-size:14px;font-weight:600;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                            title: "{title}",
+                                            "{title}"
+                                        }
+
+                                        if !status.is_empty() {
+                                            div {
+                                                style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#d8b070;",
+                                                "{status}"
+                                            }
+                                        }
+
+                                        div {
+                                            style: "font-size:11px;color:#78788a;",
+                                            "{meta}"
+                                        }
+
+                                        div {
+                                            style: "display:flex;gap:8px;margin-top:auto;padding-top:8px;",
+
+                                            if show_play {
+                                                button {
+                                                    disabled: !can_play,
+                                                onclick: move |event| {
+                                                    // The card itself opens the detail page;
+                                                    // the buttons below only do their own action.
+                                                    event.stop_propagation();
+                                                    // Pointer clicks are M0-only; controller
+                                                    // navigation through gilrs arrives in M2.5.
+                                                    notice.set(String::new());
+                                                    if let Err(error) = library::spawn_steam(&play_id) {
+                                                        notice.set(format!("Could not ask Steam to run appid {play_id}: {error}"));
+                                                        return;
+                                                    }
+                                                    if let Some(db) = play_db.clone() {
+                                                        let id = play_game_id.clone();
+                                                        spawn(async move {
+                                                            if let Err(error) = persist::record_launch(&db, &id, playtime).await {
+                                                                notice.set(error);
+                                                            }
+                                                        });
+                                                    }
+                                                },
+                                                    style: button_style(can_play, "#2e3a56", "#ffffff"),
+                                                    "Play"
+                                                }
+                                            }
+
+                                            if can_install {
+                                                button {
+                                                    disabled: !install_enabled,
+                                                    onclick: move |event| {
+                                                        event.stop_propagation();
+                                                        notice.set(String::new());
+                                                        if let Err(error) = library::spawn_install(&install_id) {
+                                                            notice.set(format!("Could not ask Steam to install appid {install_id}: {error}"));
+                                                            return;
+                                                        }
+                                                        match install_sender.as_ref() {
+                                                            Some(sender) => {
+                                                                start_download(board, sender, &install_libraries, &install_id, &install_title);
+                                                                view.set(View::Downloads);
+                                                            }
+                                                            None => notice.set("Downloads are not ready yet; try again in a moment.".to_string()),
+                                                        }
+                                                    },
+                                                    style: button_style(install_enabled, "#243024", "#d8e8d0"),
+                                                    "{install_label}"
+                                                }
+                                            } else if tracked {
+                                                span {
+                                                    style: "flex:1;align-self:center;font-size:11px;color:#7a9ad6;",
+                                                    "in downloads"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

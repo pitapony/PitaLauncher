@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
 /// The storefront a game belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `Ord` is derived so a `GameId` can key a `BTreeMap` (the compat DB index).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Store {
     Steam,
@@ -58,7 +60,7 @@ pub struct UnknownStore(pub String);
 ///
 /// `store_id` is the store's own identifier as a string: the Steam appid, the
 /// Epic catalog id, the GOG product id, or an opaque id for local imports.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct GameId {
     pub store: Store,
     pub store_id: String,

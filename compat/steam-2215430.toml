@@ -1,0 +1,12 @@
+[game]
+store = "steam"
+store_id = "2215430"
+title = "Ghost of Tsushima Director's Cut"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr3", "xess"]
+recommended = { rdna4 = "dlss_to_fsr4", rdna1 = "hlx_dlss", rtx = "dlss_native", arc = "xess_upgrade" }
+preferred_dll = "dxgi.dll"
+helixsr = { modes = ["scaler"], preferred = "scaler" }

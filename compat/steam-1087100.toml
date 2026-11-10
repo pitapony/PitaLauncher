@@ -1,0 +1,21 @@
+[game]
+store = "steam"
+store_id = "1087100"
+title = "Alan Wake 2"
+engine = "Northlight"
+anticheat = "none"
+verified = ["rdna4"]
+
+[upscaling]
+supported = ["dlss", "fsr3", "xess"]
+recommended = { rdna4 = "dlss_to_fsr4", rdna1 = "hlx_dlss", rtx = "dlss_native", arc = "xess_upgrade" }
+preferred_dll = "dbghelp.dll"
+helixsr = { modes = ["scaler"], preferred = "scaler" }
+
+[neural_rendering]
+backend = "auto"
+route = "optiscaler"
+min_mesa = "26.2"
+dlssnr_min_version = "0.0.8"
+model_scale_default = { rdna4 = 100, rdna3 = 50 }
+requires_64bit = true

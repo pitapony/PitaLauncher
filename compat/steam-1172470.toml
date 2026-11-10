@@ -1,0 +1,16 @@
+# Online shooter with kernel anti-cheat: injection is disabled and the entry
+# documents why. The compat DB's `anticheat` field gates the UI, it never
+# auto-enables anything.
+[game]
+store = "steam"
+store_id = "1172470"
+title = "Apex Legends"
+anticheat = "eac"
+verified = ["rdna4"]
+
+[upscaling]
+supported = []
+recommended = { rdna4 = "native", rdna1 = "native", rtx = "native", arc = "native" }
+
+[runtime]
+known_issues = ["Easy Anti-Cheat: do not inject OptiScaler, HelixSR or DLSSNR"]
