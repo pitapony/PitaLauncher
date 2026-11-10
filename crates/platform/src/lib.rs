@@ -5,13 +5,14 @@
 //! detection testable against fixture directories.
 //!
 //! M1 ships [`proton`] discovery, the runtime subset of [`envc`], the
-//! [`compat`] database loader, and [`anticheat`] detection with the injection
-//! gate. GPU detection, the graphics env table and process supervision arrive in
-//! M3.
+//! [`compat`] database loader, [`anticheat`] detection with the injection gate,
+//! and the read-only [`logs`] reader. GPU detection, the graphics env table and
+//! process supervision arrive in M3.
 
 pub mod anticheat;
 pub mod compat;
 pub mod envc;
+pub mod logs;
 pub mod proton;
 
 pub use anticheat::{
@@ -24,6 +25,7 @@ pub use compat::{
     default_shipped_dirs, default_user_dirs,
 };
 pub use envc::{CompileRequest, CompiledRuntime, EnvcError, compile_runtime, shim_proton};
+pub use logs::{LogFile, LogKind, TAIL_BYTES, Tail};
 pub use proton::{
     DiscoveryReport, ProtonError, ProtonInstall, ProtonKind, ProtonRoot, ProtonSource,
     default_roots, discover, discover_in,

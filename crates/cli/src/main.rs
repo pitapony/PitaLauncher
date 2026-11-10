@@ -20,6 +20,7 @@ use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
 use pitagames_platform::compat::{CompatDb, CompatEntry};
+use pitagames_platform::logs as log_files;
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::compat_tool::CompatTool;
@@ -58,6 +59,7 @@ fn run() -> Result<()> {
         "compat" => compat(&args.collect::<Vec<_>>()),
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
+        "logs" => logs(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
         "steam-account" => steam_account(&args.collect::<Vec<_>>()),
@@ -685,6 +687,177 @@ fn profile(args: &[String]) -> Result<()> {
         println!("  {line}");
     }
 
+    Ok(())
+}
+
+/// List or tail the PitaGames log directory.
+///
+/// The GUI's Logs screen renders the same files through `platform::logs`; this
+/// is the headless diagnostic, so a bug report can attach a launch line or a
+/// Proton log without the webview.
+fn logs(args: &[String]) -> Result<()> {
+    let parsed = parse_logs_args(args)?;
+    if parsed.help {
+        println!("{}", logs_usage());
+        return Ok(());
+    }
+
+    let dir = match parsed.dir.clone() {
+        Some(dir) => dir,
+        None => pitagames_core::paths::logs_dir()
+            .context("cannot determine the XDG data dir; pass --dir <path>")?,
+    };
+
+    let Some(file) = parsed.file.clone() else {
+        let files = log_files::list(&dir);
+        if parsed.json {
+            let payload = serde_json::json!({
+                "dir": dir,
+                "files": files.iter().map(|file| serde_json::json!({
+                    "name": file.name,
+                    "kind": file.kind.label(),
+                    "size": file.size,
+                    "modified": file.modified
+                        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|elapsed| elapsed.as_secs()),
+                })).collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else if files.is_empty() {
+            println!("No logs in {}", dir.display());
+        } else {
+            println!("Logs in {}", dir.display());
+            for file in &files {
+                println!(
+                    "  {:<30} {:<7} {:>10}",
+                    file.name,
+                    file.kind.label(),
+                    human_bytes(file.size)
+                );
+            }
+        }
+        return Ok(());
+    };
+
+    let path = if Path::new(&file).is_absolute() {
+        PathBuf::from(&file)
+    } else {
+        dir.join(&file)
+    };
+    let value = log_files::tail(&path, parsed.tail, parsed.grep.as_deref())
+        .with_context(|| format!("could not read {}", path.display()))?;
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "path": path,
+            "lines": value.lines,
+            "window_lines": value.window_lines,
+            "truncated": value.truncated,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        if value.truncated {
+            println!(
+                "# tail of {} (showing {} of {} line(s) in the window)",
+                path.display(),
+                value.lines.len(),
+                value.window_lines
+            );
+        }
+        for line in &value.lines {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed `logs` arguments.
+#[derive(Debug, PartialEq, Eq)]
+struct LogsArgs {
+    dir: Option<PathBuf>,
+    file: Option<String>,
+    tail: usize,
+    grep: Option<String>,
+    json: bool,
+    help: bool,
+}
+
+impl Default for LogsArgs {
+    fn default() -> Self {
+        Self {
+            dir: None,
+            file: None,
+            tail: DEFAULT_LOG_TAIL,
+            grep: None,
+            json: false,
+            help: false,
+        }
+    }
+}
+
+/// Default tail length for `pitagames-cli logs --file`.
+const DEFAULT_LOG_TAIL: usize = 200;
+
+fn parse_logs_args(args: &[String]) -> Result<LogsArgs> {
+    let mut parsed = LogsArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--dir" | "--file" | "--grep" | "--tail" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                apply_logs_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--dir=")
+                || arg.starts_with("--file=")
+                || arg.starts_with("--grep=")
+                || arg.starts_with("--tail=") =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_logs_flag(&mut parsed, flag, value)?;
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `logs`\n\n{}",
+                logs_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn apply_logs_flag(parsed: &mut LogsArgs, flag: &str, value: &str) -> Result<()> {
+    match flag {
+        "--dir" => {
+            if value.is_empty() {
+                bail!("--dir requires a path");
+            }
+            parsed.dir = Some(PathBuf::from(value));
+        }
+        "--file" => {
+            if value.is_empty() {
+                bail!("--file requires a name or path");
+            }
+            parsed.file = Some(value.to_string());
+        }
+        "--grep" => parsed.grep = Some(value.to_string()),
+        "--tail" => {
+            parsed.tail = value
+                .parse::<usize>()
+                .with_context(|| format!("--tail must be a whole number, got `{value}`"))?;
+        }
+        other => bail!("internal error: unknown logs flag `{other}`"),
+    }
     Ok(())
 }
 
@@ -2468,7 +2641,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -2495,6 +2668,22 @@ fn profile_usage() -> String {
      -h, --help             Show this help\n\n\
      The GUI writes profiles/steam-<appid>.json on every profile save; the shim\n\
      reads it at launch. This command shows what is stored."
+        .to_string()
+}
+
+fn logs_usage() -> String {
+    "USAGE:\n    pitagames-cli logs [--dir <path>] [--file <name>] [--tail <n>] [--grep <text>] [--json]\n\n\
+     OPTIONS:\n    \
+     --dir <path>           Log directory (default: $XDG_DATA_HOME/pitagames/logs)\n    \
+     --file <name|path>     Tail one file instead of listing the directory\n    \
+     --tail <n>             Lines to keep from the end (default: 200)\n    \
+     --grep <text>          Only show lines containing this text\n    \
+     --json                 Print the listing or tail as JSON\n    \
+     -h, --help             Show this help\n\n\
+     The GUI's Logs screen reads the same files through platform::logs. shim.log\n\
+     records one launch line per game; PROTON_LOG writes steam-<appid>.log; DXVK\n\
+     logging writes <exe>_d3d11.log and friends. Read-only: nothing is edited or\n\
+     deleted."
         .to_string()
 }
 
@@ -2758,6 +2947,61 @@ mod tests {
         let restore =
             parse_compat_tool_args(&["620".to_string(), "--restore".to_string()]).unwrap();
         assert_eq!(restore.action, Some(CompatAction::Restore));
+    }
+
+    #[test]
+    fn parses_logs_arguments() {
+        let parsed = parse_logs_args(&[
+            "--dir".to_string(),
+            "/logs".to_string(),
+            "--file=shim.log".to_string(),
+            "--tail".to_string(),
+            "50".to_string(),
+            "--grep".to_string(),
+            "appid=620".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.dir, Some(PathBuf::from("/logs")));
+        assert_eq!(parsed.file.as_deref(), Some("shim.log"));
+        assert_eq!(parsed.tail, 50);
+        assert_eq!(parsed.grep.as_deref(), Some("appid=620"));
+        assert!(parsed.json && !parsed.help);
+
+        // The tail defaults to 200 lines and nothing else is set.
+        let bare = parse_logs_args(&[]).unwrap();
+        assert_eq!(bare, LogsArgs::default());
+        assert_eq!(bare.tail, DEFAULT_LOG_TAIL);
+
+        for args in [
+            vec!["--nope".to_string()],
+            vec!["--tail".to_string(), "many".to_string()],
+            vec!["--dir".to_string()],
+        ] {
+            assert!(parse_logs_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        assert!(parse_logs_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn logs_lists_and_tails_a_fixture_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("shim.log"), "one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("steam-620.log"), "proton\n").unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+
+        logs(&["--dir".to_string(), path.clone()]).unwrap();
+        logs(&[
+            "--dir".to_string(),
+            path,
+            "--file".to_string(),
+            "shim.log".to_string(),
+            "--tail".to_string(),
+            "1".to_string(),
+        ])
+        .unwrap();
     }
 
     #[test]

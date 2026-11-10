@@ -151,6 +151,17 @@ fn diagnostics_env(diagnostics: &Diagnostics, log_dir: Option<&Path>) -> Vec<(St
     if diagnostics.mangohud {
         env.push(("MANGOHUD".to_string(), "1".to_string()));
     }
+    if diagnostics.dxvk_log {
+        // DXVK writes `<exe>_d3d11.log` etc into `DXVK_LOG_PATH`; without a log
+        // directory it logs to stderr / the Proton log, so only the level is set.
+        env.push(("DXVK_LOG_LEVEL".to_string(), "debug".to_string()));
+        if let Some(dir) = log_dir {
+            env.push((
+                "DXVK_LOG_PATH".to_string(),
+                dir.to_string_lossy().into_owned(),
+            ));
+        }
+    }
     if diagnostics.proton_log {
         env.push(("PROTON_LOG".to_string(), "1".to_string()));
         if let Some(dir) = log_dir {
@@ -298,6 +309,37 @@ mod tests {
         assert_eq!(
             compiled.env,
             vec![("PROTON_LOG".to_string(), "1".to_string())]
+        );
+    }
+
+    #[test]
+    fn dxvk_logging_sets_the_level_and_points_at_the_log_dir() {
+        let mut profile = Profile::new(game(), "Debug");
+        profile.diagnostics.dxvk_log = true;
+
+        let compiled = compile_runtime(request(&profile, None)).unwrap();
+        assert_eq!(
+            compiled.env,
+            vec![
+                ("DXVK_LOG_LEVEL".to_string(), "debug".to_string()),
+                (
+                    "DXVK_LOG_PATH".to_string(),
+                    "/data/pitagames/logs".to_string()
+                ),
+            ]
+        );
+
+        // Without a log directory only the level is set: DXVK then logs to
+        // stderr (which Proton captures) instead of a file we cannot name.
+        let request = CompileRequest {
+            profile: &profile,
+            proton: None,
+            log_dir: None,
+            session: false,
+        };
+        assert_eq!(
+            compile_runtime(request).unwrap().env,
+            vec![("DXVK_LOG_LEVEL".to_string(), "debug".to_string())]
         );
     }
 

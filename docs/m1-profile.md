@@ -87,6 +87,7 @@ M1 compiles the **runtime** subset:
 |---|---|
 | `diagnostics.dxvk_hud` | `DXVK_HUD=fps` |
 | `diagnostics.mangohud` | `MANGOHUD=1` |
+| `diagnostics.dxvk_log` | `DXVK_LOG_LEVEL=debug` (+ `DXVK_LOG_PATH=<logs>`) |
 | `diagnostics.proton_log` | `PROTON_LOG=1` (+ `PROTON_LOG_DIR=<logs>`) |
 | `diagnostics.fsr4_indicator` | `PROTON_FSR4_INDICATOR=1` |
 | `diagnostics.dlss_indicator` | `PROTON_DLSS_INDICATOR=1` |

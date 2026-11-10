@@ -99,6 +99,27 @@ pub fn render_command(program: &str, args: &[String]) -> String {
     command
 }
 
+/// Render an ordered environment in front of a program/argv, as one line.
+///
+/// The environment becomes POSIX-quoted `KEY=value` prefixes, exactly where
+/// Steam's own launch options put them, then the command. This is display-only
+/// — the launch path still execs `program + args` with a key/value env vector —
+/// but the shim's `--explain` and the GUI's transparency panel must render the
+/// *same* string, so the composition lives here rather than being re-derived in
+/// each renderer.
+#[must_use]
+pub fn render_shell_command(env: &[(String, String)], program: &str, args: &[String]) -> String {
+    let mut command = String::new();
+    for (key, value) in env {
+        command.push_str(&shell_quote(key));
+        command.push('=');
+        command.push_str(&shell_quote(value));
+        command.push(' ');
+    }
+    command.push_str(&render_command(program, args));
+    command
+}
+
 /// POSIX single-quote a token so a rendered command can be pasted back.
 ///
 /// Only tokens made of safe characters are left bare; everything else is
@@ -586,6 +607,35 @@ mod tests {
             &["--name".to_string(), "it's".to_string()],
         );
         assert_eq!(command, "'/games/My Game/game.exe' --name 'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_command_renders_env_in_front_of_the_program() {
+        let env = vec![
+            ("DXVK_HUD".to_string(), "fps".to_string()),
+            (
+                "DXVK_LOG_PATH".to_string(),
+                "/data/pitagames/logs".to_string(),
+            ),
+            ("GREETING".to_string(), "two words".to_string()),
+        ];
+        assert_eq!(
+            render_shell_command(
+                &env,
+                "pitagames-shim",
+                &["620".to_string(), "%command%".to_string()]
+            ),
+            "DXVK_HUD=fps DXVK_LOG_PATH=/data/pitagames/logs GREETING='two words' \
+             pitagames-shim 620 %command%"
+        );
+    }
+
+    #[test]
+    fn shell_command_without_env_is_just_the_program() {
+        assert_eq!(
+            render_shell_command(&[], "/bin/game", &["-v".to_string()]),
+            "/bin/game -v"
+        );
     }
 
     #[test]

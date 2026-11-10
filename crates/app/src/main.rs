@@ -28,11 +28,14 @@ use steam_account::Account;
 mod account;
 mod anticheat;
 mod art;
+mod copy;
 mod detail;
+mod diagnostics;
 mod downloads;
 mod format;
 mod grid;
 mod library;
+mod log_view;
 mod persist;
 mod runtime;
 mod steam_account;
@@ -98,6 +101,7 @@ pub(crate) enum View {
     Downloads,
     Detail,
     Account,
+    Logs,
 }
 
 /// The handle every metadata enqueuer holds.
@@ -564,6 +568,14 @@ fn App() -> Element {
                     style: nav_style(current_view == View::Account),
                     "Account"
                 }
+                button {
+                    onclick: move |_| {
+                        selected_game.set(None);
+                        view.set(View::Logs);
+                    },
+                    style: nav_style(current_view == View::Logs),
+                    "Logs"
+                }
             }
 
             if !notice.read().is_empty() {
@@ -604,6 +616,11 @@ fn App() -> Element {
                         metadata: metadata_queue,
                         library: library_state,
                     }
+                }
+            } else if current_view == View::Logs {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    log_view::LogsView { dir: pitagames_core::paths::logs_dir() }
                 }
             } else {
                 {library_body}

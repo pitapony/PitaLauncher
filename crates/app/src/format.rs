@@ -102,6 +102,15 @@ pub fn duration_ago(age: time::Duration) -> String {
     format!("{} d ago", hours / 24)
 }
 
+/// A compact timestamp for the log list: `"today 14:32"` or `"09 Nov 14:32"`.
+pub fn log_time(at: OffsetDateTime, now: OffsetDateTime) -> String {
+    let time = format!("{:02}:{:02}", at.hour(), at.minute());
+    if at.date() == now.date() {
+        return format!("today {time}");
+    }
+    format!("{} {} {time}", at.day(), month_short(at.month()))
+}
+
 fn month_short(month: Month) -> &'static str {
     match month {
         Month::January => "Jan",
@@ -183,5 +192,25 @@ mod tests {
         assert_eq!(duration_ago(D::minutes(5)), "5 min ago");
         assert_eq!(duration_ago(D::hours(4)), "4 h ago");
         assert_eq!(duration_ago(D::hours(30)), "1 d ago");
+    }
+
+    #[test]
+    fn log_time_is_relative_for_today_and_dated_otherwise() {
+        let at = |year, month, day, hour, minute| {
+            time::Date::from_calendar_date(year, month, day)
+                .unwrap()
+                .with_hms(hour, minute, 0)
+                .unwrap()
+                .assume_utc()
+        };
+        let now = at(2026, Month::November, 9, 18, 0);
+        assert_eq!(
+            log_time(at(2026, Month::November, 9, 14, 32), now),
+            "today 14:32"
+        );
+        assert_eq!(
+            log_time(at(2026, Month::November, 8, 9, 5), now),
+            "8 Nov 09:05"
+        );
     }
 }

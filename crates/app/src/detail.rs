@@ -16,10 +16,12 @@ use pitagames_stores::compat_tool::CompatTool;
 
 use crate::View;
 use crate::anticheat::AnticheatView;
+use crate::copy::CopyButton;
+use crate::diagnostics::DiagnosticsEditor;
 use crate::format;
 use crate::library::{self, GameEntry};
 use crate::persist;
-use crate::runtime::{self, WrapperDraft};
+use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
 use crate::wrappers::WrapperEditor;
 
 /// `Db` wraps a SQLite pool and is not `PartialEq`; props only need to know
@@ -64,6 +66,7 @@ pub fn Detail(props: DetailProps) -> Element {
     // state and the last action's message.
     let mut proton_choice = use_signal(|| ProtonRef::Auto);
     let mut wrapper_draft = use_signal(WrapperDraft::default);
+    let mut diagnostics_draft = use_signal(DiagnosticsDraft::default);
     let mut runtime_message = use_signal(String::new);
     let mut routing = use_signal(|| None::<runtime::RoutingStatus>);
     // The compatibility tool Steam is (or is not) forced to use for this game.
@@ -86,6 +89,7 @@ pub fn Detail(props: DetailProps) -> Element {
                 selected,
                 proton_choice,
                 wrapper_draft,
+                diagnostics_draft,
                 error,
             )
             .await;
@@ -261,6 +265,36 @@ pub fn Detail(props: DetailProps) -> Element {
     };
     let steam_root = props.steam_root.clone();
 
+    // The resolved command mirrors `pitagames-shim --explain`: the environment,
+    // the shim, the wrapper chain and %command%. It recomputes on every render
+    // from the selected profile plus the live drafts, so toggling a diagnostic
+    // or a wrapper shows up immediately.
+    let preview_app = entry.app_id().to_string();
+    let command_preview: Result<String, String> =
+        match (selected_profile.as_ref(), props.proton.as_ref()) {
+            (Some(profile), Some(report)) => {
+                let mut preview = profile.clone();
+                preview.proton = current_choice.clone();
+                // Apply the two drafts in order; a refused wrapper draft stops
+                // before the diagnostics are touched.
+                let applied = wrapper_draft().apply_to(&mut preview);
+                let applied = match applied {
+                    Ok(()) => diagnostics_draft().apply_to(&mut preview),
+                    Err(message) => Err(message),
+                };
+                match applied {
+                    Ok(()) => runtime::resolved_preview(&preview_app, &preview, report),
+                    Err(message) => Err(message),
+                }
+            }
+            (None, _) => Err("Create and select a profile to see the launch command.".to_string()),
+            (_, None) => Err("Proton discovery is not ready yet.".to_string()),
+        };
+    let (command_text, command_error) = match command_preview {
+        Ok(command) => (command, None),
+        Err(message) => (String::new(), Some(message)),
+    };
+
     let play_entry = entry.clone();
     let play_db = db.clone();
     let create_db = db.clone();
@@ -417,6 +451,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         let pick_name = profile_name.clone();
                         let pick_proton = row.profile.proton.clone();
                         let pick_wrappers = row.profile.wrappers.clone();
+                        let pick_diagnostics = row.profile.diagnostics;
                         let delete_name = profile_name.clone();
                         let delete_db = db.clone();
                         let delete_game = game_id.clone();
@@ -440,6 +475,8 @@ pub fn Detail(props: DetailProps) -> Element {
                                         selected.set(Some(pick_name.clone()));
                                         proton_choice.set(pick_proton.clone());
                                         wrapper_draft.set(WrapperDraft::from_chain(&pick_wrappers));
+                                        diagnostics_draft
+                                            .set(DiagnosticsDraft::from_diagnostics(&pick_diagnostics));
                                     },
                                     style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
                                     "Use"
@@ -455,7 +492,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                                 return;
                                             };
                                             match persist::delete_profile(&db, &game_id, &name).await {
-                                                Ok(_) => load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, error).await,
+                                                Ok(_) => load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await,
                                                 Err(message) => error.set(message),
                                             }
                                         });
@@ -493,7 +530,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                 match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
                                     Ok(_) => {
                                         new_name.set(String::new());
-                                        load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, error).await;
+                                        load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
                                     }
                                     Err(message) => error.set(message),
                                 }
@@ -559,6 +596,8 @@ pub fn Detail(props: DetailProps) -> Element {
 
                 WrapperEditor { draft: wrapper_draft }
 
+                DiagnosticsEditor { draft: diagnostics_draft }
+
                 div {
                     style: "display:flex;gap:8px;flex-wrap:wrap;",
                     button {
@@ -580,10 +619,15 @@ pub fn Detail(props: DetailProps) -> Element {
                             let game = save_game.clone();
                             let choice = proton_choice();
                             let draft = wrapper_draft();
+                            let diagnostics = diagnostics_draft();
                             spawn(async move {
                                 let mut profile = profile;
                                 profile.proton = choice;
                                 if let Err(message) = draft.apply_to(&mut profile) {
+                                    runtime_message.set(message);
+                                    return;
+                                }
+                                if let Err(message) = diagnostics.apply_to(&mut profile) {
                                     runtime_message.set(message);
                                     return;
                                 }
@@ -599,7 +643,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                             compiled.env.len(),
                                             if compiled.env.len() == 1 { "y" } else { "ies" }
                                         ));
-                                        load_profiles(Some(db), game, rows, selected, proton_choice, wrapper_draft, error).await;
+                                        load_profiles(Some(db), game, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
                                     }
                                     Err(message) => runtime_message.set(message),
                                 }
@@ -772,6 +816,33 @@ pub fn Detail(props: DetailProps) -> Element {
                     }
                 }
 
+                div {
+                    style: "display:flex;flex-direction:column;gap:6px;padding-top:4px;",
+                    div {
+                        style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                        span {
+                            style: "font-size:12px;font-weight:600;color:#e8e8ee;",
+                            "Command"
+                        }
+                        CopyButton { text: command_text.clone() }
+                        span {
+                            style: "font-size:11px;color:#78788a;",
+                            "what pitagames-shim will run (the same line as --explain)"
+                        }
+                    }
+                    if let Some(message) = command_error.clone() {
+                        span {
+                            style: "padding:8px 12px;border-radius:8px;background:#3a2a1e;color:#e0c090;font-size:12px;overflow-wrap:anywhere;",
+                            "{message}"
+                        }
+                    } else {
+                        code {
+                            style: "display:block;padding:10px 12px;border-radius:8px;background:#14141b;border:1px solid #26262f;color:#b8c8e8;font-family:monospace;font-size:11px;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text;",
+                            "{command_text}"
+                        }
+                    }
+                }
+
                 if !runtime_note.is_empty() {
                     div {
                         style: "padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;overflow-wrap:anywhere;",
@@ -793,6 +864,7 @@ async fn load_profiles(
     mut selected: Signal<Option<String>>,
     mut proton_choice: Signal<ProtonRef>,
     mut wrapper_draft: Signal<WrapperDraft>,
+    mut diagnostics_draft: Signal<DiagnosticsDraft>,
     mut error: Signal<String>,
 ) {
     let Some(db) = db else {
@@ -813,8 +885,13 @@ async fn load_profiles(
                 Some(row) => {
                     proton_choice.set(row.profile.proton.clone());
                     wrapper_draft.set(WrapperDraft::from_chain(&row.profile.wrappers));
+                    diagnostics_draft
+                        .set(DiagnosticsDraft::from_diagnostics(&row.profile.diagnostics));
                 }
-                None => wrapper_draft.set(WrapperDraft::default()),
+                None => {
+                    wrapper_draft.set(WrapperDraft::default());
+                    diagnostics_draft.set(DiagnosticsDraft::default());
+                }
             }
             selected.set(next);
             rows.set(profiles);

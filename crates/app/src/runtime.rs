@@ -13,9 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use pitagames_core::profile::{GamescopeOptions, WrapperChain, WrapperStep};
+use pitagames_core::profile::{Diagnostics, GamescopeOptions, WrapperChain, WrapperStep};
 use pitagames_core::{
-    Profile, ShimProfile, save_shim_profile, shell_quote, shim_launch_options, tokenize_command,
+    Profile, SHIM_PROGRAM, ShimProfile, flatten_wrappers, render_shell_command, save_shim_profile,
+    shell_quote, shim_launch_options, tokenize_command,
 };
 use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime};
 use pitagames_platform::proton::{self, DiscoveryReport};
@@ -180,6 +181,180 @@ impl WrapperDraft {
 
 fn optional_number(value: Option<u32>) -> String {
     value.map(|value| value.to_string()).unwrap_or_default()
+}
+
+/// The editable form of a profile's [`Diagnostics`] block.
+///
+/// Diagnostics are plain booleans, but they are edited and saved like the
+/// wrapper chain: the draft converts back into the profile, and `apply_to`
+/// validates on a copy so a refused save never half-edits the profile. The
+/// environment itself is produced by `platform::envc`; this model only decides
+/// which toggles the user has set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiagnosticsDraft {
+    pub dxvk_hud: bool,
+    pub mangohud: bool,
+    pub proton_log: bool,
+    pub dxvk_log: bool,
+    pub fsr4_indicator: bool,
+    pub dlss_indicator: bool,
+}
+
+/// One row in the diagnostics editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticToggle {
+    DxvkHud,
+    Mangohud,
+    ProtonLog,
+    DxvkLog,
+    Fsr4Indicator,
+    DlssIndicator,
+}
+
+impl DiagnosticToggle {
+    /// Every toggle, in the order the editor shows them.
+    pub const ALL: [Self; 6] = [
+        Self::DxvkHud,
+        Self::Mangohud,
+        Self::ProtonLog,
+        Self::DxvkLog,
+        Self::Fsr4Indicator,
+        Self::DlssIndicator,
+    ];
+
+    /// The short label on the toggle chip.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DxvkHud => "DXVK HUD",
+            Self::Mangohud => "MangoHUD",
+            Self::ProtonLog => "Proton log",
+            Self::DxvkLog => "DXVK log",
+            Self::Fsr4Indicator => "FSR 4 indicator",
+            Self::DlssIndicator => "DLSS indicator",
+        }
+    }
+
+    /// The environment value this toggle emits, shown next to the chip.
+    pub const fn env_hint(self) -> &'static str {
+        match self {
+            Self::DxvkHud => "DXVK_HUD=fps",
+            Self::Mangohud => "MANGOHUD=1",
+            Self::ProtonLog => "PROTON_LOG=1",
+            Self::DxvkLog => "DXVK_LOG_LEVEL=debug",
+            Self::Fsr4Indicator => "PROTON_FSR4_INDICATOR=1",
+            Self::DlssIndicator => "PROTON_DLSS_INDICATOR=1",
+        }
+    }
+}
+
+impl DiagnosticsDraft {
+    /// Load the editor from a stored profile.
+    pub fn from_diagnostics(diagnostics: &Diagnostics) -> Self {
+        Self {
+            dxvk_hud: diagnostics.dxvk_hud,
+            mangohud: diagnostics.mangohud,
+            proton_log: diagnostics.proton_log,
+            dxvk_log: diagnostics.dxvk_log,
+            fsr4_indicator: diagnostics.fsr4_indicator,
+            dlss_indicator: diagnostics.dlss_indicator,
+        }
+    }
+
+    /// Convert the editor back into the profile's diagnostics block.
+    pub fn to_diagnostics(self) -> Diagnostics {
+        Diagnostics {
+            dxvk_hud: self.dxvk_hud,
+            mangohud: self.mangohud,
+            proton_log: self.proton_log,
+            dxvk_log: self.dxvk_log,
+            fsr4_indicator: self.fsr4_indicator,
+            dlss_indicator: self.dlss_indicator,
+        }
+    }
+
+    /// The current value of one toggle.
+    pub fn is_on(self, toggle: DiagnosticToggle) -> bool {
+        match toggle {
+            DiagnosticToggle::DxvkHud => self.dxvk_hud,
+            DiagnosticToggle::Mangohud => self.mangohud,
+            DiagnosticToggle::ProtonLog => self.proton_log,
+            DiagnosticToggle::DxvkLog => self.dxvk_log,
+            DiagnosticToggle::Fsr4Indicator => self.fsr4_indicator,
+            DiagnosticToggle::DlssIndicator => self.dlss_indicator,
+        }
+    }
+
+    /// Flip one toggle.
+    pub fn toggle(&mut self, toggle: DiagnosticToggle) {
+        self.set(toggle, !self.is_on(toggle));
+    }
+
+    /// Set one toggle.
+    pub fn set(&mut self, toggle: DiagnosticToggle, value: bool) {
+        match toggle {
+            DiagnosticToggle::DxvkHud => self.dxvk_hud = value,
+            DiagnosticToggle::Mangohud => self.mangohud = value,
+            DiagnosticToggle::ProtonLog => self.proton_log = value,
+            DiagnosticToggle::DxvkLog => self.dxvk_log = value,
+            DiagnosticToggle::Fsr4Indicator => self.fsr4_indicator = value,
+            DiagnosticToggle::DlssIndicator => self.dlss_indicator = value,
+        }
+    }
+
+    /// `true` when no diagnostic is enabled.
+    pub fn is_empty(self) -> bool {
+        DiagnosticToggle::ALL
+            .iter()
+            .all(|toggle| !self.is_on(*toggle))
+    }
+
+    /// The labels of the enabled toggles, for a compact summary line.
+    pub fn enabled_labels(self) -> Vec<&'static str> {
+        DiagnosticToggle::ALL
+            .iter()
+            .filter(|toggle| self.is_on(**toggle))
+            .map(|toggle| toggle.label())
+            .collect()
+    }
+
+    /// Write the diagnostics into a profile and validate the result.
+    ///
+    /// Validation happens on a copy, so a refused draft never leaves the profile
+    /// half-edited (diagnostics cannot fail validation today, but the profile
+    /// carries other fields and the contract must not depend on that).
+    pub fn apply_to(self, profile: &mut Profile) -> Result<(), String> {
+        let mut next = profile.clone();
+        next.diagnostics = self.to_diagnostics();
+        next.validate().map_err(|error| error.to_string())?;
+        *profile = next;
+        Ok(())
+    }
+}
+
+/// Render a compiled runtime as the command the shim will run.
+///
+/// This is the GUI's mirror of `pitagames-shim --explain`: the diagnostic
+/// environment, `pitagames-shim <appid>`, the wrapper chain and `%command%`,
+/// POSIX-quoted so it can be pasted back into a shell. It is display-only; the
+/// actual launch stays argv-only.
+#[must_use]
+pub fn resolved_command(app_id: &str, compiled: &CompiledRuntime) -> String {
+    let (program, args) = flatten_wrappers(&compiled.wrappers, "%command%", &[]);
+    let mut shim_args = Vec::with_capacity(args.len() + 2);
+    shim_args.push(app_id.to_string());
+    shim_args.push(program);
+    shim_args.extend(args);
+    render_shell_command(&compiled.env, SHIM_PROGRAM, &shim_args)
+}
+
+/// Compile a profile against the current discovery and render its command.
+pub fn resolved_preview(
+    app_id: &str,
+    profile: &Profile,
+    report: &DiscoveryReport,
+) -> Result<String, String> {
+    let compiled = compile(profile, report)?;
+    Ok(resolved_command(app_id, &compiled))
 }
 
 /// Render an argv list back into the editor's single text field.
@@ -726,5 +901,93 @@ mod tests {
         // The restore record points at the pre-PitaGames (empty) state.
         restore_compat_in(&root, "620", true, &backups).unwrap();
         assert_eq!(std::fs::read_to_string(&config_vdf).unwrap(), original);
+    }
+
+    #[test]
+    fn the_diagnostics_draft_round_trips_and_toggles() {
+        let diagnostics = Diagnostics {
+            dxvk_hud: true,
+            mangohud: true,
+            proton_log: true,
+            dxvk_log: true,
+            fsr4_indicator: true,
+            dlss_indicator: true,
+        };
+        let mut draft = DiagnosticsDraft::from_diagnostics(&diagnostics);
+        assert_eq!(draft.to_diagnostics(), diagnostics);
+        assert_eq!(draft.enabled_labels().len(), 6);
+
+        // Every toggle maps to a distinct field.
+        for toggle in DiagnosticToggle::ALL {
+            assert!(draft.is_on(toggle), "{toggle:?}");
+            draft.toggle(toggle);
+            assert!(!draft.is_on(toggle), "{toggle:?}");
+        }
+        assert!(draft.is_empty());
+        assert!(draft.enabled_labels().is_empty());
+        assert_eq!(draft.to_diagnostics(), Diagnostics::default());
+    }
+
+    #[test]
+    fn applying_the_diagnostics_draft_updates_the_profile() {
+        let mut profile = Profile::new(game(), "Debug");
+        let mut draft = DiagnosticsDraft::default();
+        draft.set(DiagnosticToggle::DxvkHud, true);
+        draft.set(DiagnosticToggle::ProtonLog, true);
+        draft.apply_to(&mut profile).unwrap();
+
+        assert!(profile.diagnostics.dxvk_hud);
+        assert!(profile.diagnostics.proton_log);
+        assert!(!profile.diagnostics.dlss_indicator);
+    }
+
+    #[test]
+    fn the_resolved_command_matches_the_shim_composition() {
+        let mut profile = Profile::new(game(), "Debug");
+        profile.diagnostics.dxvk_hud = true;
+        profile.wrappers.gamemode = true;
+        profile.wrappers.gamescope = Some(GamescopeOptions {
+            width: Some(1920),
+            height: Some(1080),
+            refresh_hz: None,
+            fullscreen: true,
+            extra_args: Vec::new(),
+        });
+
+        let report = DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        };
+        let command = resolved_preview("620", &profile, &report).unwrap();
+        assert_eq!(
+            command,
+            "DXVK_HUD=fps pitagames-shim 620 gamescope -w 1920 -h 1080 --fullscreen -- \
+             gamemoderun %command%"
+        );
+    }
+
+    #[test]
+    fn a_profile_with_no_diagnostics_resolves_to_the_bare_shim() {
+        let profile = Profile::new(game(), "Default");
+        let report = DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        };
+        assert_eq!(
+            resolved_preview("620", &profile, &report).unwrap(),
+            "pitagames-shim 620 %command%"
+        );
+    }
+
+    #[test]
+    fn a_graphics_profile_cannot_be_previewed() {
+        let mut profile = Profile::new(game(), "FSR 4");
+        profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
+        let report = DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        };
+        let error = resolved_preview("620", &profile, &report).unwrap_err();
+        assert!(error.contains("upscaler"), "{error}");
     }
 }

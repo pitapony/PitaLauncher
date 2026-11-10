@@ -28,7 +28,7 @@ use std::process::{Command, ExitCode};
 
 use pitagames_core::{
     GameId, LaunchSpec, ShimProfile, Store, TokenizeError, flatten_wrappers, load_shim_profile,
-    render_command, tokenize_command,
+    tokenize_command,
 };
 
 /// Environment value proving the shim ran; kept from M0.
@@ -228,15 +228,8 @@ fn explain_launch(app_id: u32, profile: Option<&ShimProfile>, spec: &LaunchSpec)
 
     let wrappers = profile.map(|p| p.wrappers.as_slice()).unwrap_or(&[]);
     let (program, args) = flatten(wrappers, spec);
-    let mut command = String::new();
-    for (key, value) in &spec.env {
-        command.push_str(&format!(
-            "{}={} ",
-            pitagames_core::shell_quote(key),
-            pitagames_core::shell_quote(value)
-        ));
-    }
-    command.push_str(&render_command(&program.to_string_lossy(), &args));
+    let command =
+        pitagames_core::render_shell_command(&spec.env, &program.to_string_lossy(), &args);
 
     println!();
     println!("Command:");
