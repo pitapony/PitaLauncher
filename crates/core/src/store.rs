@@ -99,6 +99,27 @@ impl AntiCheat {
             Self::Unknown => "unknown",
         }
     }
+
+    /// The name to show a user, rather than the wire value.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::Eac => "Easy Anti-Cheat",
+            Self::BattlEye => "BattlEye",
+            Self::Unknown => "Not detected",
+        }
+    }
+
+    /// Whether this value names an anti-cheat runtime that can punish a
+    /// modified game directory.
+    ///
+    /// `Unknown` is deliberately *not* protected: a fresh scan cannot tell the
+    /// difference between "no anti-cheat" and "not detected yet", so only a
+    /// concrete `Eac`/`BattlEye` finding may hard-gate injection. `None` means
+    /// the game was checked and carries none.
+    pub const fn is_protected(self) -> bool {
+        matches!(self, Self::Eac | Self::BattlEye)
+    }
 }
 
 impl FromStr for AntiCheat {
@@ -245,6 +266,20 @@ mod tests {
             AntiCheat::from_str("vanguard").unwrap_err(),
             UnknownAntiCheat("vanguard".into())
         );
+    }
+
+    #[test]
+    fn only_concrete_anti_cheat_values_are_protected() {
+        assert!(AntiCheat::Eac.is_protected());
+        assert!(AntiCheat::BattlEye.is_protected());
+        // `None` was checked; `Unknown` was not. Neither may hard-gate.
+        assert!(!AntiCheat::None.is_protected());
+        assert!(!AntiCheat::Unknown.is_protected());
+
+        assert_eq!(AntiCheat::Eac.label(), "Easy Anti-Cheat");
+        assert_eq!(AntiCheat::BattlEye.label(), "BattlEye");
+        assert_eq!(AntiCheat::None.label(), "None");
+        assert_eq!(AntiCheat::Unknown.label(), "Not detected");
     }
 
     #[test]

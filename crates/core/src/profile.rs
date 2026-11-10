@@ -67,6 +67,23 @@ impl Profile {
         }
     }
 
+    /// Whether this profile asks for anything that injects code or DLLs into
+    /// the game.
+    ///
+    /// `Injection::Auto` alone is not a request: it resolves to nothing when no
+    /// other setting needs the slot. The anti-cheat gate reads this so a
+    /// protected game only demands confirmation when injection is actually
+    /// selected, not merely because the graphics screen exists.
+    pub fn requests_injection(&self) -> bool {
+        self.upscaler.uses_injection()
+            || self.frame_gen != FrameGen::Off
+            || self.neural_rendering.is_enabled()
+            || matches!(
+                self.injection,
+                Injection::EnvOnly | Injection::Manual | Injection::HelixSr | Injection::DlssNr
+            )
+    }
+
     /// Reject combinations that would make the env compiler emit contradictory
     /// settings. The graphics UI calls this before saving; the database does
     /// the same on write, so a corrupt profile can never reach a launch.
@@ -772,6 +789,41 @@ mod tests {
     fn empty_names_are_rejected() {
         let profile = Profile::new(game(), "   ");
         assert_eq!(profile.validate(), Err(ProfileError::EmptyName));
+    }
+
+    #[test]
+    fn a_profile_reports_when_it_requests_injection() {
+        // The defaults never request the injection slot.
+        let profile = Profile::new(game(), "Default");
+        assert!(!profile.requests_injection());
+
+        // `Auto` alone is not a request: nothing is actually injected.
+        let mut auto = Profile::new(game(), "Auto");
+        auto.injection = Injection::Auto;
+        assert!(!auto.requests_injection());
+
+        // An explicit tier, an injected upscaler, frame gen and NR all do.
+        for mutate in [
+            |p: &mut Profile| p.injection = Injection::Manual,
+            |p: &mut Profile| p.injection = Injection::HelixSr,
+            |p: &mut Profile| p.upscaler = Upscaler::DlssToFsr4,
+            |p: &mut Profile| p.upscaler = Upscaler::Fsr4Upgrade { version: None },
+            |p: &mut Profile| p.frame_gen = FrameGen::Fsr3,
+        ] {
+            let mut profile = Profile::new(game(), "Injected");
+            mutate(&mut profile);
+            assert!(profile.requests_injection(), "{profile:?}");
+        }
+
+        // gamescope FSR is a compositor effect, not an injection.
+        let mut system = Profile::new(game(), "System FSR");
+        system.upscaler = Upscaler::SystemFsr;
+        assert!(!system.requests_injection());
+
+        // Neural rendering owns the slot and counts.
+        let mut nr_profile = Profile::new(game(), "NR");
+        nr_profile.neural_rendering = nr(100);
+        assert!(nr_profile.requests_injection());
     }
 
     #[test]

@@ -9,12 +9,13 @@ use std::path::PathBuf;
 
 use dioxus::prelude::*;
 
-use pitagames_core::{GameId, Profile, ProtonRef};
+use pitagames_core::{AntiCheat, GameId, Profile, ProtonRef};
 use pitagames_db::{Db, StoredProfile};
 use pitagames_platform::proton::{DiscoveryReport, ProtonInstall};
 use pitagames_stores::compat_tool::CompatTool;
 
 use crate::View;
+use crate::anticheat::AnticheatView;
 use crate::format;
 use crate::library::{self, GameEntry};
 use crate::persist;
@@ -67,6 +68,8 @@ pub fn Detail(props: DetailProps) -> Element {
     let mut routing = use_signal(|| None::<runtime::RoutingStatus>);
     // The compatibility tool Steam is (or is not) forced to use for this game.
     let mut compat = use_signal(|| None::<CompatTool>);
+    // The detected/curated anti-cheat summary and its injection warning.
+    let mut anticheat = use_signal(AnticheatView::pending);
 
     // Load the profiles once per mounted game; the parent keys this component
     // by appid so opening another game remounts it.
@@ -105,6 +108,23 @@ pub fn Detail(props: DetailProps) -> Element {
         }
     });
 
+    // Anti-cheat: walk the install directory and merge the compat DB's curated
+    // value. Read-only, and cheap enough to run once per game open.
+    let ac_dir = entry.game.install_dir.clone();
+    let ac_game = game_id.clone();
+    use_future(move || {
+        let dir = ac_dir.clone();
+        let id = ac_game.clone();
+        async move {
+            let db = pitagames_platform::compat::CompatDb::load();
+            let curated = db
+                .get(&id)
+                .map(|entry| entry.anticheat)
+                .unwrap_or(AntiCheat::Unknown);
+            anticheat.set(crate::anticheat::summarize(dir.as_deref(), curated));
+        }
+    });
+
     let title = entry.title().to_string();
     let status = entry.status_label();
     let playtime = format::playtime(entry.playtime());
@@ -129,6 +149,11 @@ pub fn Detail(props: DetailProps) -> Element {
         .version
         .clone()
         .unwrap_or_else(|| "unknown".to_string());
+
+    let anticheat_view = anticheat();
+    let anticheat_label = anticheat_view.label.clone();
+    let anticheat_warning = anticheat_view.warning.clone();
+    let anticheat_evidence = anticheat_view.evidence.clone();
 
     // Store metadata is a cache: the page renders fine without it, and the
     // grid's background refresh fills this in without a reload.
@@ -329,6 +354,24 @@ pub fn Detail(props: DetailProps) -> Element {
                 {info_card("Size", size)}
                 {info_card("Install path", install_path)}
                 {info_card("Version", version)}
+                {info_card("Anti-cheat", anticheat_label)}
+            }
+
+            if let Some(warning) = anticheat_warning.clone() {
+                div {
+                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#3a2e1e;color:#e8c890;font-size:12px;",
+                    span {
+                        style: "font-weight:600;",
+                        "Anti-cheat injection warning"
+                    }
+                    span { "{warning}" }
+                    for item in anticheat_evidence {
+                        span {
+                            style: "font-family:monospace;font-size:11px;color:#c8a870;overflow-wrap:anywhere;",
+                            "{item}"
+                        }
+                    }
+                }
             }
 
             div {

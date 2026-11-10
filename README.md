@@ -43,15 +43,19 @@ hardware layer has been exercised in an `archlinux:latest` container.
 - **Compatibility database** — a shipped `compat/*.toml` of curated per-game
   upscaling rules, merged with `$XDG_CONFIG_HOME/pitagames/compat` overrides
   field by field and validated at load; `pitagames-cli compat` prints it.
+- **Anti-cheat detection and the injection gate** — the detail page scans a
+  game's install directory for Easy Anti-Cheat/BattlEye markers and merges them
+  with the compat DB's curated value; injection on a protected game is gated
+  behind an explicit confirmation. `pitagames-cli anticheat` prints the result.
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
 - **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `compat`,
-  `profile`, `launch-options`, `compat-tool`, `steam-account`.
+  `anticheat`, `profile`, `launch-options`, `compat-tool`, `steam-account`.
 
 ## Not there yet
 
 - Hardware validation on the RX 9070 and RX 5700 XT.
-- Anti-cheat detection and injection gating.
-- Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR).
+- Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR) and the
+  graphics screen that enforces the anti-cheat gate.
 - Other stores (GOG, Epic, Amazon), mod orchestration and packaging.
 
 ## Requirements
@@ -79,6 +83,9 @@ cargo run -p pitagames-cli -- steam-account
 # List the shipped compatibility database (add --shipped ./compat for a checkout).
 cargo run -p pitagames-cli -- compat --shipped ./compat
 
+# Detect a game's anti-cheat and show the injection gate (any install dir works).
+cargo run -p pitagames-cli -- anticheat 1172470 --dir /path/to/game --shipped ./compat
+
 # See the shim line the launcher would write, without touching the file.
 cargo run -p pitagames-cli -- launch-options 620 --shim --dry-run
 
@@ -88,6 +95,7 @@ cargo run -p pitagames
 
 The CLI also supports `install <appid>` (hands the request to Steam and polls the
 appmanifest), `metadata <appid>` (live Steam store metadata),
+`anticheat <appid>` (anti-cheat markers + the injection gate),
 `launch-options <appid> --set/--shim/--clear/--restore`, and
 `steam-account --set-key/--forget-key/--refresh`.
 
@@ -121,7 +129,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 | `crates/db` | SQLite pool, migrations and repositories |
 | `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers |
 | `crates/metadata` | Steam `appdetails` and `GetOwnedGames` clients, rate limiter and cache policy |
-| `crates/platform` | Proton discovery, runtime selection, the compatibility DB loader and the runtime env compiler |
+| `crates/platform` | Proton discovery, runtime selection, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
 | `crates/secrets` | Steam Web API key storage (keyring + `0600` fallback) |
 | `crates/shim` | `pitagames-shim` launch shim |
@@ -139,6 +147,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-art.md`](docs/m1-art.md) — art pipeline and loopback server.
 - [`docs/m1-proton.md`](docs/m1-proton.md) — Proton discovery and selection.
 - [`docs/m1-compat-db.md`](docs/m1-compat-db.md) — the compatibility database loader, schema and merge rules.
+- [`docs/m1-anticheat.md`](docs/m1-anticheat.md) — anti-cheat detection and the injection gate.
 - [`docs/m1-launch-options.md`](docs/m1-launch-options.md) — Steam launch-options writer.
 - [`docs/m1-profile.md`](docs/m1-profile.md) — shim profile contract and runtime panel.
 - [`docs/m1-compat-tool.md`](docs/m1-compat-tool.md) — per-game compatibility-tool writer.

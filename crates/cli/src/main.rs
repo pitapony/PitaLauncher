@@ -13,8 +13,11 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use pitagames_core::{
-    Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
+    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
     shim_launch_options, shim_profile_path, steam_install,
+};
+use pitagames_platform::anticheat::{
+    AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
 use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
@@ -53,6 +56,7 @@ fn run() -> Result<()> {
         "metadata" => metadata(&args.collect::<Vec<_>>()),
         "proton" => proton(&args.collect::<Vec<_>>()),
         "compat" => compat(&args.collect::<Vec<_>>()),
+        "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
@@ -2017,6 +2021,274 @@ fn compat_detail_lines(entry: &CompatEntry) -> Vec<String> {
     lines
 }
 
+// ---------------------------------------------------------------------------
+// anticheat
+// ---------------------------------------------------------------------------
+
+/// Detect a game's anti-cheat runtime and show the injection gate.
+///
+/// Merges the markers found in the installed game directory with the compat
+/// DB's curated value, then reports what the injection gate would decide for a
+/// profile that asks for injection. Read-only: it never injects and never
+/// writes the database.
+fn anticheat(args: &[String]) -> Result<()> {
+    let parsed = parse_anticheat_args(args)?;
+    if parsed.help {
+        println!("{}", anticheat_usage());
+        return Ok(());
+    }
+
+    let app_id = parsed
+        .app_id
+        .clone()
+        .with_context(|| format!("missing <appid>\n\n{}", anticheat_usage()))?;
+    if app_id.parse::<u32>().is_err() {
+        bail!("`{app_id}` is not a numeric Steam appid");
+    }
+    let id = GameId::new(Store::Steam, app_id.clone());
+
+    // Resolve the install directory: `--dir` wins, else find it in the scan.
+    let install_dir = match parsed.dir.clone() {
+        Some(dir) => Some(dir),
+        None => {
+            let root = match parsed.steam_root.clone() {
+                Some(root) => root,
+                None => discover_steam_root().context(
+                    "no Steam library found; pass --steam-root <path> or --dir <game dir>",
+                )?,
+            };
+            let report = steam::scan_steam(&root, false);
+            for warning in &report.warnings {
+                eprintln!("warning: {warning}");
+            }
+            report
+                .games
+                .into_iter()
+                .find(|game| game.id.store_id == app_id)
+                .and_then(|game| game.install_dir)
+        }
+    };
+
+    let scan = install_dir
+        .as_deref()
+        .map(pitagames_platform::anticheat::detect)
+        .unwrap_or_default();
+
+    let shipped = if parsed.shipped.is_empty() {
+        pitagames_platform::compat::default_shipped_dirs()
+    } else {
+        parsed.shipped.clone()
+    };
+    let user = if parsed.user.is_empty() {
+        pitagames_platform::compat::default_user_dirs()
+    } else {
+        parsed.user.clone()
+    };
+    let db = CompatDb::load_from(&shipped, &user);
+    for warning in db.warnings() {
+        eprintln!("warning: {warning}");
+    }
+
+    let curated = db
+        .get(&id)
+        .map(|entry| entry.anticheat)
+        .unwrap_or(AntiCheat::Unknown);
+    let merged = pitagames_platform::anticheat::effective(curated, &scan);
+    // What the graphics UI will face: injection requested, not yet acknowledged.
+    let decision = pitagames_platform::anticheat::gate(merged.kind, true, false);
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "game": id,
+            "install_dir": install_dir,
+            "scan": scan,
+            "curated": curated,
+            "effective": merged,
+            "gate": decision,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for line in anticheat_lines(
+            &app_id,
+            install_dir.as_deref(),
+            &scan,
+            curated,
+            merged,
+            decision,
+        ) {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+fn anticheat_lines(
+    app_id: &str,
+    install_dir: Option<&Path>,
+    scan: &AnticheatScan,
+    curated: AntiCheat,
+    merged: EffectiveAnticheat,
+    decision: GateDecision,
+) -> Vec<String> {
+    let mut lines = vec![format!("Anti-cheat for steam:{app_id}")];
+
+    match install_dir {
+        Some(dir) => lines.push(format!("  install dir: {}", dir.display())),
+        None => lines.push("  install dir: (not installed here)".to_string()),
+    }
+
+    lines.push(format!("  detected:    {}", detected_label(scan)));
+    for finding in &scan.findings {
+        lines.push(format!(
+            "      {}  ({})",
+            finding.path.display(),
+            finding.kind.as_str()
+        ));
+    }
+
+    lines.push(format!("  curated:     {}", curated.as_str()));
+    let effective = match merged.source {
+        AnticheatSource::Undetermined => merged.kind.as_str().to_string(),
+        source => format!("{} ({})", merged.kind.as_str(), source_label(source)),
+    };
+    lines.push(format!("  effective:   {effective}"));
+
+    match decision.confirmation() {
+        Some(anticheat) => {
+            lines.push(format!(
+                "  gate:        confirmation required before {} injection",
+                anticheat.as_str()
+            ));
+            if let Some(message) = decision.message() {
+                lines.push(format!("      {message}"));
+            }
+        }
+        None => {
+            lines.push("  gate:        injection allowed (no anti-cheat hard gate)".to_string())
+        }
+    }
+
+    lines
+}
+
+/// A short description of what a scan found, distinguishing "not scanned" from
+/// "scanned and clean".
+fn detected_label(scan: &AnticheatScan) -> String {
+    if !scan.scanned {
+        return "unknown (not scanned)".to_string();
+    }
+
+    let mut label = if scan.kind == AntiCheat::Unknown {
+        "none (no markers found)".to_string()
+    } else {
+        format!(
+            "{} ({} marker{})",
+            scan.kind.as_str(),
+            scan.findings.len(),
+            if scan.findings.len() == 1 { "" } else { "s" }
+        )
+    };
+    if scan.truncated {
+        label.push_str(", walk truncated");
+    }
+    label
+}
+
+fn source_label(source: AnticheatSource) -> &'static str {
+    match source {
+        AnticheatSource::Detected => "detected",
+        AnticheatSource::Curated => "compat DB",
+        AnticheatSource::Undetermined => "unknown",
+    }
+}
+
+/// Parsed `anticheat` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct AnticheatArgs {
+    app_id: Option<String>,
+    dir: Option<PathBuf>,
+    steam_root: Option<PathBuf>,
+    shipped: Vec<PathBuf>,
+    user: Vec<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_anticheat_args(args: &[String]) -> Result<AnticheatArgs> {
+    let mut parsed = AnticheatArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--dir" | "--steam-root" | "--shipped" | "--user" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                apply_anticheat_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--dir=")
+                || arg.starts_with("--steam-root=")
+                || arg.starts_with("--shipped=")
+                || arg.starts_with("--user=") =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_anticheat_flag(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => {
+                if parsed.app_id.is_some() {
+                    bail!("expected a single <appid>\n\n{}", anticheat_usage());
+                }
+                parsed.app_id = Some(other.to_string());
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `anticheat`\n\n{}",
+                anticheat_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn apply_anticheat_flag(parsed: &mut AnticheatArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--dir" => parsed.dir = Some(PathBuf::from(value)),
+        "--steam-root" => parsed.steam_root = Some(PathBuf::from(value)),
+        "--shipped" => parsed.shipped.push(PathBuf::from(value)),
+        "--user" => parsed.user.push(PathBuf::from(value)),
+        other => bail!("internal error: unknown anticheat flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn anticheat_usage() -> String {
+    "USAGE:\n    pitagames-cli anticheat <appid> [options]\n\n\
+     ARGS:\n    \
+     <appid>                Numeric Steam appid\n\n\
+     OPTIONS:\n    \
+     --dir <path>           Scan this install directory directly (skips the appmanifest scan)\n    \
+     --steam-root <path>    Steam root to find the install dir (default: auto-detect)\n    \
+     --shipped <dir>        Read shipped compat entries from this directory (repeatable)\n    \
+     --user <dir>           Read user compat overrides from this directory (repeatable)\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Merges the anti-cheat markers found in the installed game directory with the\n\
+     compat DB's curated value, then shows what the injection gate would decide for a\n\
+     profile that asks for injection. Read-only: it never injects and never writes."
+        .to_string()
+}
+
 fn compat_usage() -> String {
     "USAGE:\n    pitagames-cli compat [<store> <id>] [--shipped <dir>]... [--user <dir>]... [--json]\n\n\
      ARGS:\n    \
@@ -2196,7 +2468,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -2809,5 +3081,95 @@ verified = ["rdna4"]
                 .iter()
                 .any(|line| line.contains("No entries loaded"))
         );
+    }
+
+    #[test]
+    fn parses_anticheat_arguments() {
+        let parsed = parse_anticheat_args(&[
+            "1091500".to_string(),
+            "--dir".to_string(),
+            "/games/cp2077".to_string(),
+            "--shipped=/compat".to_string(),
+            "--user".to_string(),
+            "/overrides".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.app_id.as_deref(), Some("1091500"));
+        assert_eq!(parsed.dir, Some(PathBuf::from("/games/cp2077")));
+        assert_eq!(parsed.shipped, vec![PathBuf::from("/compat")]);
+        assert_eq!(parsed.user, vec![PathBuf::from("/overrides")]);
+        assert!(parsed.json && !parsed.help);
+
+        for args in [
+            vec!["--dir"],
+            vec!["--dir="],
+            vec!["1", "2"],
+            vec!["--bogus"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_anticheat_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        assert!(parse_anticheat_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn renders_the_anticheat_gate() {
+        use pitagames_platform::anticheat::{AnticheatFinding, AnticheatScan};
+
+        let scan = AnticheatScan {
+            kind: AntiCheat::Eac,
+            findings: vec![AnticheatFinding {
+                kind: AntiCheat::Eac,
+                marker: "easyanticheat",
+                path: PathBuf::from("/games/Game/EasyAntiCheat"),
+            }],
+            scanned: true,
+            truncated: false,
+        };
+        let merged = EffectiveAnticheat {
+            kind: AntiCheat::Eac,
+            source: AnticheatSource::Detected,
+        };
+        let decision = GateDecision::ConfirmationRequired {
+            anticheat: AntiCheat::Eac,
+        };
+
+        let lines = anticheat_lines(
+            "1091500",
+            Some(Path::new("/games/Game")),
+            &scan,
+            AntiCheat::None,
+            merged,
+            decision,
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("Anti-cheat for steam:1091500"), "{joined}");
+        assert!(joined.contains("eac (1 marker)"), "{joined}");
+        assert!(joined.contains("curated:     none"), "{joined}");
+        assert!(joined.contains("effective:   eac (detected)"), "{joined}");
+        assert!(joined.contains("confirmation required"), "{joined}");
+        assert!(joined.contains("Easy Anti-Cheat"), "{joined}");
+
+        // A clean scan with no compat entry allows injection.
+        let clean = AnticheatScan {
+            scanned: true,
+            ..AnticheatScan::default()
+        };
+        let merged = pitagames_platform::anticheat::effective(AntiCheat::Unknown, &clean);
+        let lines = anticheat_lines(
+            "1",
+            None,
+            &clean,
+            AntiCheat::Unknown,
+            merged,
+            GateDecision::Allowed,
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("none (no markers found)"), "{joined}");
+        assert!(joined.contains("(not installed here)"), "{joined}");
+        assert!(joined.contains("injection allowed"), "{joined}");
     }
 }

@@ -26,6 +26,7 @@ use library::{Library, OWNED_METADATA_PER_RUN};
 use steam_account::Account;
 
 mod account;
+mod anticheat;
 mod art;
 mod detail;
 mod downloads;

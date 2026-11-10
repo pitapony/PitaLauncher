@@ -214,5 +214,6 @@ tests.
 - `platform::gpu` / the capability matrix that turns `Arch` into availability.
 - Reading the DB into a launch profile or the `platform::envc` compiler.
 - The graphics screen, "why disabled" copy and the wizard (M3).
-- Anti-cheat *detection* (EAC/BattlEye directories): the DB records the curated
-  `anticheat` value; scanning for the runtimes is the M1 follow-up slice.
+- Anti-cheat *detection* (EAC/BattlEye directories) is no longer out of scope:
+  it ships as `platform::anticheat` (`docs/m1-anticheat.md`), which merges its
+  marker walk with the curated `anticheat` value this loader records.
