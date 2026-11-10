@@ -49,8 +49,15 @@ fn main() {
         .with_title("PitaGames")
         .with_inner_size(dioxus::desktop::LogicalSize::new(1280.0, 800.0));
 
+    // Dioxus installs a default Window/Edit/Help menu bar on a decorated
+    // window. The launcher has no use for it (navigation lives in the left
+    // rail), so pass an empty menu.
     dioxus::LaunchBuilder::desktop()
-        .with_cfg(dioxus::desktop::Config::new().with_window(window))
+        .with_cfg(
+            dioxus::desktop::Config::new()
+                .with_window(window)
+                .with_menu(None),
+        )
         .launch(App);
 }
 
