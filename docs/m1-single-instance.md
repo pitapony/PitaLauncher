@@ -1,8 +1,8 @@
 # M1 — Single-instance lock
 
-Status: implemented and verified locally (pure crates). `crates/app` compiles
-the same code and is verified in `archlinux:latest`. Not yet run against a live
-Steam client on the RX 9070 / RX 5700 XT.
+Status: implemented and verified in `archlinux:latest` (build, clippy, tests and an
+Xvfb smoke run of two launches). Not yet run against a live Steam client on the
+RX 9070 / RX 5700 XT.
 
 ## Why this exists
 
@@ -56,13 +56,26 @@ holds it for the whole run:
 
 - **Lock acquired** → the launcher starts normally.
 - **Already running** → prints `PitaGames is already running (pid N).` and the
-  lock path on stderr, then exits `0`. Re-focusing the existing window is the
-  later desktop-entry/tray slice ("single-instance focus"); for now the second
-  launch simply declines to run.
+  lock path on stderr, asks the running instance to come to the front through the
+  activation socket, and exits `0`. The second launch never opens a window.
 - **Genuine I/O failure** → prints the error and exits `1`. Continuing unlocked
   would defeat the guard.
 - **No data directory** (`HOME` unset) → a warning, then the launcher runs
   without a lock. There is nowhere to put the lock file and nothing to protect.
+
+## Focus forwarding (`core::activation`)
+
+The lock answers "is someone else running?"; the activation socket answers
+"tell that someone to come forward". `main` binds it immediately after taking
+the lock — so only the owner ever listens — and the second launch calls
+`request_focus` before exiting. One line in, one acknowledgement out (`focus` →
+`ok`), on `<XDG_DATA_HOME>/pitagames/instance.sock` (`0600`). A stale socket left
+by a crash is probed and removed; a path longer than 100 bytes disables
+forwarding with a warning rather than failing to bind.
+
+`docs/m1-desktop-integration.md` has the protocol, the event-loop wiring and the
+Wayland caveat (the compositor may refuse focus even though the window is
+raised). `pitagames-cli activate` is the client-side diagnostic.
 
 ## Why the shim and the CLI do not take it
 
@@ -80,19 +93,29 @@ safe.
 - **Lock-scope only.** The lock is advisory and process-scoped. It does not stop
   a *different* program (or a stale build) from editing the same files, and the
   CLI/shim bypass it on purpose.
-- **No focus-forwarding yet.** The second launch reports and exits; it does not
-  raise the running window. That is the M1 `.desktop`/tray slice.
+- **Focus forwarding is best effort.** The socket request is delivered and
+  acknowledged, but on Wayland the compositor may refuse to give the raised
+  window keyboard focus. Without a socket (an older build, or a long
+  `XDG_DATA_HOME`) the second launch still exits `0` after reporting why.
 - **Not hardware-tested.** No live Steam client on the RX 9070 / RX 5700 XT has
   raced two instances yet.
 
 ## Verification
 
-- `pitagames-core`: **55 tests** (was 51), including 4 `lock` tests (acquire and
-  path, a second acquire reports `AlreadyRunning` with the holder's pid, drop
-  releases the lock, missing parent directories are created).
-- Pure crates fmt + clippy `-D warnings` + tests clean locally
-  (core 55, db 22, art 14, metadata 28, platform 29, stores 98 unit + 13
-  integration, secrets 9, shim 8, cli 19).
-- `crates/app` builds, clippy-clean and **46 tests** pass in `archlinux:latest`
-  (unchanged count; the startup path takes the lock in the same binary CI
-  lints).
+- `pitagames-core`: **81 tests**, including the 4 `lock` tests (acquire and path,
+  a second acquire reports `AlreadyRunning` with the holder's pid, drop releases
+  the lock, missing parent directories are created) and the 7 `activation` tests
+  (round trip, unknown request, second bind, stale socket, path limit, no
+  listener, silent client).
+- Pure crates fmt + clippy `-D warnings` + tests clean locally (core 81, db 22,
+  art 14, metadata 28, platform 69, stores 98 unit + 13 integration, secrets 9,
+  shim 8, cli 29).
+- `crates/app`: builds, clippy-clean and **73 tests** pass in `archlinux:latest`
+  (66 before this slice; the new ones cover the icon painter and the focus
+  channel).
+- **Xvfb smoke run** in `archlinux:latest` with an empty Steam library: the first
+  launch opened the window and held the lock; a second `pitagames` printed
+  `PitaGames is already running (pid N).`, the lock path and
+  `… asked it to come to the front.`, then exited **0**; the running GUI logged
+  `[pitagames] raised the window for a second launch`. `pitagames-cli activate`
+  exited **0** with `{"activated": true, "socket": …}`.

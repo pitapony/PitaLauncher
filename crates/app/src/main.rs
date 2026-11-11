@@ -26,19 +26,23 @@ use library::{Library, OWNED_METADATA_PER_RUN};
 use steam_account::Account;
 
 mod account;
+mod activation;
 mod anticheat;
 mod art;
 mod copy;
+mod desktop_entry;
 mod detail;
 mod diagnostics;
 mod downloads;
 mod format;
 mod grid;
+mod icon;
 mod library;
 mod log_view;
 mod persist;
 mod runtime;
 mod steam_account;
+mod tray;
 mod wrappers;
 
 fn main() {
@@ -46,6 +50,12 @@ fn main() {
     // race over Steam's config files; the lock is held for the whole run and
     // released by the kernel when this process exits.
     let _lock = take_instance_lock();
+
+    // The socket a second launch connects to. Started after the lock so only
+    // the instance that owns the launcher listens on it.
+    activation::start();
+    // A checkout has no packaged menu entry; write one that points here.
+    desktop_entry::ensure();
 
     // A desktop window, not fullscreen: the 10-foot console shell is M2.5.
     let window = dioxus::desktop::WindowBuilder::new()
@@ -55,12 +65,17 @@ fn main() {
     // Dioxus installs a default Window/Edit/Help menu bar on a decorated
     // window. The launcher has no use for it (navigation lives in the left
     // rail), so pass an empty menu.
+    let mut config = dioxus::desktop::Config::new()
+        .with_window(window)
+        .with_menu(None);
+    // The window icon is painted in code (`icon::rgba`); without one the
+    // window falls back to the toolkit's default placeholder.
+    if let Some(icon) = icon::window_icon(icon::DEFAULT_SIZE) {
+        config = config.with_icon(icon);
+    }
+
     dioxus::LaunchBuilder::desktop()
-        .with_cfg(
-            dioxus::desktop::Config::new()
-                .with_window(window)
-                .with_menu(None),
-        )
+        .with_cfg(config)
         .launch(App);
 }
 
@@ -85,6 +100,9 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
                 None => eprintln!("PitaGames is already running."),
             }
             eprintln!("Another instance holds {}.", path.display());
+            // The window the user meant to reach is already open; ask it to
+            // come forward instead of leaving the click looking ignored.
+            activation::focus_running();
             std::process::exit(0);
         }
         Err(error) => {
@@ -168,8 +186,49 @@ fn App() -> Element {
     // The Steam account: key presence, SteamID and what the owned list knows.
     let mut account_state = use_signal(|| None::<Account>);
     // The single metadata fetch channel; its worker holds the only client, so
-    // the 200/5-minute budget is global rather than per task.
+    // the 200/5-minute budget is global rather than per-task.
     let mut metadata_queue = use_signal(|| None::<MetadataQueue>);
+
+    // Activation: the socket thread forwards "focus" requests here, and this
+    // future raises the window on the event-loop thread (tao window calls are
+    // only safe there). With no socket the receiver is `None` and the future
+    // returns immediately.
+    let requests = use_hook(activation::Requests::take);
+    use_future(move || {
+        let requests = requests.clone();
+        async move {
+            let Some(requests) = requests else {
+                return;
+            };
+            while let Some(request) = requests.next().await {
+                if request == pitagames_core::activation::Activation::Focus {
+                    activation::raise_window();
+                    eprintln!("[pitagames] raised the window for a second launch");
+                }
+            }
+        }
+    });
+
+    // The tray icon is optional: a missing status-notifier host costs the icon,
+    // never the window. The menu handler is registered unconditionally because
+    // hooks must not be conditional; without an icon it simply never fires.
+    // A left click is raised by Dioxus itself (enabled by default).
+    let tray = use_hook(|| tray::build_optional().map(std::rc::Rc::new));
+    let tray_menu = tray
+        .as_ref()
+        .map(|tray| (tray.show_id().clone(), tray.quit_id().clone()));
+    dioxus::desktop::use_tray_menu_event_handler(move |event| {
+        let Some((show, quit)) = tray_menu.as_ref() else {
+            return;
+        };
+        if event.id == *show {
+            activation::raise_window();
+        } else if event.id == *quit {
+            // The default close behaviour ends the event loop once the last
+            // window is gone, which is the quit path.
+            dioxus::desktop::window().close();
+        }
+    });
 
     // One task owns the background work: scan, persist, then drain download
     // events for the lifetime of the window. Scans are file IO only, so running

@@ -4,6 +4,7 @@
 //! the macOS branch exists only so contributors can run the pure-Rust crates in
 //! a container or on a dev Mac without the scan silently finding nothing.
 
+use std::env;
 use std::path::PathBuf;
 
 const APP_DIR: &str = "pitagames";
@@ -62,6 +63,35 @@ pub fn lock_file() -> Option<PathBuf> {
 /// `<XDG_DATA_HOME>/pitagames/logs`.
 pub fn logs_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("logs"))
+}
+
+/// `<XDG_DATA_HOME>/pitagames/instance.sock`: the activation socket.
+///
+/// The second launch connects here to raise the running window; see
+/// [`crate::activation`]. It lives next to the lock because both describe the
+/// same "one launcher at a time" contract.
+pub fn activation_socket() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("instance.sock"))
+}
+
+/// `<XDG_DATA_HOME>/applications/pitagames.desktop`: the generated entry.
+pub fn desktop_entry_file() -> Option<PathBuf> {
+    data_home().map(|base| base.join("applications").join("pitagames.desktop"))
+}
+
+/// The XDG data search path (`XDG_DATA_DIRS`, default
+/// `/usr/local/share:/usr/share`).
+///
+/// Used to notice a packaged `.desktop` file before generating a user-level one
+/// that would shadow it.
+pub fn data_dirs() -> Vec<PathBuf> {
+    match env_path("XDG_DATA_DIRS") {
+        Some(dirs) => env::split_paths(&dirs).collect(),
+        None => vec![
+            PathBuf::from("/usr/local/share"),
+            PathBuf::from("/usr/share"),
+        ],
+    }
 }
 
 /// `<XDG_DATA_HOME>/pitagames/backups/steam`: Steam config backups and the
@@ -164,5 +194,50 @@ mod tests {
         drop(guard);
 
         assert!(!roots.iter().any(|root| root.as_os_str().is_empty()));
+    }
+
+    #[test]
+    fn desktop_and_activation_files_live_under_the_data_home() {
+        let guard = ENV_LOCK.lock().unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-desktop") };
+        let entry = desktop_entry_file();
+        let socket = activation_socket();
+        let lock = lock_file();
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        drop(guard);
+
+        assert_eq!(
+            entry,
+            Some(PathBuf::from(
+                "/tmp/xdg-desktop/applications/pitagames.desktop"
+            ))
+        );
+        assert_eq!(
+            socket,
+            Some(PathBuf::from("/tmp/xdg-desktop/pitagames/instance.sock"))
+        );
+        // Both single-instance files sit in the same directory.
+        assert_eq!(socket.unwrap().parent(), lock.unwrap().parent());
+    }
+
+    #[test]
+    fn the_data_search_path_follows_xdg_data_dirs() {
+        let guard = ENV_LOCK.lock().unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_DIRS", "/opt/one:/opt/two") };
+        let dirs = data_dirs();
+        unsafe { std::env::remove_var("XDG_DATA_DIRS") };
+        let defaults = data_dirs();
+        drop(guard);
+
+        assert_eq!(dirs, [PathBuf::from("/opt/one"), PathBuf::from("/opt/two")]);
+        assert_eq!(
+            defaults,
+            [
+                PathBuf::from("/usr/local/share"),
+                PathBuf::from("/usr/share")
+            ]
+        );
     }
 }

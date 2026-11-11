@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=PitaGames
+GenericName=Game launcher
+Comment=Launch and configure your Steam library
+Exec=pitagames
+Icon=pitagames
+Terminal=false
+Categories=Game;
+Keywords=game;launcher;steam;proton;
+StartupWMClass=pitagames

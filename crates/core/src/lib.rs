@@ -1,10 +1,15 @@
 //! Domain types shared by every PitaGames crate.
 //!
 //! This crate deliberately has no UI framework dependencies and almost no I/O:
-//! it is the boundary that keeps the Dioxus renderer replaceable. The one
-//! exception is [`profile_file`] — the launcher's own pre-compiled shim profile,
-//! which the GUI, the CLI and the shim must all agree on byte for byte.
+//! it is the boundary that keeps the Dioxus renderer replaceable. The exceptions
+//! are [`profile_file`] — the launcher's own pre-compiled shim profile, which the
+//! GUI, the CLI and the shim must all agree on byte for byte — and the two
+//! desktop-integration files the launcher owns: the generated
+//! [`desktop`] entry and the [`activation`] socket a second launch talks to.
 
+#[cfg(unix)]
+pub mod activation;
+pub mod desktop;
 pub mod launch;
 pub mod lock;
 pub mod metadata;
@@ -13,6 +18,11 @@ pub mod profile;
 pub mod profile_file;
 pub mod store;
 
+#[cfg(unix)]
+pub use activation::{Activation, ActivationError, ActivationServer, request_focus};
+pub use desktop::{
+    APP_ID, DESKTOP_SPEC_VERSION, DesktopEntry, DesktopEntryError, ENTRY_FILE_NAME, InstallOutcome,
+};
 pub use launch::{
     LaunchSpec, SHIM_PROGRAM, TokenizeError, flatten_wrappers, render_command,
     render_shell_command, shell_quote, shim_launch_options, steam_install, steam_run,

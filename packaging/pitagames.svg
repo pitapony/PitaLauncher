@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  PitaGames application icon.
+
+  The same mark is painted at runtime for the window and tray icons
+  (crates/app/src/icon.rs): a rounded dark tile with a play triangle. Keep the
+  two in step — the geometry here is the 256 px version of that painter's, and
+  the colours are the same three constants.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-label="PitaGames">
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2e3a56"/>
+      <stop offset="1" stop-color="#1a1f2e"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="52" ry="52" fill="url(#tile)"/>
+  <path d="M 100 74 L 100 182 L 186 128 Z" fill="#8fb0e8"/>
+</svg>

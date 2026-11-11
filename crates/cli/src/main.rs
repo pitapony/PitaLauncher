@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 
+use pitagames_core::desktop::{self, DesktopEntry};
 use pitagames_core::{
     AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
     shim_launch_options, shim_profile_path, steam_install,
@@ -60,6 +61,8 @@ fn run() -> Result<()> {
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "logs" => logs(&args.collect::<Vec<_>>()),
+        "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
+        "activate" => activate(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
         "steam-account" => steam_account(&args.collect::<Vec<_>>()),
@@ -859,6 +862,254 @@ fn apply_logs_flag(parsed: &mut LogsArgs, flag: &str, value: &str) -> Result<()>
         other => bail!("internal error: unknown logs flag `{other}`"),
     }
     Ok(())
+}
+
+/// Read, write or remove the launcher's `.desktop` entry.
+///
+/// The GUI regenerates the user-level entry on startup so an uninstalled
+/// checkout still appears in menus; this command is the same renderer without a
+/// webview, and `--print` is how `packaging/pitagames.desktop` is regenerated:
+///
+/// ```text
+/// pitagames-cli desktop-entry --print > packaging/pitagames.desktop
+/// ```
+fn desktop_entry(args: &[String]) -> Result<()> {
+    let parsed = parse_desktop_entry_args(args)?;
+    if parsed.help {
+        println!("{}", desktop_entry_usage());
+        return Ok(());
+    }
+
+    let exec = if parsed.exec.is_empty() {
+        vec!["pitagames".to_string()]
+    } else {
+        parsed.exec.clone()
+    };
+    let entry = DesktopEntry::default_for(exec);
+    let path = match parsed.path.clone() {
+        Some(path) => path,
+        None => pitagames_core::paths::desktop_entry_file()
+            .context("cannot determine the XDG data dir; pass --path <file>")?,
+    };
+
+    if parsed.print {
+        print!("{}", entry.render()?);
+        return Ok(());
+    }
+
+    if parsed.remove {
+        let removed = DesktopEntry::remove(&path)?;
+        if parsed.json {
+            let payload = serde_json::json!({
+                "path": path,
+                "removed": removed,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else if removed {
+            println!("Removed {}", path.display());
+        } else {
+            println!("No desktop entry at {}", path.display());
+        }
+        return Ok(());
+    }
+
+    if parsed.write {
+        let outcome = entry.install(&path)?;
+        if parsed.json {
+            let payload = serde_json::json!({
+                "path": path,
+                "outcome": outcome.label(),
+                "exec": entry.exec,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("{} {}", outcome.label(), path.display());
+        }
+        return Ok(());
+    }
+
+    let current = entry.matches(&path)?;
+    let packaged = desktop::packaged_entry(&pitagames_core::paths::data_dirs());
+    if parsed.json {
+        let payload = serde_json::json!({
+            "path": path,
+            "present": path.exists(),
+            "current": current,
+            "packaged": packaged,
+            "exec": entry.exec,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Desktop entry: {}", path.display());
+        println!(
+            "  state:      {}",
+            if !path.exists() {
+                "absent"
+            } else if current {
+                "current"
+            } else {
+                "stale (run --write)"
+            }
+        );
+        println!(
+            "  packaged:   {}",
+            if packaged {
+                "yes (the package owns the entry; the GUI leaves it alone)"
+            } else {
+                "no"
+            }
+        );
+        println!("  exec:       {}", entry.exec.join(" "));
+    }
+
+    Ok(())
+}
+
+/// Parsed `desktop-entry` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DesktopEntryArgs {
+    exec: Vec<String>,
+    path: Option<PathBuf>,
+    print: bool,
+    write: bool,
+    remove: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_desktop_entry_args(args: &[String]) -> Result<DesktopEntryArgs> {
+    let mut parsed = DesktopEntryArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--print" => parsed.print = true,
+            "--write" => parsed.write = true,
+            "--remove" => parsed.remove = true,
+            "--json" => parsed.json = true,
+            "--exec" | "--path" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                apply_desktop_entry_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--exec=") || arg.starts_with("--path=") => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_desktop_entry_flag(&mut parsed, flag, value)?;
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `desktop-entry`\n\n{}",
+                desktop_entry_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let actions = [parsed.print, parsed.write, parsed.remove]
+        .into_iter()
+        .filter(|chosen| *chosen)
+        .count();
+    if actions > 1 {
+        bail!(
+            "--print, --write and --remove are exclusive\n\n{}",
+            desktop_entry_usage()
+        );
+    }
+
+    Ok(parsed)
+}
+
+fn apply_desktop_entry_flag(parsed: &mut DesktopEntryArgs, flag: &str, value: &str) -> Result<()> {
+    match flag {
+        "--exec" => {
+            if value.is_empty() {
+                bail!("--exec requires a path or program name");
+            }
+            parsed.exec.push(value.to_string());
+        }
+        "--path" => {
+            if value.is_empty() {
+                bail!("--path requires a file path");
+            }
+            parsed.path = Some(PathBuf::from(value));
+        }
+        other => bail!("internal error: unknown desktop-entry flag `{other}`"),
+    }
+    Ok(())
+}
+
+/// Ask a running launcher to come to the front.
+///
+/// The second launch of the GUI does exactly this through
+/// `pitagames_core::activation`; the command exists so the channel can be
+/// exercised without a second window, and so a desktop shortcut or hotkey can
+/// raise the launcher.
+fn activate(args: &[String]) -> Result<()> {
+    let mut path: Option<PathBuf> = None;
+    let mut json = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => json = true,
+            "--socket" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--socket requires a path")?;
+                path = Some(PathBuf::from(value));
+            }
+            "-h" | "--help" => {
+                println!("{}", activate_usage());
+                return Ok(());
+            }
+            _ if arg.starts_with("--socket=") => {
+                let value = &arg["--socket=".len()..];
+                if value.is_empty() {
+                    bail!("--socket requires a path");
+                }
+                path = Some(PathBuf::from(value));
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `activate`\n\n{}",
+                activate_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let socket = match path {
+        Some(path) => path,
+        None => pitagames_core::paths::activation_socket()
+            .context("cannot determine the XDG data dir; pass --socket <path>")?,
+    };
+
+    match pitagames_core::activation::request_focus(&socket) {
+        Ok(()) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "socket": socket,
+                        "activated": true,
+                    }))?
+                );
+            } else {
+                println!("Asked the running PitaGames to come to the front.");
+            }
+            Ok(())
+        }
+        Err(error) => bail!(
+            "no running PitaGames answered on {}: {error}",
+            socket.display()
+        ),
+    }
 }
 
 /// Read or manage the Steam Web API key and the account it unlocks.
@@ -2641,7 +2892,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -2684,6 +2935,35 @@ fn logs_usage() -> String {
      records one launch line per game; PROTON_LOG writes steam-<appid>.log; DXVK\n\
      logging writes <exe>_d3d11.log and friends. Read-only: nothing is edited or\n\
      deleted."
+        .to_string()
+}
+
+fn desktop_entry_usage() -> String {
+    "USAGE:\n    pitagames-cli desktop-entry [options]\n\n\
+     ACTIONS (default: show the installed state):\n    \
+     --print                Print the entry to stdout (no file is written)\n    \
+     --write                Install it into the applications directory\n    \
+     --remove               Delete the user-level entry\n\n\
+     OPTIONS:\n    \
+     --exec <path>          Exec target; repeat for arguments (default: pitagames)\n    \
+     --path <file>          Entry file (default: $XDG_DATA_HOME/applications/pitagames.desktop)\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     The GUI regenerates the same entry on every start unless a packaged one is\n\
+     installed in $XDG_DATA_DIRS. Regenerate the packaged file with:\n\
+     \x20 pitagames-cli desktop-entry --print > packaging/pitagames.desktop"
+        .to_string()
+}
+
+fn activate_usage() -> String {
+    "USAGE:\n    pitagames-cli activate [--socket <path>] [--json]\n\n\
+     OPTIONS:\n    \
+     --socket <path>        Activation socket (default: $XDG_DATA_HOME/pitagames/instance.sock)\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Installing a second launcher asks the running one to come to the front and\n\
+     exits; this command sends the same request by hand. It fails when no\n\
+     launcher is listening, which is the normal state when PitaGames is closed."
         .to_string()
 }
 
@@ -3415,5 +3695,90 @@ verified = ["rdna4"]
         assert!(joined.contains("none (no markers found)"), "{joined}");
         assert!(joined.contains("(not installed here)"), "{joined}");
         assert!(joined.contains("injection allowed"), "{joined}");
+    }
+
+    #[test]
+    fn parses_desktop_entry_actions_and_exec_argv() {
+        let parsed = parse_desktop_entry_args(&[
+            "--exec".to_string(),
+            "/opt/Pita Games/pitagames".to_string(),
+            "--exec=--console".to_string(),
+            "--path".to_string(),
+            "/tmp/pitagames.desktop".to_string(),
+            "--write".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.exec,
+            [
+                "/opt/Pita Games/pitagames".to_string(),
+                "--console".to_string()
+            ]
+        );
+        assert_eq!(parsed.path, Some(PathBuf::from("/tmp/pitagames.desktop")));
+        assert!(parsed.write && parsed.json && !parsed.print && !parsed.remove);
+
+        let printed = parse_desktop_entry_args(&["--print".to_string()]).unwrap();
+        assert!(printed.print && !printed.write && !printed.remove);
+
+        for args in [
+            vec!["--print", "--write"],
+            vec!["--write", "--remove"],
+            vec!["--exec"],
+            vec!["--path="],
+            vec!["extra"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(
+                parse_desktop_entry_args(&args).is_err(),
+                "accepted {args:?}"
+            );
+        }
+
+        let help = parse_desktop_entry_args(&["--help".to_string()]).unwrap();
+        assert!(help.help);
+    }
+
+    #[test]
+    fn desktop_entry_writes_reads_back_and_removes() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("applications").join("pitagames.desktop");
+
+        let args = |action: &str| -> Vec<String> {
+            vec![
+                "--exec".to_string(),
+                "pitagames".to_string(),
+                "--path".to_string(),
+                path.display().to_string(),
+                action.to_string(),
+            ]
+        };
+
+        desktop_entry(&args("--write")).unwrap();
+        assert!(path.is_file());
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("Exec=pitagames\n"), "{contents}");
+
+        // Writing again is a no-op rather than an error.
+        desktop_entry(&args("--write")).unwrap();
+
+        desktop_entry(&args("--remove")).unwrap();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn parses_activate_targets() {
+        let parsed = activate(&["--help".to_string()]);
+        assert!(parsed.is_ok());
+
+        let error = activate(&[
+            "--socket".to_string(),
+            "/nonexistent/pitagames/instance.sock".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no running PitaGames"), "{error}");
     }
 }
