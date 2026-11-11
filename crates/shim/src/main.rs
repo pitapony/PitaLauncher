@@ -145,6 +145,10 @@ fn run(args: &[String]) -> Result<i32, ShimError> {
         println!("{USAGE}");
         return Ok(0);
     }
+    if args.len() > 1 && matches!(args[1].as_str(), "-V" | "--version") {
+        println!("pitagames-shim {}", env!("CARGO_PKG_VERSION"));
+        return Ok(0);
+    }
 
     let (explain, rest) = match args.get(1).map(String::as_str) {
         Some("--explain") => (true, &args[2..]),

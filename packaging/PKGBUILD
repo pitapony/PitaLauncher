@@ -1,0 +1,85 @@
+# Maintainer: PitaPony <pitapony@users.noreply.github.com>
+#
+# PitaGames is M1 (in progress), so this is the `-git` package: it tracks
+# `main`. A tagged release PKGBUILD replaces it once v1 is cut; the package
+# name and the install layout are already the ones the release will use.
+pkgname=pitagames-git
+_pkgname=PitaLauncher
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="A Rust + Dioxus game launcher for Steam on CachyOS and Arch Linux"
+arch=('x86_64')
+url="https://github.com/pitapony/PitaLauncher"
+license=('MIT')
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'openssl'
+  'libayatana-appindicator'  # dlopen'd by the tray icon
+  'xdotool'                  # libxdo, linked by dioxus-desktop
+  'xdg-utils'                # xdg-open for the logs screen
+  'hicolor-icon-theme'
+)
+makedepends=('git' 'rust' 'pkgconf')
+optdepends=(
+  'proton-cachyos: recommended Proton build for FSR 4 / OptiScaler injection'
+  'gamescope: gamescope wrapper and the future console session'
+  'mangohud: performance-overlay wrapper'
+  'lib32-mangohud: performance-overlay wrapper for 32-bit games'
+  'gamemode: CPU governor and scheduling wrapper'
+  'lib32-gamemode: CPU governor and scheduling wrapper for 32-bit games'
+  'umu-launcher: Proton runtime for the non-Steam store backends'
+  'legendary: Epic Games support'
+  'nile: Amazon Games support'
+  'lgogdownloader: GOG support'
+  'nodejs: gogdl fallback'
+  'bash: DLSSNR-AMD / HelixSR installers'
+  'python: DLSSNR-AMD / HelixSR installers and model extraction'
+)
+provides=('pitagames')
+conflicts=('pitagames')
+options=('!lto')
+source=("$_pkgname::git+$url.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$srcdir/$_pkgname"
+  printf 'r%s.%s' "$(git rev-list --count HEAD)" "$(git rev-parse --short=7 HEAD)"
+}
+
+build() {
+  cd "$srcdir/$_pkgname"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  cargo build --release --locked \
+    -p pitagames -p pitagames-cli -p pitagames-shim
+}
+
+package() {
+  cd "$srcdir/$_pkgname"
+
+  install -Dm755 "$srcdir/target/release/pitagames" \
+    "$pkgdir/usr/bin/pitagames"
+  install -Dm755 "$srcdir/target/release/pitagames-cli" \
+    "$pkgdir/usr/bin/pitagames-cli"
+
+  # The shim is the launch target embedded in Steam's launch options, so it is
+  # in /usr/bin; the real binary stays in /usr/lib/pitagames so the two can
+  # never drift apart on a partial upgrade.
+  install -Dm755 "$srcdir/target/release/pitagames-shim" \
+    "$pkgdir/usr/lib/pitagames/pitagames-shim"
+  ln -s /usr/lib/pitagames/pitagames-shim "$pkgdir/usr/bin/pitagames-shim"
+
+  install -Dm644 packaging/pitagames.desktop \
+    "$pkgdir/usr/share/applications/pitagames.desktop"
+  install -Dm644 packaging/io.github.pitapony.PitaGames.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/io.github.pitapony.PitaGames.metainfo.xml"
+  install -Dm644 packaging/pitagames.svg \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/pitagames.svg"
+
+  # The shipped compat database: platform::compat reads this directory (or a
+  # user copy under the data dir) and merges $XDG_CONFIG_HOME overrides on top.
+  install -d "$pkgdir/usr/share/pitagames/compat"
+  install -m644 compat/*.toml "$pkgdir/usr/share/pitagames/compat/"
+
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

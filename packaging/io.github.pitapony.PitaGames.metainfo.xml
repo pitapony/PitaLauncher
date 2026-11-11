@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for the packaged launcher.
+
+  The component id is reverse-DNS because AppStream requires it; the desktop
+  file stays `pitagames.desktop` (without a reverse-DNS prefix) so the existing
+  core renderer, the checked-in packaging/pitagames.desktop and every user-level
+  entry the GUI already wrote keep working. `<launchable>` is what ties the two
+  together.
+
+  No screenshots yet: AppStream wants real ones with an HTTPS URL, and the
+  project has no hosting for them until the release packaging lands.
+-->
+<component type="desktop-application">
+  <id>io.github.pitapony.PitaGames</id>
+
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>PitaGames</name>
+  <summary>Launch and configure your Steam library</summary>
+
+  <description>
+    <p>
+      PitaGames is a game launcher for Steam on CachyOS and Arch Linux. It reads
+      the installed Steam library directly, shows cover art, playtime and
+      install state, and starts games through its own shim instead of a shell
+      command line.
+    </p>
+    <p>
+      Per-game runtime profiles pick a Proton build, a wrapper chain (gamemode,
+      MangoHud, gamescope) and diagnostics, then route the game through
+      pitagames-shim from Steam's launch options. The launcher also carries the
+      PitaGames compatibility database, anti-cheat detection with an injection
+      gate, and a logs viewer.
+    </p>
+    <p>
+      Validated by the project on the Radeon RX 9070 (RDNA 4) and RX 5700 XT
+      (RDNA 1) only; other GPUs are shown as experimental and not tested by us.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">pitagames.desktop</launchable>
+
+  <categories>
+    <category>Game</category>
+  </categories>
+  <keywords>
+    <keyword>game</keyword>
+    <keyword>launcher</keyword>
+    <keyword>steam</keyword>
+    <keyword>proton</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/pitapony/PitaLauncher</url>
+  <url type="bugtracker">https://github.com/pitapony/PitaLauncher/issues</url>
+
+  <developer id="io.github.pitapony">
+    <name>PitaPony</name>
+  </developer>
+
+  <content_rating type="oars-1.1"/>
+
+  <provides>
+    <binary>pitagames</binary>
+    <binary>pitagames-shim</binary>
+    <binary>pitagames-cli</binary>
+  </provides>
+
+  <releases>
+    <release version="0.1.0" date="2026-11-10">
+      <description>
+        <p>First packaged build: Steam library, runtime profiles, compat database, logs and desktop integration.</p>
+      </description>
+    </release>
+  </releases>
+</component>

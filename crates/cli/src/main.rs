@@ -70,6 +70,10 @@ fn run() -> Result<()> {
             println!("{}", usage());
             Ok(())
         }
+        "-V" | "--version" => {
+            println!("pitagames-cli {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         other => bail!("unknown command `{other}`\n\n{}", usage()),
     }
 }
@@ -2891,7 +2895,7 @@ fn human_bytes(bytes: u64) -> String {
 fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
-        "USAGE:\n    pitagames-cli <command> [options]",
+        "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
         "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )

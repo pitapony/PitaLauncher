@@ -46,6 +46,16 @@ mod tray;
 mod wrappers;
 
 fn main() {
+    // `--version` and `-V` are for the package: a bug report or a support
+    // question can name the build without opening a webview.
+    if std::env::args()
+        .skip(1)
+        .any(|arg| arg == "-V" || arg == "--version")
+    {
+        println!("pitagames {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     // One launcher at a time. Two instances would scan the same libraries and
     // race over Steam's config files; the lock is held for the whole run and
     // released by the kernel when this process exits.
