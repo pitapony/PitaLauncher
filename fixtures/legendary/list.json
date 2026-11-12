@@ -1,0 +1,106 @@
+[
+  {
+    "app_name": "Gizmo",
+    "app_title": "Gizmo",
+    "asset_infos": {
+      "Windows": {
+        "app_name": "Gizmo",
+        "asset_id": "Gizmo",
+        "build_version": "0.9.1",
+        "catalog_item_id": "catalog-gizmo",
+        "label_name": "Live",
+        "namespace": "ns-gizmo",
+        "metadata": {},
+        "sidecar_rev": 0
+      }
+    },
+    "base_urls": ["https://download.epicgames.com/"],
+    "metadata": {
+      "id": "catalog-gizmo",
+      "namespace": "ns-gizmo",
+      "categories": []
+    },
+    "sidecar": null,
+    "achievements": null,
+    "dlcs": [
+      {
+        "app_name": "GizmoDeluxe",
+        "app_title": "Gizmo: Deluxe Pack",
+        "asset_infos": {
+          "Windows": {
+            "app_name": "GizmoDeluxe",
+            "asset_id": "GizmoDeluxe",
+            "build_version": "0.9.1",
+            "catalog_item_id": "catalog-gizmo-deluxe",
+            "label_name": "Live",
+            "namespace": "ns-gizmo",
+            "metadata": {},
+            "sidecar_rev": 0
+          }
+        },
+        "base_urls": ["https://download.epicgames.com/"],
+        "metadata": {
+          "id": "catalog-gizmo-deluxe",
+          "mainGameItem": {
+            "title": "Gizmo",
+            "releaseInfo": [{ "appId": "Gizmo" }]
+          }
+        },
+        "sidecar": null,
+        "achievements": null
+      }
+    ]
+  },
+  {
+    "app_name": "GizmoDeluxe",
+    "app_title": "Gizmo: Deluxe Pack",
+    "asset_infos": {
+      "Windows": {
+        "app_name": "GizmoDeluxe",
+        "asset_id": "GizmoDeluxe",
+        "build_version": "0.9.1",
+        "catalog_item_id": "catalog-gizmo-deluxe",
+        "label_name": "Live",
+        "namespace": "ns-gizmo",
+        "metadata": {},
+        "sidecar_rev": 0
+      }
+    },
+    "base_urls": ["https://download.epicgames.com/"],
+    "metadata": {
+      "id": "catalog-gizmo-deluxe",
+      "mainGameItem": {
+        "title": "Gizmo",
+        "releaseInfo": [{ "appId": "Gizmo" }]
+      }
+    },
+    "sidecar": null,
+    "achievements": null,
+    "dlcs": []
+  },
+  {
+    "app_name": "Sugar",
+    "app_title": "Sugar",
+    "asset_infos": {
+      "Windows": {
+        "app_name": "Sugar",
+        "asset_id": "Sugar",
+        "build_version": "1.2.3",
+        "catalog_item_id": "catalog-sugar",
+        "label_name": "Live",
+        "namespace": "ns-sugar",
+        "metadata": {},
+        "sidecar_rev": 1
+      }
+    },
+    "base_urls": ["https://download.epicgames.com/"],
+    "metadata": {
+      "id": "catalog-sugar",
+      "namespace": "ns-sugar",
+      "categories": [{ "path": "games" }]
+    },
+    "sidecar": null,
+    "achievements": null,
+    "dlcs": []
+  }
+]

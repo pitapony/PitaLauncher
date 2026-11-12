@@ -4,14 +4,15 @@
 //! [`StoreBackend`] trait; Steam is read natively from VDF/ACF manifests and
 //! `localconfig.vdf`, and its per-game config is written format-preservingly
 //! (`localconfig.vdf` launch options, `config.vdf` compatibility-tool mappings).
-//! Only the Steam backend is implemented so far; [`cli`] is the PTY driver the
-//! other three stores share.
+//! [`cli`] is the PTY driver those stores share, and [`epic`] is the first
+//! backend on top of it (`legendary`: auth, list, install, verify, launch).
 
 use std::path::PathBuf;
 
 pub mod acf;
 pub mod cli;
 pub mod compat_tool;
+pub mod epic;
 pub mod install;
 pub mod localconfig;
 pub mod steam;
@@ -23,9 +24,13 @@ pub mod watch;
 pub use acf::{AppManifest, DownloadProgress, InstallPhase, ManifestError, flags};
 pub use cli::{
     CliCommand, CliError, CliHandle, CliOptions, CliOutcome, CliSpec, ProgressEvent,
-    ProgressParser, TimeoutKind,
+    ProgressParser, TimeoutKind, resolve_program,
 };
 pub use compat_tool::{CompatTool, DEFAULT_PRIORITY};
+pub use epic::{
+    Epic, EpicAccount, EpicError, RunReport, StoreStatus, VerifyReport, parse_account,
+    parse_installed, parse_owned, parse_version, verify_report,
+};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use steam::{

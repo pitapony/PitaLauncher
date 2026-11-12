@@ -1,0 +1,7 @@
+{
+  "account": "player",
+  "games_available": 42,
+  "games_installed": 2,
+  "egl_sync_enabled": false,
+  "config_directory": "/home/player/.config/legendary"
+}

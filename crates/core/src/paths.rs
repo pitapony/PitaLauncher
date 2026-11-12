@@ -51,6 +51,16 @@ pub fn profiles_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("profiles"))
 }
 
+/// `<XDG_DATA_HOME>/pitagames/games`: where non-Steam stores install by default.
+///
+/// A store backend appends its own namespace and the game's store id
+/// (`games/epic/<app name>`), so the path is predictable before an install
+/// starts and survives a legendary config wipe. A user can always pass another
+/// directory; this is only the default.
+pub fn games_dir() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("games"))
+}
+
 /// `<XDG_DATA_HOME>/pitagames/pitagames.lock`: the single-instance lock file.
 ///
 /// It sits next to the database because that is the resource two instances would
@@ -204,9 +214,14 @@ mod tests {
         let entry = desktop_entry_file();
         let socket = activation_socket();
         let lock = lock_file();
+        let games = games_dir();
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         drop(guard);
 
+        assert_eq!(
+            games,
+            Some(PathBuf::from("/tmp/xdg-desktop/pitagames/games"))
+        );
         assert_eq!(
             entry,
             Some(PathBuf::from(

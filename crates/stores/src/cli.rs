@@ -81,15 +81,31 @@ const PTY_SIZE: PtySize = PtySize {
 /// One operation a store CLI understands.
 ///
 /// The variants carry exactly the values the argv templates may interpolate:
-/// `{id}` and `{dir}` for an install, `{id}` for a launch, nothing for the
-/// list/auth commands.
+/// `{id}`, `{dir}`, `{parent}` and `{name}` for an install (the last two are the
+/// two halves of `{dir}`), `{id}` for a verify or a launch, nothing for the
+/// commands that only read or change the CLI's own state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
     ListInstalled,
     ListOwned,
     Auth,
-    Install { id: String, install_dir: PathBuf },
-    Launch { id: String },
+    /// Remove the stored session (`legendary auth --delete`).
+    Logout,
+    Install {
+        id: String,
+        install_dir: PathBuf,
+    },
+    /// Check an installed game's files without downloading.
+    Verify {
+        id: String,
+    },
+    Launch {
+        id: String,
+    },
+    /// The CLI's own account/install summary.
+    Status,
+    /// The CLI's own version, for the "outdated" warning.
+    Version,
 }
 
 impl CliCommand {
@@ -99,8 +115,12 @@ impl CliCommand {
             Self::ListInstalled => "list-installed",
             Self::ListOwned => "list-owned",
             Self::Auth => "auth",
+            Self::Logout => "logout",
             Self::Install { .. } => "install",
+            Self::Verify { .. } => "verify",
             Self::Launch { .. } => "launch",
+            Self::Status => "status",
+            Self::Version => "version",
         }
     }
 }
@@ -176,10 +196,16 @@ pub struct CliSpec {
     pub list_installed: Vec<String>,
     pub list_owned: Vec<String>,
     pub auth: Vec<String>,
-    /// Templated with `{id}` and `{dir}`.
+    /// `legendary auth --delete`: forget the stored session.
+    pub logout: Vec<String>,
+    /// Templated with `{id}`, `{dir}`, `{parent}` and `{name}`.
     pub install: Vec<String>,
     /// Templated with `{id}`.
+    pub verify: Vec<String>,
+    /// Templated with `{id}`.
     pub launch: Vec<String>,
+    pub status: Vec<String>,
+    pub version: Vec<String>,
 }
 
 impl CliSpec {
@@ -190,27 +216,43 @@ impl CliSpec {
     /// A placeholder that is not available for the command (or malformed) is a
     /// [`CliError::Template`], never silently dropped.
     pub fn argv(&self, command: &CliCommand) -> Result<Vec<String>, CliError> {
-        let (template, values): (&[String], &[(&str, String)]) = match command {
-            CliCommand::ListInstalled => (&self.list_installed, &[]),
-            CliCommand::ListOwned => (&self.list_owned, &[]),
-            CliCommand::Auth => (&self.auth, &[]),
+        let (template, values): (&[String], Vec<(&str, Option<String>)>) = match command {
+            CliCommand::ListInstalled => (&self.list_installed, Vec::new()),
+            CliCommand::ListOwned => (&self.list_owned, Vec::new()),
+            CliCommand::Auth => (&self.auth, Vec::new()),
+            CliCommand::Logout => (&self.logout, Vec::new()),
             CliCommand::Install { id, install_dir } => (
                 &self.install,
-                &[
-                    ("id", id.clone()),
-                    ("dir", install_dir.to_string_lossy().into_owned()),
+                vec![
+                    ("id", Some(id.clone())),
+                    ("dir", Some(install_dir.to_string_lossy().into_owned())),
+                    (
+                        "parent",
+                        install_dir
+                            .parent()
+                            .map(|parent| parent.to_string_lossy().into_owned()),
+                    ),
+                    (
+                        "name",
+                        install_dir
+                            .file_name()
+                            .map(|name| name.to_string_lossy().into_owned()),
+                    ),
                 ],
             ),
-            CliCommand::Launch { id } => (&self.launch, &[("id", id.clone())]),
+            CliCommand::Verify { id } => (&self.verify, vec![("id", Some(id.clone()))]),
+            CliCommand::Launch { id } => (&self.launch, vec![("id", Some(id.clone()))]),
+            CliCommand::Status => (&self.status, Vec::new()),
+            CliCommand::Version => (&self.version, Vec::new()),
         };
         template
             .iter()
-            .map(|token| substitute(token, values))
+            .map(|token| substitute(token, &values))
             .collect()
     }
 }
 
-fn substitute(token: &str, values: &[(&str, String)]) -> Result<String, CliError> {
+fn substitute(token: &str, values: &[(&str, Option<String>)]) -> Result<String, CliError> {
     let mut out = String::with_capacity(token.len());
     let mut rest = token;
     while let Some(open) = rest.find('{') {
@@ -223,7 +265,10 @@ fn substitute(token: &str, values: &[(&str, String)]) -> Result<String, CliError
             });
         };
         let name = &after[..close];
-        let Some((_, value)) = values.iter().find(|(key, _)| *key == name) else {
+        // A value the command carries but this install directory cannot split
+        // (`{parent}` of `/`) is just as unavailable as an unknown name: an
+        // argument must never be silently dropped.
+        let Some((_, Some(value))) = values.iter().find(|(key, _)| *key == name) else {
             return Err(CliError::Template {
                 token: token.to_string(),
                 placeholder: name.to_string(),
@@ -887,7 +932,13 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
-fn resolve_program(program: &str, path_override: Option<&str>) -> Result<PathBuf, CliError> {
+/// Finds the program a run would execute, without running it.
+///
+/// This is the "is the store CLI installed?" question: an absolute path must be
+/// an executable file, a bare name is looked up in `path_override` (a `PATH`
+/// value) or the inherited `PATH`, and a miss is [`CliError::NotFound`] naming
+/// the program — the state the store status UI shows.
+pub fn resolve_program(program: &str, path_override: Option<&str>) -> Result<PathBuf, CliError> {
     let path = Path::new(program);
     if path.components().count() > 1 {
         if is_executable(path) {
@@ -972,8 +1023,12 @@ mod tests {
             list_installed: Vec::new(),
             list_owned: Vec::new(),
             auth: Vec::new(),
+            logout: Vec::new(),
             install: Vec::new(),
+            verify: Vec::new(),
             launch: Vec::new(),
+            status: Vec::new(),
+            version: Vec::new(),
         }
     }
 
@@ -1048,6 +1103,73 @@ mod tests {
             argv,
             ["install", "Gizmo", "--base-path", "/games/Gizmo Deluxe"]
         );
+    }
+
+    #[test]
+    fn argv_splits_an_install_directory_into_parent_and_name() {
+        let mut spec = spec("legendary", ProgressParser::Plain);
+        spec.install = vec![
+            "install".into(),
+            "{id}".into(),
+            "--base-path".into(),
+            "{parent}".into(),
+            "--game-folder".into(),
+            "{name}".into(),
+        ];
+
+        let argv = spec
+            .argv(&CliCommand::Install {
+                id: "Gizmo".into(),
+                install_dir: PathBuf::from("/games/Epic/Gizmo"),
+            })
+            .unwrap();
+        assert_eq!(
+            argv,
+            [
+                "install",
+                "Gizmo",
+                "--base-path",
+                "/games/Epic",
+                "--game-folder",
+                "Gizmo"
+            ]
+        );
+
+        // A path with no file name (`/`) cannot fill `{name}`; the run must fail
+        // before it starts rather than install somewhere else.
+        let error = spec
+            .argv(&CliCommand::Install {
+                id: "Gizmo".into(),
+                install_dir: PathBuf::from("/"),
+            })
+            .unwrap_err();
+        assert!(matches!(error, CliError::Template { .. }), "{error}");
+    }
+
+    #[test]
+    fn verify_status_version_and_logout_use_their_own_templates() {
+        let mut spec = spec("legendary", ProgressParser::Plain);
+        spec.verify = vec!["verify".into(), "{id}".into()];
+        spec.status = vec!["status".into(), "--offline".into(), "--json".into()];
+        spec.version = vec!["--version".into()];
+        spec.logout = vec!["auth".into(), "--delete".into()];
+
+        assert_eq!(
+            spec.argv(&CliCommand::Verify { id: "Gizmo".into() })
+                .unwrap(),
+            ["verify", "Gizmo"]
+        );
+        assert_eq!(
+            spec.argv(&CliCommand::Status).unwrap(),
+            ["status", "--offline", "--json"]
+        );
+        assert_eq!(spec.argv(&CliCommand::Version).unwrap(), ["--version"]);
+        assert_eq!(
+            spec.argv(&CliCommand::Logout).unwrap(),
+            ["auth", "--delete"]
+        );
+        assert_eq!(CliCommand::Verify { id: "x".into() }.as_str(), "verify");
+        assert_eq!(CliCommand::Status.as_str(), "status");
     }
 
     #[test]

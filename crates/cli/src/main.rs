@@ -25,12 +25,13 @@ use pitagames_platform::logs as log_files;
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::compat_tool::CompatTool;
+use pitagames_stores::epic::{self, Epic};
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
 use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
     self, CompatRestoreReport, CompatWriteReport, SteamProcessState, WriteOptions, WriteReport,
 };
-use pitagames_stores::{DEFAULT_PRIORITY, DownloadProgress};
+use pitagames_stores::{CliCommand, CliOptions, DEFAULT_PRIORITY, DownloadProgress, ProgressEvent};
 
 /// Give up on an install after an hour unless told otherwise.
 const DEFAULT_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -66,6 +67,7 @@ fn run() -> Result<()> {
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
         "steam-account" => steam_account(&args.collect::<Vec<_>>()),
+        "epic" => epic(&args.collect::<Vec<_>>()),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -1339,6 +1341,443 @@ fn parse_steam_account_args(args: &[String]) -> Result<SteamAccountArgs> {
                 "unexpected argument `{other}` for `steam-account`\n\n{}",
                 steam_account_usage()
             ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+/// The Epic Games Store backend, through the `legendary` CLI.
+///
+/// Every subcommand is a thin wrapper over `stores::epic`, the same code the GUI
+/// will call: `status`/`version` for the store row, `list`/`installed` for the
+/// library, `auth`/`logout` for the session, and `install`/`verify`/`launch`
+/// with the driver's live progress. `--dry-run` prints the argv without running
+/// anything, which is how the preset is checked on a machine without legendary.
+fn epic(args: &[String]) -> Result<()> {
+    let parsed = parse_epic_args(args)?;
+    if parsed.help {
+        println!("{}", epic_usage());
+        return Ok(());
+    }
+    let Some(subcommand) = parsed.positional.first().cloned() else {
+        bail!("missing subcommand for `epic`\n\n{}", epic_usage());
+    };
+    let backend = Epic::with_program(&parsed.program);
+
+    match subcommand.as_str() {
+        "status" => epic_status(&backend, &parsed),
+        "list" => epic_owned(&backend, &parsed),
+        "installed" => epic_installed(&backend, &parsed),
+        "auth" => epic_auth(&backend, &parsed),
+        "logout" => epic_logout(&backend, &parsed),
+        "install" => epic_install(&backend, &parsed),
+        "verify" => epic_verify(&backend, &parsed),
+        "launch" => epic_launch(&backend, &parsed),
+        other => bail!("unknown `epic` subcommand `{other}`\n\n{}", epic_usage()),
+    }
+}
+
+fn epic_status(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let status = backend.status(None);
+    let options = epic_options(parsed, false);
+
+    let mut version = None;
+    let mut account = None;
+    let mut problem = None;
+    if status.is_ready() {
+        match backend.version(&options) {
+            Ok(found) => version = found,
+            Err(error) => problem = Some(format!("version: {error}")),
+        }
+        match backend.account(&options) {
+            Ok(found) => account = Some(found),
+            Err(error) => {
+                if problem.is_none() {
+                    problem = Some(format!("account: {error}"));
+                }
+            }
+        }
+    }
+
+    if parsed.json {
+        let value = serde_json::json!({
+            "program": status.path().map(|path| path.display().to_string()),
+            "ready": status.is_ready(),
+            "missing": status.path().is_none(),
+            "version": version,
+            "account": account,
+            "problem": problem,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
+    match status.path() {
+        Some(path) => println!("legendary: {}", path.display()),
+        None => println!(
+            "legendary: not found in PATH — install it to enable Epic installs \
+             (`pipx install legendary-gl`, or the AUR package)"
+        ),
+    }
+    if let Some(version) = &version {
+        println!("version: {version}");
+    }
+    if let Some(account) = &account {
+        if account.logged_in() {
+            println!(
+                "account: {} ({} owned, {} installed)",
+                account.account, account.games_available, account.games_installed
+            );
+        } else {
+            println!("account: not logged in — run `pitagames-cli epic auth`");
+        }
+        println!("config: {}", account.config_directory);
+    }
+    if let Some(problem) = &problem {
+        println!("problem: {problem}");
+    }
+    Ok(())
+}
+
+fn epic_owned(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let games = backend.owned(&epic_options(parsed, false))?;
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&games)?);
+        return Ok(());
+    }
+    for game in &games {
+        println!("{:<32}  {}", game.id.store_id, game.title);
+    }
+    println!("\n{} owned game(s).", games.len());
+    Ok(())
+}
+
+fn epic_installed(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let games = backend.installed(&epic_options(parsed, false))?;
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&games)?);
+        return Ok(());
+    }
+    for game in &games {
+        println!(
+            "{:<32}  {:<40}  {}",
+            game.id.store_id,
+            game.title,
+            game.install_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+    println!("\n{} installed game(s).", games.len());
+    Ok(())
+}
+
+/// The code-paste sign-in.
+///
+/// legendary opens the Epic login page and asks for the `authorizationCode` from
+/// its JSON response. That is an `input()` prompt with no trailing newline, which
+/// is exactly what the driver's partial-line flush exists for. A prompt line ends
+/// with `:`, so each one gets one line of stdin. A PTY echoes the answer, so the
+/// transcript on disk can contain the code; it is never printed or stored.
+fn epic_auth(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    expect_positionals(parsed, 1)?;
+    let options = epic_options(parsed, true);
+    let handle = backend.spawn(&CliCommand::Auth, &options)?;
+    let mut stdin = std::io::stdin().lock();
+    let mut cancelled = false;
+
+    while let Some(event) = handle.next_event()? {
+        match event {
+            ProgressEvent::Line(text)
+            | ProgressEvent::Stage(text)
+            | ProgressEvent::Percent(_, text) => {
+                println!("{text}");
+                if text.trim_end().ends_with(':') {
+                    print!("> ");
+                    std::io::stdout().flush().ok();
+                    let mut line = String::new();
+                    if stdin.read_line(&mut line)? == 0 {
+                        handle.cancel();
+                        cancelled = true;
+                        break;
+                    }
+                    handle.write_stdin(line.as_bytes())?;
+                }
+            }
+            ProgressEvent::Done => println!("Authenticated."),
+            ProgressEvent::Failed { code, message } => {
+                eprintln!("legendary auth failed ({code}): {message}");
+            }
+        }
+    }
+
+    let outcome = handle.wait()?;
+    if cancelled {
+        bail!("authentication cancelled: stdin closed");
+    }
+    if !outcome.success {
+        bail!("legendary auth did not finish");
+    }
+    Ok(())
+}
+
+fn epic_logout(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let report = backend.stream(
+        &CliCommand::Logout,
+        &epic_options(parsed, false),
+        epic_event,
+    )?;
+    if !report.succeeded() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "legendary logout failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    println!("Stored Epic session removed.");
+    Ok(())
+}
+
+fn epic_install(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "Epic app name")?;
+    let dir = match &parsed.dir {
+        Some(dir) => dir.clone(),
+        None => epic::install_dir(id)
+            .with_context(|| "no data directory; pass --dir <path>".to_string())?,
+    };
+    let command = CliCommand::Install {
+        id: id.to_string(),
+        install_dir: dir.clone(),
+    };
+
+    if parsed.dry_run {
+        print_planned(backend, &command);
+        println!("install dir: {}", dir.display());
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &epic_options(parsed, false), epic_event)?;
+    if !report.succeeded() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "legendary install failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    println!("Installed {id} into {}.", dir.display());
+    if let Some(log) = report.log_path() {
+        println!("Transcript: {}", log.display());
+    }
+    Ok(())
+}
+
+fn epic_verify(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "Epic app name")?;
+    let command = CliCommand::Verify { id: id.to_string() };
+
+    if parsed.dry_run {
+        print_planned(backend, &command);
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &epic_options(parsed, false), epic_event)?;
+    // The exit code is always 0 here; the verdict is the summary line.
+    let verdict = pitagames_stores::epic::verify_report(&report.text);
+    if parsed.json {
+        let value = serde_json::json!({
+            "verified": verdict.verified,
+            "corrupted": verdict.corrupted,
+            "missing": verdict.missing,
+            "exited_zero": report.outcome.success,
+            "log": report.log_path().map(|path| path.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if verdict.verified {
+        println!("Verified {id}: every file matches.");
+    } else if verdict.corrupted > 0 || verdict.missing > 0 {
+        println!(
+            "{id}: {} file(s) corrupted, {} file(s) missing.",
+            verdict.corrupted, verdict.missing
+        );
+    } else {
+        println!("{id}: verification did not complete.");
+    }
+
+    if !verdict.verified {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "legendary verify did not pass for {id}: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no verdict line".to_string())
+        );
+    }
+    Ok(())
+}
+
+fn epic_launch(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "Epic app name")?;
+    let command = CliCommand::Launch { id: id.to_string() };
+
+    if parsed.dry_run {
+        print_planned(backend, &command);
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &epic_options(parsed, false), epic_event)?;
+    // The game shares the PTY, so its own `[name] ERROR:` lines must not count;
+    // only the exit status says whether the launch worked.
+    if !report.exited_cleanly() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "legendary launch failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn epic_event(event: &ProgressEvent) {
+    match event {
+        ProgressEvent::Line(text)
+        | ProgressEvent::Stage(text)
+        | ProgressEvent::Percent(_, text) => println!("{text}"),
+        ProgressEvent::Done => println!("done."),
+        ProgressEvent::Failed { code, message } => eprintln!("failed ({code}): {message}"),
+    }
+}
+
+fn print_planned(backend: &Epic, command: &CliCommand) {
+    let argv = backend
+        .spec()
+        .argv(command)
+        .unwrap_or_else(|error| vec![format!("<invalid template: {error}>")]);
+    println!(
+        "{}",
+        pitagames_core::launch::render_shell_command(&[], backend.program(), &argv)
+    );
+}
+
+fn epic_options(parsed: &EpicArgs, interactive: bool) -> CliOptions {
+    let log_dir = parsed
+        .log_dir
+        .clone()
+        .or_else(pitagames_core::paths::logs_dir);
+    if interactive {
+        CliOptions {
+            log_dir,
+            ..CliOptions::interactive()
+        }
+    } else {
+        CliOptions {
+            log_dir,
+            ..CliOptions::default()
+        }
+    }
+}
+
+fn positional<'a>(parsed: &'a EpicArgs, index: usize, what: &str) -> Result<&'a str> {
+    parsed
+        .positional
+        .get(index)
+        .map(String::as_str)
+        .with_context(|| format!("missing {what}"))
+}
+
+fn expect_positionals(parsed: &EpicArgs, expected: usize) -> Result<()> {
+    if parsed.positional.len() > expected {
+        bail!(
+            "unexpected argument `{}` for `epic`\n\n{}",
+            parsed.positional[expected],
+            epic_usage()
+        );
+    }
+    Ok(())
+}
+
+/// Parsed `epic` arguments.
+#[derive(Debug, PartialEq, Eq)]
+struct EpicArgs {
+    program: String,
+    log_dir: Option<PathBuf>,
+    dir: Option<PathBuf>,
+    json: bool,
+    dry_run: bool,
+    positional: Vec<String>,
+    help: bool,
+}
+
+fn parse_epic_args(args: &[String]) -> Result<EpicArgs> {
+    let mut parsed = EpicArgs {
+        program: pitagames_stores::epic::PROGRAM.to_string(),
+        log_dir: None,
+        dir: None,
+        json: false,
+        dry_run: false,
+        positional: Vec::new(),
+        help: false,
+    };
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--dry-run" => parsed.dry_run = true,
+            "--program" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--program requires a path")?;
+                parsed.program = value.clone();
+            }
+            "--log-dir" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--log-dir requires a path")?;
+                parsed.log_dir = Some(PathBuf::from(value));
+            }
+            "--dir" => {
+                index += 1;
+                let value = args.get(index).with_context(|| "--dir requires a path")?;
+                parsed.dir = Some(PathBuf::from(value));
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--program=") => {
+                parsed.program = arg["--program=".len()..].to_string();
+            }
+            _ if arg.starts_with("--log-dir=") => {
+                parsed.log_dir = Some(PathBuf::from(&arg["--log-dir=".len()..]));
+            }
+            _ if arg.starts_with("--dir=") => {
+                parsed.dir = Some(PathBuf::from(&arg["--dir=".len()..]));
+            }
+            other if other.starts_with('-') => bail!(
+                "unexpected argument `{other}` for `epic`\n\n{}",
+                epic_usage()
+            ),
+            other => parsed.positional.push(other.to_string()),
         }
         index += 1;
     }
@@ -2896,7 +3335,8 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n\n\
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -3039,6 +3479,33 @@ fn steam_account_usage() -> String {
         .to_string()
 }
 
+fn epic_usage() -> String {
+    "USAGE:\n    pitagames-cli epic <subcommand> [options]\n\n\
+     SUBCOMMANDS:\n    \
+     status                 CLI path, version and account (offline)\n    \
+     list                   Owned games (legendary list --json)\n    \
+     installed              Installed games (legendary list-installed --json)\n    \
+     auth                   Sign in with the Epic code-paste flow\n    \
+     logout                 Forget the stored Epic session\n    \
+     install <app>          Install a game, streaming legendary's progress\n    \
+     verify <app>           Verify an installed game's files\n    \
+     launch <app>           Launch a game through legendary\n\n\
+     OPTIONS:\n    \
+     --program <path>       legendary binary to drive (default: legendary from PATH)\n    \
+     --dir <path>           Install directory (default: $XDG_DATA_HOME/pitagames/games/epic/<app>)\n    \
+     --log-dir <path>       Per-run transcripts (default: $XDG_DATA_HOME/pitagames/logs)\n    \
+     --dry-run              Print the planned argv instead of running it\n    \
+     --json                 Print status/lists/verify as JSON\n    \
+     -h, --help             Show this help\n\n\
+     legendary is the Epic CLI PitaGames wraps; without it the store shows as\n\
+     unavailable and read-only imports are the fallback (M2). `install` passes\n\
+     --base-path/--game-folder from --dir, --yes and --disable-sdl so no prompt\n\
+     needs a human. `verify` reads legendary's summary line, because it exits 0\n\
+     even when files are corrupt or missing. A PTY echoes typed input, so an auth\n\
+     transcript can contain the code: it stays local and is never printed."
+        .to_string()
+}
+
 fn metadata_usage() -> String {
     "USAGE:\n    pitagames-cli metadata <appid>... [--language <code>] [--json]\n\n\
      ARGS:\n    \
@@ -3114,6 +3581,34 @@ mod tests {
         assert!(error.contains("not a number"), "{error}");
 
         let error = parse_steam_account_args(&["extra".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected argument"), "{error}");
+    }
+
+    #[test]
+    fn parses_epic_subcommands_and_shared_flags() {
+        let parsed = parse_epic_args(&[
+            "--program=/opt/legendary".to_string(),
+            "--dir".to_string(),
+            "/games/epic".to_string(),
+            "install".to_string(),
+            "Gizmo".to_string(),
+            "--json".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.program, "/opt/legendary");
+        assert_eq!(parsed.dir, Some(PathBuf::from("/games/epic")));
+        assert_eq!(parsed.positional, ["install", "Gizmo"]);
+        assert!(parsed.json && parsed.dry_run && !parsed.help);
+
+        let plain = parse_epic_args(&[]).unwrap();
+        assert_eq!(plain.program, pitagames_stores::epic::PROGRAM);
+        assert!(plain.positional.is_empty());
+
+        let error = parse_epic_args(&["--bogus".to_string()])
             .unwrap_err()
             .to_string();
         assert!(error.contains("unexpected argument"), "{error}");
