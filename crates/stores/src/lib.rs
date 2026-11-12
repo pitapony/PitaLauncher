@@ -4,11 +4,13 @@
 //! [`StoreBackend`] trait; Steam is read natively from VDF/ACF manifests and
 //! `localconfig.vdf`, and its per-game config is written format-preservingly
 //! (`localconfig.vdf` launch options, `config.vdf` compatibility-tool mappings).
-//! Only the Steam backend is implemented so far.
+//! Only the Steam backend is implemented so far; [`cli`] is the PTY driver the
+//! other three stores share.
 
 use std::path::PathBuf;
 
 pub mod acf;
+pub mod cli;
 pub mod compat_tool;
 pub mod install;
 pub mod localconfig;
@@ -19,6 +21,10 @@ mod vdf_edit;
 pub mod watch;
 
 pub use acf::{AppManifest, DownloadProgress, InstallPhase, ManifestError, flags};
+pub use cli::{
+    CliCommand, CliError, CliHandle, CliOptions, CliOutcome, CliSpec, ProgressEvent,
+    ProgressParser, TimeoutKind,
+};
 pub use compat_tool::{CompatTool, DEFAULT_PRIORITY};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
