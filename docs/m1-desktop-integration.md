@@ -198,10 +198,11 @@ same constants. Tests assert the buffer shape, transparent corners, the gradient
 direction, the accent-coloured triangle and that a 32 px icon is still the same
 mark.
 
-`Icon=pitagames` in the entry is a **theme** name: the SVG arrives in the theme
-with the package. Until the PKGBUILD task installs it, an uninstalled checkout's
-menu entry shows the desktop's missing-icon placeholder while the window and
-tray already use the painted mark.
+`Icon=pitagames` in the entry is a **theme** name: `packaging/PKGBUILD` installs
+the SVG into `hicolor/scalable/apps` (see `docs/m1-packaging.md`), so an
+installed launcher shows the painted mark in menus and docks too. An uninstalled
+checkout has no theme icon yet and falls back to the desktop's missing-icon
+placeholder, while its window and tray already use the painted RGBA version.
 
 ## Guarantees and limits
 
@@ -246,6 +247,9 @@ tray already use the painted mark.
 - **Tray failure path**: without a status-notifier library the run logged
   `[pitagames] no tray icon: no status-notifier host (install …); the window
   still works` and the window rendered normally (screenshots in
-  `target/smoke/shot-desktop-*.png`). The successful tray build is unverified
-  here: the container has no StatusNotifier host, and the target machines have
-  not run this slice yet.
+  `target/smoke/shot-desktop-*.png`).
+- **Tray with its library**: the installed package pulls
+  `libayatana-appindicator`; the tray then builds and the log only carries
+  upstream's `libayatana-appindicator is deprecated` warning. The container has
+  no StatusNotifier host, so nothing is displayed and the icon's visual
+  behaviour is still unverified.

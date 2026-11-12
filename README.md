@@ -37,6 +37,12 @@ hardware layer has been exercised in an `archlinux:latest` container.
   grid, each with an Install button; the list is cached in SQLite.
 - **Single-instance lock** — an `flock` on `pitagames.lock` stops a second
   launcher from racing over the database and Steam's config files.
+- **Desktop integration** — a generated `.desktop` entry, a painted
+  window/tray icon with Show/Quit, and an activation socket so a second launch
+  raises the running window instead of looking ignored.
+- **Installable package** — `packaging/PKGBUILD` (`pitagames-git`) builds the
+  GUI, CLI and shim and installs the menu entry, theme icon, AppStream metadata
+  and the compat database; `makepkg -si` from `packaging/`.
 - **Virtualized library grid** — windowed rows (`crates/app/src/grid.rs`) mount
   only the visible tiles plus overscan, so a thousand-game library scrolls
   without a DOM node per game.
@@ -49,21 +55,23 @@ hardware layer has been exercised in an `archlinux:latest` container.
   behind an explicit confirmation. `pitagames-cli anticheat` prints the result.
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
 - **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `compat`,
-  `anticheat`, `profile`, `launch-options`, `compat-tool`, `steam-account`.
+  `anticheat`, `profile`, `logs`, `launch-options`, `compat-tool`,
+  `steam-account`, `desktop-entry`, `activate`.
 
 ## Not there yet
 
 - Hardware validation on the RX 9070 and RX 5700 XT.
 - Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR) and the
   graphics screen that enforces the anti-cheat gate.
-- Other stores (GOG, Epic, Amazon), mod orchestration and packaging.
+- Other stores (GOG, Epic, Amazon), mod orchestration, and release/AUR
+  packaging (the `-git` package builds and installs today).
 
 ## Requirements
 
 - CachyOS or Arch Linux, x86_64.
-- Rust 1.89+ (edition 2024 let-chains; `keyring` 4 needed 1.88, the
-  single-instance `File::try_lock` needs 1.89).
-- For the GUI: `webkit2gtk-4.1`, `gtk3`, `libsecret`, `sqlite`.
+- Rust 1.89+ to build (MSRV: edition 2024 let-chains, `File::try_lock`). The
+  package pulls the runtime stack: `webkit2gtk-4.1`, `gtk3`, `openssl`,
+  `xdotool`, `libayatana-appindicator`, `xdg-utils`.
 - Steam installed natively. Flatpak Steam is unsupported.
 - Target GPUs: RX 9070 (RDNA 4) and RX 5700 XT (RDNA 1). Everything else ships
   as experimental/unverified and is labelled "not tested by us".
@@ -71,27 +79,33 @@ hardware layer has been exercised in an `archlinux:latest` container.
 ## Quick start
 
 ```bash
+# Build and install the package (pulls the WebKitGTK/GTK dependencies).
+cd packaging && makepkg -si
+
 # Headless scan of the installed Steam library.
-cargo run -p pitagames-cli -- scan
+pitagames-cli scan
 
 # List the Proton builds this machine can launch games with.
-cargo run -p pitagames-cli -- proton
+pitagames-cli proton
 
 # Check the Steam account the launcher resolved (add --refresh to call the API).
-cargo run -p pitagames-cli -- steam-account
+pitagames-cli steam-account
 
-# List the shipped compatibility database (add --shipped ./compat for a checkout).
-cargo run -p pitagames-cli -- compat --shipped ./compat
+# List the compatibility database (add --shipped ./compat for a checkout).
+pitagames-cli compat
 
 # Detect a game's anti-cheat and show the injection gate (any install dir works).
-cargo run -p pitagames-cli -- anticheat 1172470 --dir /path/to/game --shipped ./compat
+pitagames-cli anticheat 1172470 --dir /path/to/game
 
 # See the shim line the launcher would write, without touching the file.
-cargo run -p pitagames-cli -- launch-options 620 --shim --dry-run
+pitagames-cli launch-options 620 --shim --dry-run
 
-# Build and run the GUI (needs the WebKitGTK dependencies above).
-cargo run -p pitagames
+# Start the GUI (cargo run -p pitagames from a checkout).
+pitagames
 ```
+
+From a checkout, prefix any CLI command with `cargo run -p pitagames-cli --`
+(e.g. `cargo run -p pitagames-cli -- scan`).
 
 The CLI also supports `install <appid>` (hands the request to Steam and polls the
 appmanifest), `metadata <appid>` (live Steam store metadata),
@@ -136,6 +150,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 | `crates/cli` | Headless developer CLI |
 | `crates/app` | Dioxus desktop GUI (the only crate allowed to use RSX) |
 | `compat/` | Shipped compatibility database (`*.toml`, one game per file) |
+| `packaging/` | `PKGBUILD`, `.desktop`, theme icon, AppStream metainfo |
 | `fixtures/` | Steam VDF/ACF, `localconfig.vdf` and `config.vdf` fixtures |
 | `docs/` | Per-slice implementation notes and the hardware test checklist |
 
@@ -155,6 +170,8 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-owned-games.md`](docs/m1-owned-games.md) — Steam Web API key and the owned-games cache.
 - [`docs/m1-single-instance.md`](docs/m1-single-instance.md) — the single-instance lock.
 - [`docs/m1-virtualized-grid.md`](docs/m1-virtualized-grid.md) — the windowed library grid.
+- [`docs/m1-desktop-integration.md`](docs/m1-desktop-integration.md) — `.desktop` entry, tray icon and single-instance focus.
+- [`docs/m1-packaging.md`](docs/m1-packaging.md) — the PKGBUILD, AppStream metadata and theme icon.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License
