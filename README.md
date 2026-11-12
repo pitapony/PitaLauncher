@@ -141,7 +141,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 |---|---|
 | `crates/core` | Domain types, launch spec, profiles, XDG paths, metadata types |
 | `crates/db` | SQLite pool, migrations and repositories |
-| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers |
+| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers, the PTY CLI driver and the Epic backend |
 | `crates/metadata` | Steam `appdetails` and `GetOwnedGames` clients, rate limiter and cache policy |
 | `crates/platform` | Proton discovery, runtime selection, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
@@ -151,7 +151,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 | `crates/app` | Dioxus desktop GUI (the only crate allowed to use RSX) |
 | `compat/` | Shipped compatibility database (`*.toml`, one game per file) |
 | `packaging/` | `PKGBUILD`, `.desktop`, theme icon, AppStream metainfo |
-| `fixtures/` | Steam VDF/ACF, `localconfig.vdf` and `config.vdf` fixtures |
+| `fixtures/` | Steam VDF/ACF, `localconfig.vdf` and `config.vdf` fixtures, plus `legendary` JSON shapes |
 | `docs/` | Per-slice implementation notes and the hardware test checklist |
 
 ## Documentation
@@ -172,6 +172,8 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-virtualized-grid.md`](docs/m1-virtualized-grid.md) — the windowed library grid.
 - [`docs/m1-desktop-integration.md`](docs/m1-desktop-integration.md) — `.desktop` entry, tray icon and single-instance focus.
 - [`docs/m1-packaging.md`](docs/m1-packaging.md) — the PKGBUILD, AppStream metadata and theme icon.
+- [`docs/m2-cli-backend.md`](docs/m2-cli-backend.md) — the PTY CLI driver shared by the store backends.
+- [`docs/m2-epic.md`](docs/m2-epic.md) — the Epic backend (`legendary`).
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License
