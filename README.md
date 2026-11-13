@@ -69,20 +69,25 @@ hardware layer has been exercised in an `archlinux:latest` container.
   the `GAMEID`/`PROTONPATH`/`WINEPREFIX` umu environment), `pitagames-cli disk`
   reports free space and checks it against an install size, and a serial
   `InstallQueue` runs one CLI install at a time with that check in front.
+- **Store status and updates** — a Stores screen and `pitagames-cli stores` show
+  each CLI store's program, version, session and game counts, and one unified
+  list folds Steam's manifest state with the CLI stores' own install flags
+  (`pitagames-cli stores updates`).
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
 - **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `compat`,
-  `anticheat`, `profile`, `logs`, `import`, `prefix`, `disk`, `launch-options`,
-  `compat-tool`, `steam-account`, `desktop-entry`, `activate`, `epic`, `amazon`,
-  `gog`.
+  `anticheat`, `profile`, `logs`, `import`, `prefix`, `disk`, `stores`,
+  `launch-options`, `compat-tool`, `steam-account`, `desktop-entry`, `activate`,
+  `epic`, `amazon`, `gog`.
 
 ## Not there yet
 
 - Hardware validation on the RX 9070 and RX 5700 XT.
 - Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR) and the
   graphics screen that enforces the anti-cheat gate.
-- The store status UI, the update aggregation and the umu/Proton launch hand-off;
-  mod orchestration; and release/AUR packaging (the `-git` package builds and
-  installs today).
+- The store status *wiring* (running installs through the queue, caching the CLI
+  stores' libraries), the in-app re-auth terminal and the umu/Proton launch
+  hand-off; mod orchestration; and release/AUR packaging (the `-git` package
+  builds and installs today).
 
 ## Requirements
 
@@ -105,6 +110,9 @@ pitagames-cli scan
 
 # List the Proton builds this machine can launch games with.
 pitagames-cli proton
+
+# Show each CLI store's status; `stores updates` lists pending updates.
+pitagames-cli stores
 
 # Check the Steam account the launcher resolved (add --refresh to call the API).
 pitagames-cli steam-account
@@ -159,7 +167,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 |---|---|
 | `crates/core` | Domain types, launch spec, profiles, XDG paths, metadata types |
 | `crates/db` | SQLite pool, migrations and repositories |
-| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers, the PTY CLI driver, the Epic/Amazon/GOG backends, the read-only importers and the install queue |
+| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers, the PTY CLI driver, the Epic/Amazon/GOG backends, the store status row and update list, the read-only importers and the install queue |
 | `crates/metadata` | Steam `appdetails` and `GetOwnedGames` clients, rate limiter and cache policy |
 | `crates/platform` | Proton discovery, the non-Steam prefix layout, disk-space checks, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
@@ -196,6 +204,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2-gog.md`](docs/m2-gog.md) — the GOG backend (`lgogdownloader` + `gogdl`).
 - [`docs/m2-importers.md`](docs/m2-importers.md) — the read-only Heroic, Lutris and Bottles importers.
 - [`docs/m2-prefixes.md`](docs/m2-prefixes.md) — non-Steam prefixes, disk-space checks and the install queue.
+- [`docs/m2-store-status.md`](docs/m2-store-status.md) — the store status row and the unified update list.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

@@ -42,6 +42,7 @@ mod log_view;
 mod persist;
 mod runtime;
 mod steam_account;
+mod stores_view;
 mod tray;
 mod wrappers;
 
@@ -127,6 +128,7 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
 pub(crate) enum View {
     Library,
     Downloads,
+    Stores,
     Detail,
     Account,
     Logs,
@@ -632,6 +634,14 @@ fn App() -> Element {
                 button {
                     onclick: move |_| {
                         selected_game.set(None);
+                        view.set(View::Stores);
+                    },
+                    style: nav_style(current_view == View::Stores),
+                    "Stores"
+                }
+                button {
+                    onclick: move |_| {
+                        selected_game.set(None);
                         view.set(View::Account);
                     },
                     style: nav_style(current_view == View::Account),
@@ -673,6 +683,11 @@ fn App() -> Element {
                 div {
                     style: "flex:1;min-height:0;overflow-y:auto;",
                     {downloads_body}
+                }
+            } else if current_view == View::Stores {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    stores_view::StoresView {}
                 }
             } else if current_view == View::Account {
                 div {
