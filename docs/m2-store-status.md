@@ -141,7 +141,7 @@ cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-- `stores::status` (13 tests): a missing program is the only thing a
+- `stores::status` (12 tests): a missing program is the only thing a
   presence-less row reports and names it; Epic reads the version, the session and
   the counts the status command prints; `list` refreshes the counts from the two
   listings; a signed-out store asks for re-auth without a probe failure; a CLI
