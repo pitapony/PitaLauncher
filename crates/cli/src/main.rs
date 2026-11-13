@@ -28,6 +28,7 @@ use pitagames_stores::amazon::{self, Amazon};
 use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::epic::{self, Epic};
 use pitagames_stores::gog::{self, Gog};
+use pitagames_stores::import::{ImportReport, Importer, SourceReport};
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
 use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
@@ -66,6 +67,7 @@ fn run() -> Result<()> {
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "logs" => logs(&args.collect::<Vec<_>>()),
+        "import" => import(&args.collect::<Vec<_>>()),
         "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
         "activate" => activate(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
@@ -872,6 +874,170 @@ fn apply_logs_flag(parsed: &mut LogsArgs, flag: &str, value: &str) -> Result<()>
                 .with_context(|| format!("--tail must be a whole number, got `{value}`"))?;
         }
         other => bail!("internal error: unknown logs flag `{other}`"),
+    }
+    Ok(())
+}
+
+/// Read the games Heroic, Lutris and Bottles have installed.
+///
+/// Installed-only and read-only: nothing is launched, downloaded or written,
+/// and the store CLIs (`legendary`/`nile`/`lgogdownloader`) are not needed —
+/// this is what a user sees when they are not installed.
+fn import(args: &[String]) -> Result<()> {
+    let parsed = parse_import_args(args)?;
+    if parsed.help {
+        println!("{}", import_usage());
+        return Ok(());
+    }
+
+    let defaults = Importer::default_roots();
+    let roots = |explicit: &[PathBuf], discovered: &[PathBuf]| {
+        if explicit.is_empty() {
+            discovered.to_vec()
+        } else {
+            explicit.to_vec()
+        }
+    };
+    let report = Importer::with_roots(
+        roots(&parsed.heroic, defaults.heroic_roots()),
+        roots(&parsed.lutris, defaults.lutris_roots()),
+        roots(&parsed.bottles, defaults.bottles_roots()),
+    )
+    .scan();
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    for source in &report.sources {
+        println!(
+            "{:<8} {:<11} {}",
+            source.origin.label(),
+            source.kind,
+            source_line(source)
+        );
+    }
+    println!();
+    println!("{}", report_summary(&report));
+    for warning in &report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    for source in report.failed() {
+        eprintln!(
+            "warning: {} {} could not be read: {}",
+            source.origin.label(),
+            source.kind,
+            source.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+
+    Ok(())
+}
+
+/// One line per source file: where it is and what came out of it.
+fn source_line(source: &SourceReport) -> String {
+    let path = source.path.display();
+    if let Some(error) = &source.error {
+        return format!("{path}  (failed: {error})");
+    }
+    if !source.found() {
+        return format!("{path}  (missing)");
+    }
+    match source.games {
+        0 => format!("{path}  (no games)"),
+        1 => format!("{path}  (1 game)"),
+        games => format!("{path}  ({games} games)"),
+    }
+}
+
+/// The one-line total, by store, for the human-readable listing.
+fn report_summary(report: &ImportReport) -> String {
+    let mut line = match report.games.len() {
+        1 => "1 game".to_string(),
+        games => format!("{games} games"),
+    };
+    let counts: Vec<String> = [
+        Store::Steam,
+        Store::Gog,
+        Store::Epic,
+        Store::Amazon,
+        Store::Local,
+    ]
+    .into_iter()
+    .filter_map(|store| {
+        let count = report
+            .games
+            .iter()
+            .filter(|game| game.id.store == store)
+            .count();
+        (count > 0).then(|| format!("{store} {count}"))
+    })
+    .collect();
+    if !counts.is_empty() {
+        line.push_str(&format!(": {}", counts.join(", ")));
+    }
+    if report.duplicates > 0 {
+        line.push_str(&format!(", {} duplicate(s) dropped", report.duplicates));
+    }
+    line
+}
+
+/// Parsed `import` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ImportArgs {
+    heroic: Vec<PathBuf>,
+    lutris: Vec<PathBuf>,
+    bottles: Vec<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_import_args(args: &[String]) -> Result<ImportArgs> {
+    let mut parsed = ImportArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--heroic" | "--lutris" | "--bottles" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                apply_import_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--heroic=")
+                || arg.starts_with("--lutris=")
+                || arg.starts_with("--bottles=") =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_import_flag(&mut parsed, flag, value)?;
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `import`\n\n{}",
+                import_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn apply_import_flag(parsed: &mut ImportArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--heroic" => parsed.heroic.push(PathBuf::from(value)),
+        "--lutris" => parsed.lutris.push(PathBuf::from(value)),
+        "--bottles" => parsed.bottles.push(PathBuf::from(value)),
+        other => bail!("internal error: unknown import flag `{other}`"),
     }
     Ok(())
 }
@@ -4133,7 +4299,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -4179,6 +4345,24 @@ fn logs_usage() -> String {
      records one launch line per game; PROTON_LOG writes steam-<appid>.log; DXVK\n\
      logging writes <exe>_d3d11.log and friends. Read-only: nothing is edited or\n\
      deleted."
+        .to_string()
+}
+
+fn import_usage() -> String {
+    "USAGE:\n    pitagames-cli import [--heroic <dir>]... [--lutris <dir>]... [--bottles <dir>]... [--json]\n\n\
+     OPTIONS:\n    \
+     --heroic <dir>         A Heroic config folder (repeatable)\n    \
+     --lutris <dir>         A Lutris data folder, holding pga.db (repeatable)\n    \
+     --bottles <dir>        A Bottles folder, holding library.yml (repeatable)\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Without the flags the default locations are read, native and Flatpak:\n\
+     ~/.config/heroic, ~/.var/app/com.heroicgameslauncher.hgl/config/heroic,\n\
+     ~/.local/share/lutris, ~/.var/app/net.lutris.Lutris/data/lutris,\n\
+     ~/.local/share/bottles and ~/.var/app/com.usebottles.bottles/data/bottles.\n\n\
+     Installed-only and read-only: the games another launcher already has are\n\
+     listed with the identity their store uses, so a scan does not duplicate\n\
+     them. Nothing is launched, downloaded or written."
         .to_string()
 }
 
@@ -4697,6 +4881,69 @@ mod tests {
         }
 
         assert!(parse_logs_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn parses_import_arguments() {
+        let parsed = parse_import_args(&[
+            "--heroic".to_string(),
+            "/cfg/heroic".to_string(),
+            "--heroic=/other/heroic".to_string(),
+            "--lutris".to_string(),
+            "/data/lutris".to_string(),
+            "--bottles=/data/bottles".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(
+            parsed.heroic,
+            [PathBuf::from("/cfg/heroic"), PathBuf::from("/other/heroic")]
+        );
+        assert_eq!(parsed.lutris, [PathBuf::from("/data/lutris")]);
+        assert_eq!(parsed.bottles, [PathBuf::from("/data/bottles")]);
+        assert!(parsed.json && !parsed.help);
+
+        // No flags means the default locations, which the report resolves.
+        assert_eq!(parse_import_args(&[]).unwrap(), ImportArgs::default());
+
+        for args in [
+            vec!["--nope".to_string()],
+            vec!["--heroic".to_string()],
+            vec!["--lutris=".to_string()],
+        ] {
+            assert!(parse_import_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        assert!(parse_import_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn import_lines_and_summary_read_the_report() {
+        let dir = tempfile::tempdir().unwrap();
+        let heroic = dir.path().join("heroic");
+        std::fs::create_dir_all(heroic.join("legendaryConfig/legendary")).unwrap();
+        std::fs::write(
+            heroic.join("legendaryConfig/legendary/installed.json"),
+            r#"[{"app_name":"Fortnite","title":"Fortnite","install_path":"/games/Fortnite",
+                 "platform":"Windows","is_dlc":false}]"#,
+        )
+        .unwrap();
+
+        let report = Importer::with_roots(vec![heroic.clone()], vec![], vec![]).scan();
+        assert_eq!(report_summary(&report), "1 game: epic 1");
+
+        let legendary = &report.sources[0];
+        assert_eq!(
+            source_line(legendary),
+            format!("{}  (1 game)", legendary.path.display())
+        );
+        let missing = report
+            .sources
+            .iter()
+            .find(|source| !source.found())
+            .expect("the other Heroic files are not there");
+        assert!(source_line(missing).ends_with("  (missing)"));
     }
 
     #[test]

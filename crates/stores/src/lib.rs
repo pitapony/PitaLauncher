@@ -18,6 +18,7 @@ pub mod cli;
 pub mod compat_tool;
 pub mod epic;
 pub mod gog;
+pub mod import;
 pub mod install;
 pub mod localconfig;
 pub mod report;
@@ -36,6 +37,7 @@ pub use cli::{
 pub use compat_tool::{CompatTool, DEFAULT_PRIORITY};
 pub use epic::{Epic, EpicAccount, EpicError};
 pub use gog::{Gog, GogAccount, GogError};
+pub use import::{ImportReport, Importer, Origin, SourceReport};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use report::{LogFormat, LogLine, RunFailure, RunReport};

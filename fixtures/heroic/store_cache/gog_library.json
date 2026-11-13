@@ -1,0 +1,32 @@
+{
+  "games": [
+    {
+      "runner": "gog",
+      "app_name": "1207660623",
+      "title": "The Witcher 3: Wild Hunt",
+      "is_installed": true,
+      "art_cover": "https://images.gog-statics.com/cover.jpg",
+      "art_square": "https://images.gog-statics.com/square.jpg",
+      "install": {
+        "executable": "C:\\Games\\The Witcher 3\\bin\\x64\\witcher3.exe",
+        "install_path": "/home/player/Games/Heroic/Witcher3",
+        "is_dlc": false,
+        "platform": "windows"
+      },
+      "folder_name": "/home/player/Games/Heroic/Witcher3"
+    },
+    {
+      "runner": "gog",
+      "app_name": "1333403780",
+      "title": "The Witcher 3: Wild Hunt - Blood and Wine",
+      "is_installed": true,
+      "install": {
+        "is_dlc": true,
+        "platform": "windows"
+      }
+    }
+  ],
+  "__timestamp": {
+    "games": 1750000000000
+  }
+}

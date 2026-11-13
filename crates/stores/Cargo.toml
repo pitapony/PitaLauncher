@@ -18,5 +18,11 @@ sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 
+# The Heroic/Lutris/Bottles importers (`import`). `rusqlite` is the same SQLite
+# binding `pitagames-db` links through `sqlx` (both use `libsqlite3-sys` 0.30),
+# and only ever opens another launcher's database read-only.
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_norway = "0.9"
+
 [dev-dependencies]
 tempfile.workspace = true

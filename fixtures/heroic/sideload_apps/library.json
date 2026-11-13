@@ -1,0 +1,30 @@
+{
+  "games": [
+    {
+      "runner": "sideload",
+      "app_name": "sideload-3f1c2b4a-5d6e-47f8-9a0b-1c2d3e4f5a6b",
+      "title": "My Local Game",
+      "is_installed": true,
+      "install": {
+        "executable": "/home/player/Games/local/game.exe",
+        "platform": "windows",
+        "is_dlc": false
+      },
+      "folder_name": "/home/player/Games/local",
+      "canRunOffline": true,
+      "art_cover": "",
+      "art_square": ""
+    },
+    {
+      "runner": "sideload",
+      "app_name": "sideload-9c8b7a6d-4e3f-42a1-8b0c-2d3e4f5a6b7c",
+      "title": "A Web App",
+      "is_installed": false,
+      "install": {},
+      "browserUrl": "https://example.com/game",
+      "canRunOffline": false,
+      "art_cover": "",
+      "art_square": ""
+    }
+  ]
+}

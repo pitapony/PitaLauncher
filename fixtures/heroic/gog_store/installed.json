@@ -1,0 +1,23 @@
+{
+  "installed": [
+    {
+      "appName": "1207660623",
+      "executable": "C:\\Games\\The Witcher 3\\bin\\x64\\witcher3.exe",
+      "install_path": "/home/player/Games/Heroic/Witcher3",
+      "install_size": "42949672960",
+      "is_dlc": false,
+      "platform": "windows",
+      "version": "1.32",
+      "installedWithDLCs": true
+    },
+    {
+      "appName": "1333403780",
+      "executable": "",
+      "install_path": "/home/player/Games/Heroic/Witcher3",
+      "install_size": "0",
+      "is_dlc": true,
+      "platform": "windows",
+      "version": "1.32"
+    }
+  ]
+}

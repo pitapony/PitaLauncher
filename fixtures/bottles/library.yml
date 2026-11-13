@@ -1,0 +1,14 @@
+c2b3f4a4-1a2b-4c5d-8e9f-0a1b2c3d4e5f:
+  id: 6e1a3f5c-9b2d-4a6e-8f1c-2d3e4f5a6b7c
+  name: Notepad++
+  source: bottle
+  bottle:
+    name: Gaming
+    path: /home/player/.local/share/bottles/bottles/Gaming
+  thumbnail: 9f8e7d6c-1234-4321-8765-abcdefabcdef
+d3c4e5f6-2b3c-4d5e-9f0a-1b2c3d4e5f6a:
+  id: 7f2b4c6d-0c3e-4b7f-900d-3e4f5a6b7c8d
+  name: Hades
+  source: umu
+  source_id: "1145360"
+  store: steam

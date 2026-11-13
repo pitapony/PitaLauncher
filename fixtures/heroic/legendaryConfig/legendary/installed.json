@@ -1,0 +1,46 @@
+[
+  {
+    "app_name": "Fortnite",
+    "base_urls": ["https://download.epicgames.com/"],
+    "can_run_offline": true,
+    "egl_guid": "",
+    "executable": "FortniteGame/Binaries/Win64/FortniteLauncher.exe",
+    "install_path": "/home/player/Games/epic/Fortnite",
+    "install_size": 32212254720,
+    "install_tags": ["Windows"],
+    "is_dlc": false,
+    "launch_parameters": "",
+    "needs_verification": false,
+    "platform": "Windows",
+    "prereq_info": [],
+    "requires_ot": false,
+    "title": "Fortnite",
+    "version": "1.2.3"
+  },
+  {
+    "app_name": "Fortnite_DLC_SaveTheWorld",
+    "can_run_offline": true,
+    "executable": "",
+    "install_path": "/home/player/Games/epic/Fortnite",
+    "install_size": 1024,
+    "install_tags": ["Windows"],
+    "is_dlc": true,
+    "platform": "Windows",
+    "requires_ot": false,
+    "title": "Fortnite: Save the World",
+    "version": "1.2.3"
+  },
+  {
+    "app_name": "SmoothCriminal",
+    "can_run_offline": false,
+    "executable": "SmoothCriminal.app/Contents/MacOS/SmoothCriminal",
+    "install_path": "/home/player/Games/epic/SmoothCriminal",
+    "install_size": 512,
+    "install_tags": ["Mac"],
+    "is_dlc": false,
+    "platform": "Mac",
+    "requires_ot": false,
+    "title": "Smooth Criminal",
+    "version": "0.9"
+  }
+]
