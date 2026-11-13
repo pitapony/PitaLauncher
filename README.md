@@ -9,7 +9,8 @@ Linux.
 
 ## Status
 
-**M0 vertical slice shipped and container-verified. M1 in progress.**
+**M0 vertical slice shipped and container-verified. M1 shipped; M2 (the other
+stores) in progress.**
 
 The last M0 check — launching one real Steam game with `DXVK_HUD=fps` on the
 target hardware — is still blocked on machine access. Everything below the
@@ -53,10 +54,21 @@ hardware layer has been exercised in an `archlinux:latest` container.
   game's install directory for Easy Anti-Cheat/BattlEye markers and merges them
   with the compat DB's curated value; injection on a protected game is gated
   behind an explicit confirmation. `pitagames-cli anticheat` prints the result.
+- **Store backends** — Epic through `legendary`, Amazon through `nile` and GOG
+  through `lgogdownloader` + `gogdl`, all on one PTY driver: auth, listing,
+  install with progress, verify and launch, plus a raw per-run transcript. Every
+  failure mode the CLIs' exit codes hide (they log an error and exit `0`) is
+  classified from their own lines. None of them has been driven against a real
+  store CLI yet.
+- **Read-only importers** — the games Heroic, Lutris or Bottles already have on
+  disk are listed without a store session or the CLI being installed, keeping
+  the identity each store uses so a scan does not duplicate them; nothing is
+  launched, downloaded or written.
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
 - **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `compat`,
   `anticheat`, `profile`, `logs`, `launch-options`, `compat-tool`,
-  `steam-account`, `desktop-entry`, `activate`.
+  `steam-account`, `desktop-entry`, `activate`, `epic`, `amazon`, `gog`,
+  `import`.
 
 ## Not there yet
 
@@ -174,6 +186,9 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m1-packaging.md`](docs/m1-packaging.md) — the PKGBUILD, AppStream metadata and theme icon.
 - [`docs/m2-cli-backend.md`](docs/m2-cli-backend.md) — the PTY CLI driver shared by the store backends.
 - [`docs/m2-epic.md`](docs/m2-epic.md) — the Epic backend (`legendary`).
+- [`docs/m2-amazon.md`](docs/m2-amazon.md) — the Amazon backend (`nile`).
+- [`docs/m2-gog.md`](docs/m2-gog.md) — the GOG backend (`lgogdownloader` + `gogdl`).
+- [`docs/m2-importers.md`](docs/m2-importers.md) — the read-only Heroic, Lutris and Bottles importers.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License
