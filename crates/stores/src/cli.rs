@@ -43,6 +43,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use regex::Regex;
+use serde::Serialize;
 
 /// Default quiet period before a run is considered stuck (installs, verify).
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -347,7 +348,7 @@ fn substitute(token: &str, values: &[(&str, Option<String>)]) -> Result<String, 
 ///
 /// Shared by every backend on the driver: the question is "did `resolve_program`
 /// find an executable", and the answer names the program either way.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum StoreStatus {
     /// The program resolved to an executable file.
     Ready { program: PathBuf },

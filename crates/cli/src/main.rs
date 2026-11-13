@@ -4,6 +4,7 @@
 //! it exists so the scan layer can be exercised without a GUI, in CI, and on
 //! machines where the webview stack is unavailable.
 
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -32,6 +33,7 @@ use pitagames_stores::epic::{self, Epic};
 use pitagames_stores::gog::{self, Gog};
 use pitagames_stores::import::{ImportReport, Importer, SourceReport};
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
+use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport, UpdateAvailable};
 use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
     self, CompatRestoreReport, CompatWriteReport, SteamProcessState, WriteOptions, WriteReport,
@@ -72,6 +74,7 @@ fn run() -> Result<()> {
         "import" => import(&args.collect::<Vec<_>>()),
         "prefix" => prefix(&args.collect::<Vec<_>>()),
         "disk" => disk(&args.collect::<Vec<_>>()),
+        "stores" => stores(&args.collect::<Vec<_>>()),
         "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
         "activate" => activate(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
@@ -2872,6 +2875,371 @@ fn print_planned(program: &str, spec: &CliSpec, command: &CliCommand) {
     );
 }
 
+/// The store status rows and the unified update list.
+///
+/// `stores` probes each CLI store without installing anything: is the program
+/// on `PATH`, which version, is there a session, and how many games the store
+/// sees. `stores updates` unifies the update signals — Steam's manifest state
+/// and the CLI stores' own install flags — into one list.
+fn stores(args: &[String]) -> Result<()> {
+    let parsed = parse_stores_args(args)?;
+    if parsed.help {
+        println!("{}", stores_usage());
+        return Ok(());
+    }
+
+    if parsed.subcommand.as_deref() == Some("updates") {
+        stores_updates(&parsed)
+    } else {
+        stores_status(&parsed)
+    }
+}
+
+/// The status rows for the CLI stores.
+fn stores_status(parsed: &StoresArgs) -> Result<()> {
+    if parsed.with_stores || parsed.steam_root.is_some() {
+        bail!(
+            "--with-stores and --steam-root belong to `stores updates`\n\n{}",
+            stores_usage()
+        );
+    }
+
+    let filters = store_filters(&parsed.filters)?;
+    if (parsed.program.is_some() || parsed.game_program.is_some()) && filters.len() != 1 {
+        bail!(
+            "--program and --game-program need exactly one --store\n\n{}",
+            stores_usage()
+        );
+    }
+
+    let options = stores_options(parsed);
+    let reports: Vec<StoreStatusReport> = STORE_ORDER
+        .iter()
+        .copied()
+        .filter(|store| filters.is_empty() || filters.contains(store))
+        .map(|store| store_report(store, parsed, &options))
+        .collect();
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+        return Ok(());
+    }
+
+    for report in &reports {
+        print_store_row(report);
+    }
+    Ok(())
+}
+
+/// The unified update list.
+fn stores_updates(parsed: &StoresArgs) -> Result<()> {
+    if !parsed.filters.is_empty()
+        || parsed.list
+        || parsed.program.is_some()
+        || parsed.game_program.is_some()
+    {
+        bail!(
+            "--store, --list and --program belong to `stores` (status)\n\n{}",
+            stores_usage()
+        );
+    }
+
+    let options = stores_options(parsed);
+    let (found, notes) = collect_updates(parsed, &options);
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&found)?);
+        for note in &notes {
+            eprintln!("note: {note}");
+        }
+        return Ok(());
+    }
+
+    if found.is_empty() {
+        println!("No updates available.");
+    } else {
+        for update in &found {
+            let version = update
+                .version
+                .as_deref()
+                .map(|version| format!(" {version}"))
+                .unwrap_or_default();
+            println!(
+                "{:<32}  {:<8}{:<18}  {}",
+                update.title,
+                update.id.store.as_str(),
+                version,
+                update.source.label()
+            );
+        }
+        println!("\n{} update(s) available.", found.len());
+    }
+    for note in &notes {
+        eprintln!("note: {note}");
+    }
+    Ok(())
+}
+
+/// Gathers the update signals into one list, with the notes to report beside
+/// it (a store that could not be checked, an absent Steam root).
+fn collect_updates(
+    parsed: &StoresArgs,
+    options: &CliOptions,
+) -> (Vec<UpdateAvailable>, Vec<String>) {
+    let mut games = Vec::new();
+    let mut phases = HashMap::new();
+    let mut notes = Vec::new();
+
+    match parsed.steam_root.clone().or_else(discover_steam_root) {
+        Some(root) => {
+            let report = steam::scan_steam(&root, false);
+            notes.extend(report.warnings.iter().cloned());
+            phases = report.phases;
+            games.extend(report.games);
+        }
+        None => notes.push("no Steam library found on this machine".to_string()),
+    }
+
+    if parsed.with_stores {
+        collect_store_installs(options, &mut games, &mut notes);
+    } else {
+        notes.push(
+            "CLI-store installs were not checked; pass --with-stores to include them".to_string(),
+        );
+    }
+
+    (status::updates(&games, &phases), notes)
+}
+
+/// Runs each ready, signed-in store's install listing and adds its games.
+///
+/// Only Epic and Amazon can list what is installed; GOG's library CLI has no
+/// such listing, so it contributes no rows (and therefore no updates).
+fn collect_store_installs(options: &CliOptions, games: &mut Vec<Game>, notes: &mut Vec<String>) {
+    let epic = Epic::new();
+    let epic_status = StoreStatusReport::epic(&epic, options, false);
+    if epic_status.can_install() {
+        match epic.installed(options) {
+            Ok(installed) => games.extend(installed),
+            Err(error) => notes.push(format!("epic: {error}")),
+        }
+    } else if epic_status.is_ready() {
+        notes.push("epic: not signed in; skipped".to_string());
+    }
+
+    let amazon = Amazon::new();
+    let amazon_status = StoreStatusReport::amazon(&amazon, options, false);
+    if amazon_status.can_install() {
+        match amazon.installed(options) {
+            Ok(installed) => games.extend(installed),
+            Err(error) => notes.push(format!("amazon: {error}")),
+        }
+    } else if amazon_status.is_ready() {
+        notes.push("amazon: not signed in; skipped".to_string());
+    }
+
+    let gog_status = StoreStatusReport::gog(&Gog::new(), options, false);
+    if gog_status.is_ready() {
+        notes.push("gog: no install listing, so no update signal".to_string());
+    }
+}
+
+/// The stores a status row can describe, in the order they are shown.
+const STORE_ORDER: [Store; 3] = [Store::Epic, Store::Amazon, Store::Gog];
+
+fn store_report(store: Store, parsed: &StoresArgs, options: &CliOptions) -> StoreStatusReport {
+    let list = parsed.list;
+    match store {
+        Store::Epic => {
+            let backend = match &parsed.program {
+                Some(program) => Epic::with_program(program),
+                None => Epic::new(),
+            };
+            StoreStatusReport::epic(&backend, options, list)
+        }
+        Store::Amazon => {
+            let backend = match &parsed.program {
+                Some(program) => Amazon::with_program(program),
+                None => Amazon::new(),
+            };
+            StoreStatusReport::amazon(&backend, options, list)
+        }
+        Store::Gog => {
+            let library = parsed
+                .program
+                .clone()
+                .unwrap_or_else(|| gog::PROGRAM.to_string());
+            let game = parsed
+                .game_program
+                .clone()
+                .unwrap_or_else(|| gog::GAME_PROGRAM.to_string());
+            StoreStatusReport::gog(&Gog::with_programs(library, game), options, list)
+        }
+        other => unreachable!("{other} is not a CLI store"),
+    }
+}
+
+fn print_store_row(report: &StoreStatusReport) {
+    println!("{}: {}", report.store, store_state_label(report));
+    for tool in &report.tools {
+        match (tool.path(), &tool.version) {
+            (Some(path), Some(version)) => {
+                println!(
+                    "    {:<16} {:<10} {}",
+                    tool.program,
+                    version,
+                    path.display()
+                );
+            }
+            (Some(path), None) => println!("    {:<16} {}", tool.program, path.display()),
+            (None, _) => println!("    {:<16} not found in PATH", tool.program),
+        }
+    }
+    match &report.session {
+        SessionState::SignedIn { account } if account.trim().is_empty() => {
+            println!("    signed in");
+        }
+        SessionState::SignedIn { account } => println!("    signed in as {account}"),
+        SessionState::SignedOut => println!(
+            "    not signed in — run `pitagames-cli {} auth`",
+            report.store
+        ),
+        SessionState::Unknown => {}
+    }
+    match (report.owned, report.installed) {
+        (Some(owned), Some(installed)) => println!("    {owned} owned · {installed} installed"),
+        (Some(owned), None) => println!("    {owned} owned"),
+        (None, Some(installed)) => println!("    {installed} installed"),
+        (None, None) => {}
+    }
+    for problem in &report.problems {
+        println!("    problem: {problem}");
+    }
+}
+
+fn store_state_label(report: &StoreStatusReport) -> &'static str {
+    match report.state() {
+        RowState::Ready => "ready",
+        RowState::CliMissing => "not installed",
+        RowState::SignedOut => "sign in required",
+        RowState::Unverified => "status unknown",
+    }
+}
+
+fn stores_options(parsed: &StoresArgs) -> CliOptions {
+    let log_dir = parsed
+        .log_dir
+        .clone()
+        .or_else(pitagames_core::paths::logs_dir);
+    CliOptions {
+        log_dir,
+        ..CliOptions::default()
+    }
+}
+
+/// Parses the `--store` filters into the three CLI stores.
+fn store_filters(values: &[String]) -> Result<Vec<Store>> {
+    let mut stores = Vec::new();
+    for value in values {
+        let store: Store = value.parse().map_err(|_| {
+            anyhow::anyhow!("unknown store `{value}`; expected epic, amazon or gog")
+        })?;
+        if !STORE_ORDER.contains(&store) {
+            bail!("`{value}` has no CLI store backend (expected epic, amazon or gog)");
+        }
+        if !stores.contains(&store) {
+            stores.push(store);
+        }
+    }
+    Ok(stores)
+}
+
+/// Parsed `stores` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct StoresArgs {
+    /// `status` (default) or `updates`.
+    subcommand: Option<String>,
+    /// `--store` filters (status only).
+    filters: Vec<String>,
+    list: bool,
+    with_stores: bool,
+    program: Option<String>,
+    game_program: Option<String>,
+    log_dir: Option<PathBuf>,
+    steam_root: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
+    let mut parsed = StoresArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--list" => parsed.list = true,
+            "--with-stores" => parsed.with_stores = true,
+            "-h" | "--help" => parsed.help = true,
+            "--store" => parsed
+                .filters
+                .push(flag_value(args, &mut index, "--store")?),
+            "--program" => parsed.program = Some(flag_value(args, &mut index, "--program")?),
+            "--game-program" => {
+                parsed.game_program = Some(flag_value(args, &mut index, "--game-program")?)
+            }
+            "--log-dir" => {
+                parsed.log_dir = Some(PathBuf::from(flag_value(args, &mut index, "--log-dir")?))
+            }
+            "--steam-root" => {
+                parsed.steam_root =
+                    Some(PathBuf::from(flag_value(args, &mut index, "--steam-root")?))
+            }
+            _ if arg.starts_with("--store=") => parsed.filters.push(after_eq(arg).to_string()),
+            _ if arg.starts_with("--program=") => parsed.program = Some(after_eq(arg).to_string()),
+            _ if arg.starts_with("--game-program=") => {
+                parsed.game_program = Some(after_eq(arg).to_string())
+            }
+            _ if arg.starts_with("--log-dir=") => {
+                parsed.log_dir = Some(PathBuf::from(after_eq(arg)))
+            }
+            _ if arg.starts_with("--steam-root=") => {
+                parsed.steam_root = Some(PathBuf::from(after_eq(arg)))
+            }
+            other if !other.starts_with('-') => {
+                if parsed.subcommand.is_some() {
+                    bail!(
+                        "unexpected argument `{other}` for `stores`\n\n{}",
+                        stores_usage()
+                    );
+                }
+                parsed.subcommand = Some(other.to_string());
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `stores`\n\n{}",
+                stores_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+/// The value after a `--flag` token, bumping the index past it.
+fn flag_value(args: &[String], index: &mut usize, name: &str) -> Result<String> {
+    *index += 1;
+    args.get(*index)
+        .cloned()
+        .with_context(|| format!("{name} requires a value"))
+}
+
+/// The value half of a `--flag=value` token.
+fn after_eq(arg: &str) -> &str {
+    arg.split_once('=').map(|(_, value)| value).unwrap_or("")
+}
+
 fn store_options(parsed: &StoreArgs, interactive: bool) -> CliOptions {
     let log_dir = parsed
         .log_dir
@@ -4583,7 +4951,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    stores     Show each CLI store's status, or the unified update list\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -4665,6 +5033,30 @@ fn prefix_usage() -> String {
      <root>/<store>-<id>; Steam keeps its own inside the Steam library. This is\n\
      read-only: it prints the path, whether Proton has created the prefix, its\n\
      size and the GAMEID/PROTONPATH/WINEPREFIX that umu-run will need."
+        .to_string()
+}
+
+fn stores_usage() -> String {
+    "USAGE:\n    pitagames-cli stores [status] [--store <name>] [--list] [--json]\n\
+     \x20                 pitagames-cli stores updates [--steam-root <dir>] [--with-stores] [--json]\n\n\
+     SUBCOMMANDS:\n    \
+     status                 Each CLI store's row (default)\n    \
+     updates                The unified 'update available' list\n\n\
+     OPTIONS:\n    \
+     --store <name>         Limit status to epic, amazon or gog (repeatable)\n    \
+     --list                 Also fetch owned/installed counts (status only)\n    \
+     --program <path>       Override the CLI to probe (one --store; GOG: the library CLI)\n    \
+     --game-program <path>  Override GOG's gogdl program\n    \
+     --log-dir <dir>        Where per-run CLI logs go\n    \
+     --steam-root <dir>     Steam root to scan for updates (updates only)\n    \
+     --with-stores          Include the CLI stores' installs in the update list\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     A status row shows whether each store's CLI is on PATH, its version, the\n\
+     signed-in account and (with --list) the game counts. A CLI that is missing or\n\
+     signed out is a row state, not an error: the launcher keeps working for the\n\
+     stores that are ready. updates unifies Steam's manifest state with each CLI\n\
+     store's own install flag; Amazon and GOG expose no update signal yet."
         .to_string()
 }
 
@@ -5376,6 +5768,152 @@ mod tests {
         ])
         .unwrap();
         disk(&[path]).unwrap();
+    }
+
+    #[test]
+    fn parses_store_status_and_update_arguments() {
+        let parsed = parse_stores_args(&[
+            "--store".to_string(),
+            "epic".to_string(),
+            "--store=gog".to_string(),
+            "--list".to_string(),
+            "--program=/opt/legendary".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.subcommand, None);
+        assert_eq!(parsed.filters, ["epic", "gog"]);
+        assert!(parsed.list && parsed.json && !parsed.help);
+        assert_eq!(parsed.program.as_deref(), Some("/opt/legendary"));
+
+        let updates = parse_stores_args(&[
+            "updates".to_string(),
+            "--steam-root".to_string(),
+            "/steam".to_string(),
+            "--with-stores".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(updates.subcommand.as_deref(), Some("updates"));
+        assert_eq!(updates.steam_root, Some(PathBuf::from("/steam")));
+        assert!(updates.with_stores);
+
+        assert!(parse_stores_args(&["status".to_string(), "extra".to_string()]).is_err());
+        assert!(parse_stores_args(&["--store".to_string()]).is_err());
+        assert!(parse_stores_args(&["--bogus".to_string()]).is_err());
+        assert!(parse_stores_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn stores_status_probes_one_store_with_an_explicit_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("legendary");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n\
+             if [ \"$1\" = \"--version\" ]; then printf 'legendary version \"0.20.35\"\\n'; exit 0; fi\n\
+             if [ \"$1\" = \"status\" ]; then printf '{\"account\": \"<not logged in>\"}'; exit 0; fi\n\
+             exit 2\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&program, permissions).unwrap();
+        }
+        let program = program.to_string_lossy().into_owned();
+
+        // Both render paths run, and a signed-out store is a row state, not an
+        // error: the command still exits cleanly.
+        stores(&[
+            "--store".to_string(),
+            "epic".to_string(),
+            "--program".to_string(),
+            program.clone(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        stores(&[
+            "--store".to_string(),
+            "epic".to_string(),
+            "--program".to_string(),
+            program,
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn stores_rejects_flags_that_belong_to_the_other_subcommand() {
+        // `--with-stores`/`--steam-root` are `updates` options.
+        assert!(stores(&["--with-stores".to_string()]).is_err());
+        // `--list` is a status option.
+        assert!(stores(&["updates".to_string(), "--list".to_string()]).is_err());
+        // A program override needs exactly one store selected.
+        assert!(stores(&["--program".to_string(), "/tmp/cli".to_string()]).is_err());
+        // Steam has no CLI store backend.
+        assert!(stores(&["--store".to_string(), "steam".to_string()]).is_err());
+    }
+
+    #[test]
+    fn stores_updates_reads_a_steam_library() {
+        let root = tempfile::tempdir().unwrap();
+        let steam = root.path().join("Steam");
+
+        let folders = format!(
+            "\"libraryfolders\"\n{{\n\t\"0\"\n\t{{\n\t\t\"path\"\t\t\"{}\"\n\t}}\n}}\n",
+            steam.display()
+        );
+        write_fixture(&steam.join("steamapps/libraryfolders.vdf"), folders);
+        // StateFlags 12 = FULLY_INSTALLED | UPDATE_REQUIRED → update waiting.
+        write_fixture(
+            &steam.join("steamapps/appmanifest_620.acf"),
+            acf(620, "Portal 2", 12),
+        );
+        // StateFlags 4 = FULLY_INSTALLED → up to date, not listed.
+        write_fixture(
+            &steam.join("steamapps/appmanifest_570.acf"),
+            acf(570, "Dota 2", 4),
+        );
+
+        let parsed = parse_stores_args(&[
+            "updates".to_string(),
+            "--steam-root".to_string(),
+            steam.to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+        let (found, notes) = collect_updates(&parsed, &stores_options(&parsed));
+
+        assert_eq!(
+            found.len(),
+            1,
+            "only the pending update is listed: {notes:?}"
+        );
+        assert_eq!(found[0].id.store_id, "620");
+        assert_eq!(found[0].title, "Portal 2");
+        assert_eq!(
+            found[0].source,
+            pitagames_stores::status::UpdateSource::SteamManifest
+        );
+
+        // The command renders the same list without erroring.
+        stores(&[
+            "updates".to_string(),
+            "--steam-root".to_string(),
+            steam.to_string_lossy().into_owned(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+    }
+
+    fn write_fixture(path: &Path, content: impl AsRef<[u8]>) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn acf(app_id: u32, name: &str, state_flags: u32) -> String {
+        format!(
+            "\"AppState\"\n{{\n\t\"appid\"\t\t\"{app_id}\"\n\t\"name\"\t\t\"{name}\"\n\t\"StateFlags\"\t\"{state_flags}\"\n\t\"installdir\"\t\"{name}\"\n\t\"SizeOnDisk\"\t\"1024\"\n}}\n"
+        )
     }
 
     #[test]

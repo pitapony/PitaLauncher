@@ -443,7 +443,7 @@ impl InstalledEntry {
                 .push(format!("platform:{}", self.platform.to_ascii_lowercase()));
         }
         if self.needs_verification {
-            game.tags.push("needs-verification".into());
+            game.tags.push(crate::status::UPDATE_TAG.into());
         }
         game
     }
