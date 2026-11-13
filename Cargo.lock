@@ -4273,6 +4273,7 @@ dependencies = [
 name = "pitagames-platform"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "pitagames-core",
  "serde",
  "serde_json",

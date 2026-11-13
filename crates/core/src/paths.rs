@@ -107,6 +107,17 @@ pub fn logs_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("logs"))
 }
 
+/// `<XDG_DATA_HOME>/pitagames/prefixes`: one Wine/Proton prefix per game.
+///
+/// Steam keeps its own prefixes under `steamapps/compatdata/<appid>`; every
+/// non-Steam store gets a directory here instead (`prefixes/<store>-<id>`),
+/// because pointing two games at one prefix is how a launcher overwrites
+/// another game's registry and saves. The layout and the umu environment that
+/// uses it live in `platform::prefix`.
+pub fn prefixes_dir() -> Option<PathBuf> {
+    data_dir().map(|base| base.join("prefixes"))
+}
+
 /// `<XDG_DATA_HOME>/pitagames/instance.sock`: the activation socket.
 ///
 /// The second launch connects here to raise the running window; see
@@ -247,12 +258,17 @@ mod tests {
         let socket = activation_socket();
         let lock = lock_file();
         let games = games_dir();
+        let prefixes = prefixes_dir();
         unsafe { std::env::remove_var("XDG_DATA_HOME") };
         drop(guard);
 
         assert_eq!(
             games,
             Some(PathBuf::from("/tmp/xdg-desktop/pitagames/games"))
+        );
+        assert_eq!(
+            prefixes,
+            Some(PathBuf::from("/tmp/xdg-desktop/pitagames/prefixes"))
         );
         assert_eq!(
             entry,

@@ -64,19 +64,25 @@ hardware layer has been exercised in an `archlinux:latest` container.
   disk are listed without a store session or the CLI being installed, keeping
   the identity each store uses so a scan does not duplicate them; nothing is
   launched, downloaded or written.
+- **Prefixes, disk checks and an install queue** — each non-Steam game gets one
+  Wine/Proton prefix under `prefixes/<store>-<id>` (`pitagames-cli prefix`, with
+  the `GAMEID`/`PROTONPATH`/`WINEPREFIX` umu environment), `pitagames-cli disk`
+  reports free space and checks it against an install size, and a serial
+  `InstallQueue` runs one CLI install at a time with that check in front.
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
 - **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `compat`,
-  `anticheat`, `profile`, `logs`, `launch-options`, `compat-tool`,
-  `steam-account`, `desktop-entry`, `activate`, `epic`, `amazon`, `gog`,
-  `import`.
+  `anticheat`, `profile`, `logs`, `import`, `prefix`, `disk`, `launch-options`,
+  `compat-tool`, `steam-account`, `desktop-entry`, `activate`, `epic`, `amazon`,
+  `gog`.
 
 ## Not there yet
 
 - Hardware validation on the RX 9070 and RX 5700 XT.
 - Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR) and the
   graphics screen that enforces the anti-cheat gate.
-- Other stores (GOG, Epic, Amazon), mod orchestration, and release/AUR
-  packaging (the `-git` package builds and installs today).
+- The store status UI, the update aggregation and the umu/Proton launch hand-off;
+  mod orchestration; and release/AUR packaging (the `-git` package builds and
+  installs today).
 
 ## Requirements
 
@@ -153,9 +159,9 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 |---|---|
 | `crates/core` | Domain types, launch spec, profiles, XDG paths, metadata types |
 | `crates/db` | SQLite pool, migrations and repositories |
-| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers, the PTY CLI driver and the Epic backend |
+| `crates/stores` | Steam VDF/ACF scan, watcher, install monitor, launch-options and compatibility-tool writers, the PTY CLI driver, the Epic/Amazon/GOG backends, the read-only importers and the install queue |
 | `crates/metadata` | Steam `appdetails` and `GetOwnedGames` clients, rate limiter and cache policy |
-| `crates/platform` | Proton discovery, runtime selection, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
+| `crates/platform` | Proton discovery, the non-Steam prefix layout, disk-space checks, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
 | `crates/secrets` | Steam Web API key storage (keyring + `0600` fallback) |
 | `crates/shim` | `pitagames-shim` launch shim |
@@ -189,6 +195,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2-amazon.md`](docs/m2-amazon.md) — the Amazon backend (`nile`).
 - [`docs/m2-gog.md`](docs/m2-gog.md) — the GOG backend (`lgogdownloader` + `gogdl`).
 - [`docs/m2-importers.md`](docs/m2-importers.md) — the read-only Heroic, Lutris and Bottles importers.
+- [`docs/m2-prefixes.md`](docs/m2-prefixes.md) — non-Steam prefixes, disk-space checks and the install queue.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

@@ -21,7 +21,9 @@ use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
 use pitagames_platform::compat::{CompatDb, CompatEntry};
+use pitagames_platform::disk;
 use pitagames_platform::logs as log_files;
+use pitagames_platform::prefix::{self, Prefix};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::amazon::{self, Amazon};
@@ -68,6 +70,8 @@ fn run() -> Result<()> {
         "profile" => profile(&args.collect::<Vec<_>>()),
         "logs" => logs(&args.collect::<Vec<_>>()),
         "import" => import(&args.collect::<Vec<_>>()),
+        "prefix" => prefix(&args.collect::<Vec<_>>()),
+        "disk" => disk(&args.collect::<Vec<_>>()),
         "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
         "activate" => activate(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
@@ -1042,7 +1046,299 @@ fn apply_import_flag(parsed: &mut ImportArgs, flag: &str, value: &str) -> Result
     Ok(())
 }
 
-/// Read, write or remove the launcher's `.desktop` entry.
+/// Show where one non-Steam game's Wine/Proton prefix lives and what state it
+/// is in.
+///
+/// Read-only: nothing is created, launched or deleted. Steam games keep their
+/// prefixes inside Steam; this is for Epic/Amazon/GOG and imports, and it is the
+/// diagnostic for the layout `platform::prefix` computes and the umu environment
+/// the launch hand-off will merge.
+fn prefix(args: &[String]) -> Result<()> {
+    let parsed = parse_prefix_args(args)?;
+    if parsed.help {
+        println!("{}", prefix_usage());
+        return Ok(());
+    }
+
+    let (store, id) = match parsed.positional.as_slice() {
+        [store, id] => (
+            Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+            id.clone(),
+        ),
+        _ => bail!("expected `<store> <id>`\n\n{}", prefix_usage()),
+    };
+    let game = GameId::new(store, id);
+
+    let root = match parsed.root.clone() {
+        Some(root) => root,
+        None => {
+            prefix::default_root().context("cannot determine the prefix root; pass --root <dir>")?
+        }
+    };
+    let report = prefix::inspect(&root, &game);
+
+    // Resolve a Proton for the umu environment: an explicit path wins, else the
+    // best available build, else there is simply no `PROTONPATH` to show.
+    let discovery = proton::discover();
+    let (proton_path, proton_source) = match parsed.proton.clone() {
+        Some(path) => (Some(path), Some("explicit")),
+        None => match discovery.best() {
+            Some(install) => (Some(install.path.clone()), Some("discovered")),
+            None => (None, None),
+        },
+    };
+    let env = proton_path
+        .as_deref()
+        .map(|proton| prefix::umu_env(&game, proton, &report.path));
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "prefix": report,
+            "proton": proton_path,
+            "proton_source": proton_source,
+            "env": env,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        print_prefix(&report, proton_path.as_deref(), proton_source, env.as_ref());
+    }
+
+    Ok(())
+}
+
+fn print_prefix(
+    report: &Prefix,
+    proton: Option<&Path>,
+    proton_source: Option<&str>,
+    env: Option<&std::collections::BTreeMap<String, String>>,
+) {
+    let state = if report.is_ready() {
+        "ready"
+    } else if report.present {
+        "present, not initialized"
+    } else {
+        "not present"
+    };
+    println!("Prefix {}", report.key);
+    println!("  root         {}", report.root.display());
+    println!("  path         {}  ({state})", report.path.display());
+    println!("  size         {}", report.size.summary());
+    match proton {
+        Some(proton) => println!(
+            "  proton       {} ({})",
+            proton.display(),
+            proton_source.unwrap_or("explicit")
+        ),
+        None => println!("  proton       none found (pass --proton <path>)"),
+    }
+    if let Some(env) = env {
+        println!("  umu env");
+        for (key, value) in env {
+            println!("    {key}={value}");
+        }
+    }
+}
+
+/// Parsed `prefix` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PrefixArgs {
+    positional: Vec<String>,
+    root: Option<PathBuf>,
+    proton: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_prefix_args(args: &[String]) -> Result<PrefixArgs> {
+    let mut parsed = PrefixArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--root" | "--proton" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                apply_prefix_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--root=") || arg.starts_with("--proton=") => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_prefix_flag(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
+            other => bail!(
+                "unexpected argument `{other}` for `prefix`\n\n{}",
+                prefix_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn apply_prefix_flag(parsed: &mut PrefixArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--proton" => parsed.proton = Some(PathBuf::from(value)),
+        other => bail!("internal error: unknown prefix flag `{other}`"),
+    }
+    Ok(())
+}
+
+/// Report the free space on a filesystem, optionally against a requirement.
+fn disk(args: &[String]) -> Result<()> {
+    let parsed = parse_disk_args(args)?;
+    if parsed.help {
+        println!("{}", disk_usage());
+        return Ok(());
+    }
+
+    let Some(path) = parsed.path.clone() else {
+        bail!("expected a path\n\n{}", disk_usage());
+    };
+
+    let space = disk::space(&path)
+        .with_context(|| format!("cannot read filesystem space for {}", path.display()))?;
+    let check = parsed.need.map(|required| disk::SpaceCheck {
+        required,
+        available: space.available,
+    });
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "path": path,
+            "total": space.total,
+            "free": space.free,
+            "available": space.available,
+            "used_fraction": space.used_fraction(),
+            "check": check,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Filesystem for {}", path.display());
+        println!("  total        {}", disk::human_bytes(space.total));
+        println!("  free         {}", disk::human_bytes(space.free));
+        println!("  available    {}", disk::human_bytes(space.available));
+        println!("  used         {:.1}%", space.used_fraction() * 100.0);
+        match check {
+            Some(check) if check.ok() => println!(
+                "  need {}: enough ({} to spare)",
+                disk::human_bytes(check.required),
+                disk::human_bytes(check.available - check.required)
+            ),
+            Some(check) => println!(
+                "  need {}: NOT ENOUGH ({} short)",
+                disk::human_bytes(check.required),
+                disk::human_bytes(check.shortfall())
+            ),
+            None => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed `disk` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DiskArgs {
+    path: Option<PathBuf>,
+    need: Option<u64>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_disk_args(args: &[String]) -> Result<DiskArgs> {
+    let mut parsed = DiskArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--need" => {
+                index += 1;
+                let value = args.get(index).with_context(|| "--need requires a size")?;
+                parsed.need = Some(parse_size_bytes(value)?);
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--need=") => {
+                let value = &arg["--need=".len()..];
+                parsed.need = Some(parse_size_bytes(value)?);
+            }
+            other if !other.starts_with('-') => {
+                if parsed.path.replace(PathBuf::from(other)).is_some() {
+                    bail!("`disk` takes one path\n\n{}", disk_usage());
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `disk`\n\n{}",
+                disk_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+/// Parse a byte count: `1500`, `20K`, `1.5GiB`, `512M`, `2T`.
+///
+/// A bare number is whole bytes; a suffix (`B`/`K`/`M`/`G`/`T`, with an optional
+/// `i`/`iB`, case-insensitive) is base-1024 and may carry a decimal point. A
+/// fractional value with no suffix is refused, so `1.5` cannot silently become
+/// one byte.
+fn parse_size_bytes(value: &str) -> Result<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        bail!("size is empty");
+    }
+
+    let split = trimmed
+        .find(|ch: char| !ch.is_ascii_digit() && ch != '.')
+        .unwrap_or(trimmed.len());
+    let (number, suffix) = trimmed.split_at(split);
+    if number.is_empty() {
+        bail!("`{value}` is not a size");
+    }
+
+    let multiplier: u64 = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        "g" | "gb" | "gib" => 1024 * 1024 * 1024,
+        "t" | "tb" | "tib" => 1024_u64.pow(4),
+        other => bail!("unknown size suffix `{other}` in `{value}`"),
+    };
+
+    if number.contains('.') {
+        if multiplier == 1 {
+            bail!("`{value}` needs a unit for a fractional size (e.g. `1.5GiB`)");
+        }
+        let amount: f64 = number
+            .parse()
+            .with_context(|| format!("`{number}` is not a number"))?;
+        if !amount.is_finite() || amount < 0.0 {
+            bail!("`{value}` is not a size");
+        }
+        Ok((amount * multiplier as f64) as u64)
+    } else {
+        let amount: u64 = number
+            .parse()
+            .with_context(|| format!("`{number}` is not a whole number"))?;
+        Ok(amount.saturating_mul(multiplier))
+    }
+}
+
 ///
 /// The GUI regenerates the user-level entry on startup so an uninstalled
 /// checkout still appears in menus; this command is the same renderer without a
@@ -4278,28 +4574,16 @@ fn updated(game: &Game) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+/// A compact base-1024 byte count, shared with `platform::disk`.
 fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
-    let mut value = bytes as f64;
-    let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
-        value /= 1024.0;
-        unit += 1;
-    }
-
-    if unit == 0 {
-        format!("{bytes} B")
-    } else {
-        format!("{value:.1} {}", UNITS[unit])
-    }
+    disk::human_bytes(bytes)
 }
 
 fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -4363,6 +4647,38 @@ fn import_usage() -> String {
      Installed-only and read-only: the games another launcher already has are\n\
      listed with the identity their store uses, so a scan does not duplicate\n\
      them. Nothing is launched, downloaded or written."
+        .to_string()
+}
+
+fn prefix_usage() -> String {
+    "USAGE:\n    pitagames-cli prefix <store> <id> [options]\n\n\
+     ARGS:\n    \
+     <store>                One of steam, gog, epic, amazon, local\n    \
+     <id>                   The store's own id (app name, product id, appid)\n\n\
+     OPTIONS:\n    \
+     --root <dir>           Prefix root (default: $PITAGAMES_PREFIX_DIR or\n\
+     \x20                      $XDG_DATA_HOME/pitagames/prefixes)\n    \
+     --proton <path>        Proton build for the umu environment (default: auto-detect)\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Non-Steam games get one Wine/Proton prefix each, under\n\
+     <root>/<store>-<id>; Steam keeps its own inside the Steam library. This is\n\
+     read-only: it prints the path, whether Proton has created the prefix, its\n\
+     size and the GAMEID/PROTONPATH/WINEPREFIX that umu-run will need."
+        .to_string()
+}
+
+fn disk_usage() -> String {
+    "USAGE:\n    pitagames-cli disk <path> [--need <size>] [--json]\n\n\
+     ARGS:\n    \
+     <path>                 A file or directory (its filesystem is measured)\n\n\
+     OPTIONS:\n    \
+     --need <size>          Also check for this much room, e.g. 20G, 1.5GiB, 512M\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Reports the filesystem's total, free and user-available bytes; --need prints\n\
+     whether an install of that size would fit. A path that does not exist yet is\n\
+     fine: the filesystem it would land on is what matters."
         .to_string()
 }
 
@@ -4963,6 +5279,103 @@ mod tests {
             "1".to_string(),
         ])
         .unwrap();
+    }
+
+    #[test]
+    fn parses_prefix_arguments() {
+        let parsed = parse_prefix_args(&[
+            "gog".to_string(),
+            "1207660623".to_string(),
+            "--root=/data/prefixes".to_string(),
+            "--proton".to_string(),
+            "/opt/proton".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.positional, ["gog", "1207660623"]);
+        assert_eq!(parsed.root, Some(PathBuf::from("/data/prefixes")));
+        assert_eq!(parsed.proton, Some(PathBuf::from("/opt/proton")));
+        assert!(parsed.json && !parsed.help);
+
+        assert!(parse_prefix_args(&["--root=".to_string()]).is_err());
+        assert!(parse_prefix_args(&["--nope".to_string()]).is_err());
+        assert!(parse_prefix_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn prefix_resolves_the_layout_without_creating_it() {
+        let root = tempfile::tempdir().unwrap();
+        let root_path = root.path().to_string_lossy().into_owned();
+
+        // With an explicit Proton the auto-discovery is skipped, so the test is
+        // independent of what the machine has installed.
+        prefix(&[
+            "epic".to_string(),
+            "Gizmo".to_string(),
+            "--root".to_string(),
+            root_path.clone(),
+            "--proton".to_string(),
+            "/opt/proton-cachyos/proton".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        // A prefix is created lazily by Proton on first launch.
+        assert!(!root.path().join("epic-Gizmo").exists());
+
+        assert!(prefix(&["epic".to_string()]).is_err(), "missing id");
+        assert!(
+            prefix(&[
+                "nintendo".to_string(),
+                "1".to_string(),
+                "--root".to_string(),
+                root_path
+            ])
+            .is_err(),
+            "unknown store"
+        );
+    }
+
+    #[test]
+    fn parses_disk_arguments_and_sizes() {
+        let parsed = parse_disk_args(&[
+            "/".to_string(),
+            "--need".to_string(),
+            "20G".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.path, Some(PathBuf::from("/")));
+        assert_eq!(parsed.need, Some(20 * 1024 * 1024 * 1024));
+        assert!(parsed.json);
+
+        assert!(parse_disk_args(&["a".to_string(), "b".to_string()]).is_err());
+        assert!(parse_disk_args(&["--need".to_string()]).is_err());
+
+        assert_eq!(parse_size_bytes("1500").unwrap(), 1500);
+        assert_eq!(parse_size_bytes("1K").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("1KiB").unwrap(), 1024);
+        assert_eq!(parse_size_bytes("1.5GiB").unwrap(), 1_610_612_736);
+        assert_eq!(parse_size_bytes("2T").unwrap(), 2 * 1024u64.pow(4));
+        assert!(parse_size_bytes("1.5").is_err());
+        assert!(parse_size_bytes("12x").is_err());
+        assert!(parse_size_bytes("").is_err());
+    }
+
+    #[test]
+    fn disk_reports_a_tempdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_string_lossy().into_owned();
+
+        disk(&[
+            path.clone(),
+            "--need".to_string(),
+            "1".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        disk(&[path]).unwrap();
     }
 
     #[test]
