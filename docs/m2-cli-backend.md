@@ -1,14 +1,15 @@
 # M2 — the CLI driver shared by the store backends (`stores::cli`)
 
 Status: implemented and verified locally (pure crates on macOS) and in
-`archlinux:latest`. Not yet driven against a real `legendary` / `nile` /
-`lgogdownloader` — those presets land with their own slices, and none of the
-three CLIs is installed on the target machines.
+`archlinux:latest`. Three presets are built on it — Epic (`legendary`,
+`docs/m2-epic.md`), Amazon (`nile`, `docs/m2-amazon.md`) and GOG
+(`lgogdownloader` + `gogdl`, `docs/m2-gog.md`). None of these CLIs is installed
+on the target machines, so none of this has been driven against a real one yet.
 
 ## Why this exists
 
 Three of the four stores are external programs: Epic (`legendary`), Amazon
-(`nile`) and GOG (`lgogdownloader`, `gogdl` fallback). All three need the same
+(`nile`) and GOG (`lgogdownloader` + `gogdl`). All three need the same
 six things — a pseudo-terminal for their prompts, a way to type an answer, a
 progress parser, cancellation, timeouts, and a transcript for support. Written
 three times, that is three places for a cancelled install to keep a worker
@@ -32,13 +33,14 @@ DB-unaware and argv-only: a spec of program + argument templates goes in,
 | Type | Role |
 |---|---|
 | `CliSpec` | one CLI: `program`, `ProgressParser`, and one argv template per command |
-| `CliCommand` | `ListInstalled`, `ListOwned`, `Auth`, `Install { id, install_dir }`, `Launch { id }` |
+| `CliCommand` | `ListInstalled`, `ListOwned`, `Auth`, `Logout`, `Sync`, `Install { id, install_dir }`, `Verify { id, install_dir: Option }`, `Launch { id, install_dir: Option }`, `Status`, `Version` — a verify/launch carries a directory only when the CLI needs one (`gogdl` wants `--path` for both) |
 | `ProgressParser` | `Plain`, `Percent(Regex)`, `JsonLines` |
 | `ProgressEvent` | `Line`, `Percent(f32, String)`, `Stage(String)`, `Done`, `Failed { code, message }` |
 | `CliOptions` | `log_dir`, `env`, `cwd`, `idle_timeout`, `hard_timeout`; `CliOptions::interactive()` |
 | `CliHandle` | `spawn`, `next_event`, `write_stdin`, `cancel`, `log_path`, `wait` |
 | `CliOutcome` | `success`, `code`, `cancelled`, `timed_out`, `log_path`, `events`, `raw_tail` |
-| `CliError` | `NotFound`, `Template`, `Log`, `Spawn`, `Io` — only *before/while* a run starts |
+| `CliError` | `NotFound`, `Unsupported`, `Template`, `Log`, `Spawn`, `Io` — only *before/while* a run starts |
+| `StoreStatus` | `Ready { program }` / `CliMissing { program }` — `probe`d from `PATH` without running anything; shared by every backend |
 
 A run is a stream plus an outcome, not a `Result` with the output inside it:
 
@@ -56,12 +58,18 @@ let outcome = handle.wait()?;   // terminal event, exit code, flags, log path
 
 ## Argv, never a shell
 
-`CliSpec::argv` returns a `Vec<String>`. Templates use exactly two
-placeholders, `{id}` and `{dir}`; substitution is one pass and verbatim, so a
-game id that looks like `{dir}` stays a literal argument and nothing is
-re-scanned. An unknown or unterminated placeholder is `CliError::Template`
-instead of being silently dropped — a missing `{id}` would otherwise become an
-install into the wrong place.
+`CliSpec::argv` returns a `Vec<String>`. Templates use `{id}`, `{dir}` and, for
+an install that needs its directory split (legendary's
+`--base-path`/`--game-folder`), `{parent}` and `{name}`; a `verify`/`launch` may
+also use `{dir}` when the command carries an install directory (`gogdl` needs
+`--path` for both). Substitution is one pass
+and verbatim, so a game id that looks like `{dir}` stays a literal argument and
+nothing is re-scanned. An unknown or unterminated placeholder is
+`CliError::Template` instead of being silently dropped — a missing `{id}` would
+otherwise become an install into the wrong place, and a `{dir}` the command
+cannot supply is a `Template` error, never a dropped argument. A command whose
+template is empty (a preset that has no `sync`, say) is `CliError::Unsupported`,
+so nothing can run a CLI with no arguments by accident.
 
 The program is resolved before anything is spawned: an absolute path must be an
 executable file, a bare name is looked up in `env["PATH"]` (which is how the
@@ -159,9 +167,25 @@ the UI. Redaction is an M4 hardening item (see below).
 
 | Crate | Responsibility |
 |---|---|
-| `stores` (`cli`) | everything above: spawn, reader thread, parsers, timeouts, escalation, log |
-| `stores` (`lib`) | re-exports `CliHandle`, `CliSpec`, `CliCommand`, `CliOptions`, `CliOutcome`, `CliError`, `ProgressEvent`, `ProgressParser`, `TimeoutKind` |
-| next slices | the per-store `CliSpec` presets, the `StoreBackend` impls, DB writes, the store status UI |
+| `stores` (`cli`) | everything above: spawn, reader thread, parsers, timeouts, escalation, log, `StoreStatus` |
+| `stores` (`report`) | `LogFormat` (legendary `[cli] INFO: …` / nile `INFO [CLI]: …`; `Gogdl` is gogdl's `[NAME] INFO: …`, parsed like legendary), `LogLine`, `RunReport`, `RunFailure`, the shared JSON extraction |
+| `stores` (`epic` / `amazon` / `gog`) | the per-store `CliSpec` presets and verdicts (`docs/m2-epic.md`, `docs/m2-amazon.md`, `docs/m2-gog.md`) |
+| next slices | the `StoreBackend` impls, DB writes, the store status UI |
+
+## Judging a run (`stores::report`)
+
+The driver reports the process outcome; it cannot say whether the *action*
+worked, because some wrapped CLIs (legendary, nile) log an error and exit `0`
+for whole classes of refusal. `RunReport` keeps the text, the CLI's own log
+levels (per `LogFormat`)
+and the outcome, and offers three verdicts: `succeeded()` (exit `0` **and** no
+`ERROR`/`CRITICAL`/`FATAL` line — library, install, verify), `exited_cleanly()`
+(exit `0` only — a launch whose game shares the PTY), and `log_lines()` for the
+per-store cases in between (nile needs its `LAUNCHER` marker).
+`RunReport::require_success()` returns a `RunFailure` that each backend wraps in
+its own error type, and `extract_json` is the PTY-tolerant JSON reader they
+share. The two formats are unit-tested; see `docs/m2-amazon.md` for why the
+level/logger order matters.
 
 ## Guarantees and limits
 
@@ -188,6 +212,9 @@ the UI. Redaction is an M4 hardening item (see below).
   tweaks are not needed for these CLIs and are not implemented.
 - **Nothing here has run against a real store CLI yet.** The behaviours above
   are verified against fixture scripts, including dash on Arch.
+- **The verdict layer is not part of the driver.** `stores::report` reads log
+  lines; the driver stays a PTY/parser/process supervisor so a CLI with colour
+  and no log levels (a future native tool) does not need a fake format.
 
 ## Verification
 
@@ -199,7 +226,7 @@ cargo clippy -p pitagames-stores --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-- **`cli::tests` (25)** — template substitution (install placeholders, unknown
+- **`cli::tests` (29)** — template substitution (install placeholders, unknown
   and malformed placeholders, no re-scan of substituted values), the three
   parsers (including an out-of-range JSON percentage), line splitting on
   `\n`/`\r`, a partial line kept until flushed, ANSI stripping (CSI, OSC,
@@ -209,7 +236,8 @@ cargo fmt --all -- --check
   `write_stdin`, an expired session, disk-full and network errors naming the
   CLI's line, CR redraws, a trailing line without a newline, `NotFound`, the
   idle and hard timeouts, a child that ignores `SIGHUP` (only the process-group
-  `SIGKILL` ends it), and `cancel()`.
+  `SIGKILL` ends it), `cancel()`, the empty-template `Unsupported` guard and the
+  `StoreStatus` probe.
 - **Deterministic by construction.** The two timeout tests originally raced a
   slow `fork`+`exec` against a short idle window and flaked under the parallel
   test harness. The idle test now uses a script that never prints (so startup
@@ -225,8 +253,8 @@ cargo fmt --all -- --check
 
 ## Deliberately not in this slice
 
-- The store presets (real `legendary`/`nile`/`lgogdownloader` argv and progress
-  regexes), the `StoreBackend` impls, DB writes and the store status UI.
+- The `StoreBackend` impls, DB writes and the store status UI. Each backend's
+  preset shipped with its own slice (Epic, Amazon, GOG).
 - Async/tokio. A thread plus a channel keeps `stores` synchronous, which is what
   the rest of the crate and the CLI are.
 - Transcript redaction for auth runs, log rotation and a support bundle (M4).

@@ -1,0 +1,64 @@
+[
+  {
+    "gamename": "the_witcher_3_wild_hunt",
+    "gamename_basegame": "",
+    "product_id": "1207660623",
+    "title": "The Witcher 3: Wild Hunt",
+    "title_basegame": "",
+    "icon": "https://images.gog.com/icon_witcher3.png",
+    "serials": "",
+    "changelog": "https://content-system.gog.com/changelog/witcher3.html",
+    "extras": [
+      { "path": "/extras/wallpapers.zip", "size": 1234567, "platform": "" }
+    ],
+    "installers": [
+      {
+        "path": "/windows/setup_the_witcher_3_wild_hunt_1.32_(a).exe",
+        "size": 42949672960,
+        "platform": "windows",
+        "language": "en",
+        "version": "1.32"
+      }
+    ],
+    "patches": [],
+    "languagepacks": [],
+    "dlcs": [
+      {
+        "gamename": "the_witcher_3_wild_hunt_blood_and_wine",
+        "gamename_basegame": "the_witcher_3_wild_hunt",
+        "product_id": "1333403780",
+        "title": "The Witcher 3: Wild Hunt - Blood and Wine",
+        "title_basegame": "The Witcher 3: Wild Hunt",
+        "installers": [],
+        "extras": [],
+        "patches": [],
+        "languagepacks": [],
+        "dlcs": []
+      }
+    ]
+  },
+  {
+    "gamename": "hollow_knight",
+    "gamename_basegame": "",
+    "product_id": "1308155126",
+    "title": "Hollow Knight",
+    "title_basegame": "",
+    "extras": [],
+    "installers": [],
+    "patches": [],
+    "languagepacks": [],
+    "dlcs": []
+  },
+  {
+    "gamename": "gwent_the_card_game",
+    "gamename_basegame": "",
+    "product_id": "",
+    "title": "Gwent",
+    "title_basegame": "",
+    "extras": [],
+    "installers": [],
+    "patches": [],
+    "languagepacks": [],
+    "dlcs": []
+  }
+]

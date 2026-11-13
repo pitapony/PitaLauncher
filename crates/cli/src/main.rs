@@ -24,14 +24,18 @@ use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::logs as log_files;
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
+use pitagames_stores::amazon::{self, Amazon};
 use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::epic::{self, Epic};
+use pitagames_stores::gog::{self, Gog};
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
 use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
     self, CompatRestoreReport, CompatWriteReport, SteamProcessState, WriteOptions, WriteReport,
 };
-use pitagames_stores::{CliCommand, CliOptions, DEFAULT_PRIORITY, DownloadProgress, ProgressEvent};
+use pitagames_stores::{
+    CliCommand, CliOptions, CliSpec, DEFAULT_PRIORITY, DownloadProgress, ProgressEvent,
+};
 
 /// Give up on an install after an hour unless told otherwise.
 const DEFAULT_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -68,6 +72,8 @@ fn run() -> Result<()> {
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
         "steam-account" => steam_account(&args.collect::<Vec<_>>()),
         "epic" => epic(&args.collect::<Vec<_>>()),
+        "amazon" => amazon(&args.collect::<Vec<_>>()),
+        "gog" => gog(&args.collect::<Vec<_>>()),
         "-h" | "--help" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -1356,7 +1362,7 @@ fn parse_steam_account_args(args: &[String]) -> Result<SteamAccountArgs> {
 /// with the driver's live progress. `--dry-run` prints the argv without running
 /// anything, which is how the preset is checked on a machine without legendary.
 fn epic(args: &[String]) -> Result<()> {
-    let parsed = parse_epic_args(args)?;
+    let parsed = parse_store_args(args, StoreCli::Epic)?;
     if parsed.help {
         println!("{}", epic_usage());
         return Ok(());
@@ -1379,10 +1385,10 @@ fn epic(args: &[String]) -> Result<()> {
     }
 }
 
-fn epic_status(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_status(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 1)?;
     let status = backend.status(None);
-    let options = epic_options(parsed, false);
+    let options = store_options(parsed, false);
 
     let mut version = None;
     let mut account = None;
@@ -1442,9 +1448,9 @@ fn epic_status(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     Ok(())
 }
 
-fn epic_owned(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_owned(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 1)?;
-    let games = backend.owned(&epic_options(parsed, false))?;
+    let games = backend.owned(&store_options(parsed, false))?;
     if parsed.json {
         println!("{}", serde_json::to_string_pretty(&games)?);
         return Ok(());
@@ -1456,9 +1462,9 @@ fn epic_owned(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     Ok(())
 }
 
-fn epic_installed(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_installed(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 1)?;
-    let games = backend.installed(&epic_options(parsed, false))?;
+    let games = backend.installed(&store_options(parsed, false))?;
     if parsed.json {
         println!("{}", serde_json::to_string_pretty(&games)?);
         return Ok(());
@@ -1485,11 +1491,11 @@ fn epic_installed(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
 /// is exactly what the driver's partial-line flush exists for. A prompt line ends
 /// with `:`, so each one gets one line of stdin. A PTY echoes the answer, so the
 /// transcript on disk can contain the code; it is never printed or stored.
-fn epic_auth(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_auth(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     use std::io::{BufRead as _, Write as _};
 
     expect_positionals(parsed, 1)?;
-    let options = epic_options(parsed, true);
+    let options = store_options(parsed, true);
     let handle = backend.spawn(&CliCommand::Auth, &options)?;
     let mut stdin = std::io::stdin().lock();
     let mut cancelled = false;
@@ -1512,7 +1518,9 @@ fn epic_auth(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
                     handle.write_stdin(line.as_bytes())?;
                 }
             }
-            ProgressEvent::Done => println!("Authenticated."),
+            // The verdict is the report below; a `Done` here only means
+            // legendary exited 0, which it also does for a refusal.
+            ProgressEvent::Done => {}
             ProgressEvent::Failed { code, message } => {
                 eprintln!("legendary auth failed ({code}): {message}");
             }
@@ -1523,18 +1531,26 @@ fn epic_auth(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     if cancelled {
         bail!("authentication cancelled: stdin closed");
     }
-    if !outcome.success {
-        bail!("legendary auth did not finish");
+    // legendary can log an error and still exit 0, so the log lines count too.
+    let report = backend.report(&CliCommand::Auth, outcome);
+    if !report.succeeded() {
+        bail!(
+            "legendary auth did not finish: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no session was stored".to_string())
+        );
     }
+    println!("Authenticated.");
     Ok(())
 }
 
-fn epic_logout(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_logout(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 1)?;
     let report = backend.stream(
         &CliCommand::Logout,
-        &epic_options(parsed, false),
-        epic_event,
+        &store_options(parsed, false),
+        store_event,
     )?;
     if !report.succeeded() {
         if let Some(log) = report.log_path() {
@@ -1549,7 +1565,7 @@ fn epic_logout(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     Ok(())
 }
 
-fn epic_install(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_install(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 2)?;
     let id = positional(parsed, 1, "Epic app name")?;
     let dir = match &parsed.dir {
@@ -1563,12 +1579,12 @@ fn epic_install(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     };
 
     if parsed.dry_run {
-        print_planned(backend, &command);
+        print_planned(backend.program(), backend.spec(), &command);
         println!("install dir: {}", dir.display());
         return Ok(());
     }
 
-    let report = backend.stream(&command, &epic_options(parsed, false), epic_event)?;
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
     if !report.succeeded() {
         if let Some(log) = report.log_path() {
             eprintln!("Transcript: {}", log.display());
@@ -1585,17 +1601,20 @@ fn epic_install(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     Ok(())
 }
 
-fn epic_verify(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_verify(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 2)?;
     let id = positional(parsed, 1, "Epic app name")?;
-    let command = CliCommand::Verify { id: id.to_string() };
+    let command = CliCommand::Verify {
+        id: id.to_string(),
+        install_dir: None,
+    };
 
     if parsed.dry_run {
-        print_planned(backend, &command);
+        print_planned(backend.program(), backend.spec(), &command);
         return Ok(());
     }
 
-    let report = backend.stream(&command, &epic_options(parsed, false), epic_event)?;
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
     // The exit code is always 0 here; the verdict is the summary line.
     let verdict = pitagames_stores::epic::verify_report(&report.text);
     if parsed.json {
@@ -1632,17 +1651,20 @@ fn epic_verify(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     Ok(())
 }
 
-fn epic_launch(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
+fn epic_launch(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     expect_positionals(parsed, 2)?;
     let id = positional(parsed, 1, "Epic app name")?;
-    let command = CliCommand::Launch { id: id.to_string() };
+    let command = CliCommand::Launch {
+        id: id.to_string(),
+        install_dir: None,
+    };
 
     if parsed.dry_run {
-        print_planned(backend, &command);
+        print_planned(backend.program(), backend.spec(), &command);
         return Ok(());
     }
 
-    let report = backend.stream(&command, &epic_options(parsed, false), epic_event)?;
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
     // The game shares the PTY, so its own `[name] ERROR:` lines must not count;
     // only the exit status says whether the launch worked.
     if !report.exited_cleanly() {
@@ -1657,7 +1679,718 @@ fn epic_launch(backend: &Epic, parsed: &EpicArgs) -> Result<()> {
     Ok(())
 }
 
-fn epic_event(event: &ProgressEvent) {
+/// The Amazon Games backend, through the `nile` CLI.
+///
+/// The same shape as `epic`, with the two differences nile brings: the library
+/// is cached locally and refreshed by `sync`, and every failure exits `0`, so
+/// the verdicts come from the CLI's own log lines (`stores::report`).
+fn amazon(args: &[String]) -> Result<()> {
+    let parsed = parse_store_args(args, StoreCli::Amazon)?;
+    if parsed.help {
+        println!("{}", amazon_usage());
+        return Ok(());
+    }
+    let Some(subcommand) = parsed.positional.first().cloned() else {
+        bail!("missing subcommand for `amazon`\n\n{}", amazon_usage());
+    };
+    let backend = Amazon::with_program(&parsed.program);
+
+    match subcommand.as_str() {
+        "status" => amazon_status(&backend, &parsed),
+        "list" => amazon_owned(&backend, &parsed),
+        "installed" => amazon_installed(&backend, &parsed),
+        "sync" => amazon_sync(&backend, &parsed),
+        "auth" => amazon_auth(&backend, &parsed),
+        "logout" => amazon_logout(&backend, &parsed),
+        "install" => amazon_install(&backend, &parsed),
+        "verify" => amazon_verify(&backend, &parsed),
+        "launch" => amazon_launch(&backend, &parsed),
+        other => bail!(
+            "unknown `amazon` subcommand `{other}`\n\n{}",
+            amazon_usage()
+        ),
+    }
+}
+
+fn amazon_status(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let status = backend.status(None);
+    let options = store_options(parsed, false);
+
+    let mut version = None;
+    let mut account = None;
+    let mut problem = None;
+    if status.is_ready() {
+        match backend.version(&options) {
+            Ok(found) => version = found,
+            Err(error) => problem = Some(format!("version: {error}")),
+        }
+        match backend.account(&options) {
+            Ok(found) => account = Some(found),
+            Err(error) => {
+                if problem.is_none() {
+                    problem = Some(format!("account: {error}"));
+                }
+            }
+        }
+    }
+
+    if parsed.json {
+        let value = serde_json::json!({
+            "program": status.path().map(|path| path.display().to_string()),
+            "ready": status.is_ready(),
+            "missing": status.path().is_none(),
+            "version": version,
+            "account": account,
+            "problem": problem,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
+    match status.path() {
+        Some(path) => println!("nile: {}", path.display()),
+        None => println!(
+            "nile: not found in PATH — install it to enable Amazon installs \
+             (the upstream release binary, or the AUR `nile-git` package)"
+        ),
+    }
+    if let Some(version) = &version {
+        println!("version: {version}");
+    }
+    if let Some(account) = &account {
+        if account.signed_in() {
+            println!("account: {}", account.username);
+        } else {
+            println!("account: not signed in — run `pitagames-cli amazon auth`");
+        }
+    }
+    if let Some(problem) = &problem {
+        println!("problem: {problem}");
+    }
+    Ok(())
+}
+
+fn amazon_owned(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let games = backend.owned(&store_options(parsed, false))?;
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&games)?);
+        return Ok(());
+    }
+    for game in &games {
+        println!("{:<40}  {}", game.id.store_id, game.title);
+    }
+    println!(
+        "\n{} owned game(s); `pitagames-cli amazon sync` refreshes the local library.",
+        games.len()
+    );
+    Ok(())
+}
+
+fn amazon_installed(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let games = backend.installed(&store_options(parsed, false))?;
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&games)?);
+        return Ok(());
+    }
+    for game in &games {
+        println!(
+            "{:<40}  {:<40}  {}",
+            game.id.store_id,
+            game.title,
+            game.install_dir
+                .as_ref()
+                .map(|dir| dir.display().to_string())
+                .unwrap_or_else(|| "-".to_string())
+        );
+    }
+    println!("\n{} installed game(s).", games.len());
+    Ok(())
+}
+
+fn amazon_sync(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    if parsed.dry_run {
+        print_planned(backend.program(), backend.spec(), &CliCommand::Sync);
+        return Ok(());
+    }
+    let report = backend.stream(
+        &CliCommand::Sync,
+        &store_options(parsed, false),
+        store_event,
+    )?;
+    if !report.succeeded() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "nile library sync failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    println!("Amazon library synced.");
+    Ok(())
+}
+
+/// The Amazon sign-in.
+///
+/// nile prints a login URL, waits for ENTER (which is where it opens the
+/// browser), and then asks for the **final `amazon.com` address** it redirected
+/// to — that URL carries the `openid.oa2.authorization_code`. Amazon's 2FA/TOTP
+/// happens in the browser, so there is no code prompt of our own; the pasted URL
+/// is the long line the driver relays. A PTY echoes it, so the transcript can
+/// contain the authorization code: local diagnostics only, never printed or
+/// stored.
+fn amazon_auth(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    expect_positionals(parsed, 1)?;
+    let handle = backend.spawn(&CliCommand::Auth, &store_options(parsed, true))?;
+    let mut stdin = std::io::stdin().lock();
+    let mut cancelled = false;
+
+    while let Some(event) = handle.next_event()? {
+        match event {
+            ProgressEvent::Line(text)
+            | ProgressEvent::Stage(text)
+            | ProgressEvent::Percent(_, text) => {
+                println!("{text}");
+                if text.contains("Press ENTER") {
+                    // Nothing to type; nile opens the login page here.
+                    println!("(opening the login page in your browser)");
+                    handle.write_stdin(b"\n")?;
+                } else if text.trim_end().ends_with(':') {
+                    println!(
+                        "Sign in, then paste the amazon.com address you were redirected to, \
+                         and press Enter."
+                    );
+                    print!("> ");
+                    std::io::stdout().flush().ok();
+                    let mut line = String::new();
+                    if stdin.read_line(&mut line)? == 0 {
+                        handle.cancel();
+                        cancelled = true;
+                        break;
+                    }
+                    handle.write_stdin(line.as_bytes())?;
+                }
+            }
+            // The verdict is the report below; nile exits 0 for a refusal too.
+            ProgressEvent::Done => {}
+            ProgressEvent::Failed { code, message } => {
+                eprintln!("nile auth failed ({code}): {message}");
+            }
+        }
+    }
+
+    let outcome = handle.wait()?;
+    if cancelled {
+        bail!("authentication cancelled: stdin closed");
+    }
+    // nile logs an ERROR and exits 0 when the pasted URL carried no code, so
+    // the exit status alone would report a failed sign-in as a success.
+    let report = backend.report(&CliCommand::Auth, outcome);
+    if !report.succeeded() {
+        bail!(
+            "nile auth did not finish: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no session was stored".to_string())
+        );
+    }
+    println!("Signed in.");
+    Ok(())
+}
+
+fn amazon_logout(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let report = backend.stream(
+        &CliCommand::Logout,
+        &store_options(parsed, false),
+        store_event,
+    )?;
+    if !report.succeeded() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "nile logout failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    println!("Stored Amazon session removed.");
+    Ok(())
+}
+
+fn amazon_install(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "Amazon product id")?;
+    let dir = match &parsed.dir {
+        Some(dir) => dir.clone(),
+        None => amazon::install_dir(&amazon_display_name(backend, parsed, id))
+            .with_context(|| "no data directory; pass --dir <path>".to_string())?,
+    };
+    let command = CliCommand::Install {
+        id: id.to_string(),
+        install_dir: dir.clone(),
+    };
+
+    if parsed.dry_run {
+        print_planned(backend.program(), backend.spec(), &command);
+        println!("install dir: {}", dir.display());
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
+    if !report.succeeded() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "nile install failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    println!("Installed {id} into {}.", dir.display());
+    if let Some(log) = report.log_path() {
+        println!("Transcript: {}", log.display());
+    }
+    Ok(())
+}
+
+/// The title nile's cached library has for `id`, else the id itself.
+///
+/// The default install directory is named after the game, and the id alone
+/// (`amzn1.adg.product.…`) is unreadable. nile's library is a local cache, so
+/// the lookup is cheap; a signed-out or empty cache just keeps the id.
+fn amazon_display_name(backend: &Amazon, parsed: &StoreArgs, id: &str) -> String {
+    backend
+        .owned(&store_options(parsed, false))
+        .ok()
+        .and_then(|games| {
+            games
+                .into_iter()
+                .find(|game| game.id.store_id == id)
+                .map(|game| game.title)
+        })
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn amazon_verify(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "Amazon product id")?;
+    let command = CliCommand::Verify {
+        id: id.to_string(),
+        install_dir: None,
+    };
+
+    if parsed.dry_run {
+        print_planned(backend.program(), backend.spec(), &command);
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
+    // nile's `verify` re-downloads missing files and prints no verdict line, so
+    // the classification is the CLI's own error lines.
+    let verdict = amazon::verify_report(&report);
+    if parsed.json {
+        let value = serde_json::json!({
+            "verified": verdict.verified,
+            "errors": verdict.errors,
+            "exited_zero": report.outcome.success,
+            "log": report.log_path().map(|path| path.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if verdict.verified {
+        println!("Verified {id}: nile repaired nothing and logged no error.");
+    } else {
+        println!("{id}: verification did not complete.");
+    }
+
+    if !verdict.verified {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "nile verify did not pass for {id}: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no verdict line".to_string())
+        );
+    }
+    Ok(())
+}
+
+fn amazon_launch(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "Amazon product id")?;
+    let command = CliCommand::Launch {
+        id: id.to_string(),
+        install_dir: None,
+    };
+
+    if parsed.dry_run {
+        print_planned(backend.program(), backend.spec(), &command);
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
+    // nile exits 0 even when it refuses to launch, so its own `Launching` marker
+    // is what separates "the game ran" from "nile gave up".
+    if !amazon::launched(&report) {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "nile launch did not start {id}: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no launch marker and exit 0".to_string())
+        );
+    }
+    Ok(())
+}
+
+/// The GOG backend: `lgogdownloader` for the library and login, `gogdl` for
+/// installs, repairs and launches.
+///
+/// The two programs are not interchangeable (see `stores::gog`): only
+/// `lgogdownloader` lists the account's games with titles and only `gogdl`
+/// installs a launchable directory and can start it. `--program` overrides the
+/// library CLI and `--game-program` the game CLI, so a fixture or a second
+/// install can drive either.
+fn gog(args: &[String]) -> Result<()> {
+    let parsed = parse_store_args(args, StoreCli::Gog)?;
+    if parsed.help {
+        println!("{}", gog_usage());
+        return Ok(());
+    }
+    let Some(subcommand) = parsed.positional.first().cloned() else {
+        bail!("missing subcommand for `gog`\n\n{}", gog_usage());
+    };
+    let backend = gog_backend(&parsed);
+
+    match subcommand.as_str() {
+        "status" => gog_status(&backend, &parsed),
+        "list" => gog_owned(&backend, &parsed),
+        "auth" => gog_auth(&backend, &parsed),
+        "install" => gog_install(&backend, &parsed),
+        "verify" => gog_verify(&backend, &parsed),
+        "launch" => gog_launch(&backend, &parsed),
+        other => bail!("unknown `gog` subcommand `{other}`\n\n{}", gog_usage()),
+    }
+}
+
+fn gog_backend(parsed: &StoreArgs) -> Gog {
+    let game = parsed
+        .game_program
+        .clone()
+        .unwrap_or_else(|| gog::GAME_PROGRAM.to_string());
+    // An explicit `--auth-file` wins; otherwise `gogdl`'s session lives under
+    // PitaGames' own config dir (never Heroic's).
+    let auth = parsed.auth_file.clone().or_else(gog::auth_file);
+    Gog::with_programs_and_auth(parsed.program.clone(), game, auth)
+}
+
+fn gog_status(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let library = backend.library_status(None);
+    let game = backend.game_status(None);
+    let options = store_options(parsed, false);
+
+    let mut version = None;
+    let mut account = None;
+    let mut problem = None;
+    if library.is_ready() {
+        match backend.version(&options) {
+            Ok(found) => version = found,
+            Err(error) => problem = Some(format!("version: {error}")),
+        }
+        match backend.account(&options) {
+            Ok(found) => account = Some(found),
+            Err(error) => {
+                if problem.is_none() {
+                    problem = Some(format!("account: {error}"));
+                }
+            }
+        }
+    }
+
+    if parsed.json {
+        let value = serde_json::json!({
+            "library": {
+                "program": library.path().map(|path| path.display().to_string()),
+                "ready": library.is_ready(),
+            },
+            "game": {
+                "program": game.path().map(|path| path.display().to_string()),
+                "ready": game.is_ready(),
+            },
+            "version": version,
+            "logged_in": account.map(|account| account.logged_in),
+            "problem": problem,
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+        return Ok(());
+    }
+
+    match library.path() {
+        Some(path) => println!("lgogdownloader: {}", path.display()),
+        None => println!(
+            "lgogdownloader: not found in PATH — install it to list GOG games and \
+             sign in (`pacman -S lgogdownloader`)"
+        ),
+    }
+    match game.path() {
+        Some(path) => println!("gogdl: {}", path.display()),
+        None => println!(
+            "gogdl: not found in PATH — install it to install, repair and launch \
+             GOG games (Heroic ships a `gogdl` build)"
+        ),
+    }
+    if let Some(version) = &version {
+        println!("version: {version}");
+    }
+    if let Some(account) = &account {
+        if account.logged_in {
+            println!("account: signed in");
+        } else {
+            println!("account: not signed in — run `pitagames-cli gog auth`");
+        }
+    }
+    if let Some(problem) = &problem {
+        println!("problem: {problem}");
+    }
+    Ok(())
+}
+
+fn gog_owned(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 1)?;
+    let games = backend.owned(&store_options(parsed, false))?;
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&games)?);
+        return Ok(());
+    }
+    for game in &games {
+        println!("{:<40}  {}", game.id.store_id, game.title);
+    }
+    println!("\n{} owned game(s).", games.len());
+    Ok(())
+}
+
+/// The GOG sign-in.
+///
+/// `lgogdownloader --browser-login` prints the GOG login URL, an instruction
+/// line, and a `URL: ` prompt, then reads the **full redirect URL** from stdin
+/// and pulls the OAuth code out of it. That is the same code-paste shape as
+/// Epic's and Amazon's flows, so it answers one stdin line per prompt. A PTY
+/// echoes it, so the transcript can contain the code: local diagnostics only.
+fn gog_auth(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    expect_positionals(parsed, 1)?;
+    let handle = backend.spawn(&CliCommand::Auth, &store_options(parsed, true))?;
+    let mut stdin = std::io::stdin().lock();
+    let mut cancelled = false;
+
+    while let Some(event) = handle.next_event()? {
+        match event {
+            ProgressEvent::Line(text)
+            | ProgressEvent::Stage(text)
+            | ProgressEvent::Percent(_, text) => {
+                println!("{text}");
+                if text.trim_end().ends_with(':') {
+                    println!(
+                        "Sign in in the browser, then paste the full URL you were \
+                         redirected to and press Enter."
+                    );
+                    print!("> ");
+                    std::io::stdout().flush().ok();
+                    let mut line = String::new();
+                    if stdin.read_line(&mut line)? == 0 {
+                        handle.cancel();
+                        cancelled = true;
+                        break;
+                    }
+                    handle.write_stdin(line.as_bytes())?;
+                }
+            }
+            // The verdict is the report below; a `Done` only means exit 0, which
+            // is not the same as a stored session.
+            ProgressEvent::Done => {}
+            ProgressEvent::Failed { code, message } => {
+                eprintln!("lgogdownloader auth failed ({code}): {message}");
+            }
+        }
+    }
+
+    let outcome = handle.wait()?;
+    if cancelled {
+        bail!("authentication cancelled: stdin closed");
+    }
+    let report = backend.report(&CliCommand::Auth, outcome);
+    if !report.succeeded() {
+        bail!(
+            "lgogdownloader auth did not finish: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no session was stored".to_string())
+        );
+    }
+    println!("Signed in.");
+    Ok(())
+}
+
+fn gog_install(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "GOG product id")?;
+    let dir = match &parsed.dir {
+        Some(dir) => dir.clone(),
+        None => gog::install_dir(&gog_display_name(backend, parsed, id))
+            .with_context(|| "no data directory; pass --dir <path>".to_string())?,
+    };
+    let command = CliCommand::Install {
+        id: id.to_string(),
+        install_dir: dir.clone(),
+    };
+
+    if parsed.dry_run {
+        print_planned(
+            backend.program_for(&command),
+            backend.spec_for(&command),
+            &command,
+        );
+        println!("install dir: {}", dir.display());
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
+    if !report.succeeded() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "gogdl install failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    println!("Installed {id} into {}.", dir.display());
+    if let Some(log) = report.log_path() {
+        println!("Transcript: {}", log.display());
+    }
+    Ok(())
+}
+
+/// The title `lgogdownloader` has for `id`, else the id itself.
+///
+/// The default install directory is named after the game, and a bare
+/// `1207660623` is unreadable. `--list json` is an account round-trip, so the
+/// lookup is best-effort: a signed-out or failing library just keeps the id.
+fn gog_display_name(backend: &Gog, parsed: &StoreArgs, id: &str) -> String {
+    backend
+        .owned(&store_options(parsed, false))
+        .ok()
+        .and_then(|games| {
+            games
+                .into_iter()
+                .find(|game| game.id.store_id == id)
+                .map(|game| game.title)
+        })
+        .unwrap_or_else(|| id.to_string())
+}
+
+fn gog_verify(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "GOG product id")?;
+    let dir = parsed
+        .dir
+        .clone()
+        .with_context(|| "gog verify needs the install directory: pass --dir <path>")?;
+    let command = CliCommand::Verify {
+        id: id.to_string(),
+        install_dir: Some(dir),
+    };
+
+    if parsed.dry_run {
+        print_planned(
+            backend.program_for(&command),
+            backend.spec_for(&command),
+            &command,
+        );
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
+    // `gogdl repair` re-downloads what its manifest says is missing and exits
+    // non-zero on failure, so "exit 0 and no error line" is the verdict.
+    let verified = report.succeeded();
+    if parsed.json {
+        let value = serde_json::json!({
+            "verified": verified,
+            "errors": report.errors,
+            "exited_zero": report.outcome.success,
+            "log": report.log_path().map(|path| path.display().to_string()),
+        });
+        println!("{}", serde_json::to_string_pretty(&value)?);
+    } else if verified {
+        println!("Verified {id}: gogdl repaired nothing and logged no error.");
+    } else {
+        println!("{id}: verification did not complete.");
+    }
+
+    if !verified {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "gogdl verify did not pass for {id}: {}",
+            report
+                .failure_message()
+                .unwrap_or_else(|| "no verdict".to_string())
+        );
+    }
+    Ok(())
+}
+
+fn gog_launch(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
+    expect_positionals(parsed, 2)?;
+    let id = positional(parsed, 1, "GOG product id")?;
+    let dir = parsed
+        .dir
+        .clone()
+        .with_context(|| "gog launch needs the install directory: pass --dir <path>")?;
+    let command = CliCommand::Launch {
+        id: id.to_string(),
+        install_dir: Some(dir),
+    };
+
+    if parsed.dry_run {
+        print_planned(
+            backend.program_for(&command),
+            backend.spec_for(&command),
+            &command,
+        );
+        return Ok(());
+    }
+
+    let report = backend.stream(&command, &store_options(parsed, false), store_event)?;
+    // The game shares the PTY, so its own error lines must not fail the launch;
+    // gogdl exits with the game's status, which is the verdict.
+    if !report.exited_cleanly() {
+        if let Some(log) = report.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
+        bail!(
+            "gogdl launch failed: {}",
+            report.failure_message().unwrap_or_default()
+        );
+    }
+    Ok(())
+}
+
+fn store_event(event: &ProgressEvent) {
     match event {
         ProgressEvent::Line(text)
         | ProgressEvent::Stage(text)
@@ -1667,18 +2400,17 @@ fn epic_event(event: &ProgressEvent) {
     }
 }
 
-fn print_planned(backend: &Epic, command: &CliCommand) {
-    let argv = backend
-        .spec()
+fn print_planned(program: &str, spec: &CliSpec, command: &CliCommand) {
+    let argv = spec
         .argv(command)
         .unwrap_or_else(|error| vec![format!("<invalid template: {error}>")]);
     println!(
         "{}",
-        pitagames_core::launch::render_shell_command(&[], backend.program(), &argv)
+        pitagames_core::launch::render_shell_command(&[], program, &argv)
     );
 }
 
-fn epic_options(parsed: &EpicArgs, interactive: bool) -> CliOptions {
+fn store_options(parsed: &StoreArgs, interactive: bool) -> CliOptions {
     let log_dir = parsed
         .log_dir
         .clone()
@@ -1696,7 +2428,7 @@ fn epic_options(parsed: &EpicArgs, interactive: bool) -> CliOptions {
     }
 }
 
-fn positional<'a>(parsed: &'a EpicArgs, index: usize, what: &str) -> Result<&'a str> {
+fn positional<'a>(parsed: &'a StoreArgs, index: usize, what: &str) -> Result<&'a str> {
     parsed
         .positional
         .get(index)
@@ -1704,21 +2436,63 @@ fn positional<'a>(parsed: &'a EpicArgs, index: usize, what: &str) -> Result<&'a 
         .with_context(|| format!("missing {what}"))
 }
 
-fn expect_positionals(parsed: &EpicArgs, expected: usize) -> Result<()> {
+fn expect_positionals(parsed: &StoreArgs, expected: usize) -> Result<()> {
     if parsed.positional.len() > expected {
         bail!(
-            "unexpected argument `{}` for `epic`\n\n{}",
+            "unexpected argument `{}` for `{}`\n\n{}",
             parsed.positional[expected],
-            epic_usage()
+            parsed.store.label(),
+            parsed.store.usage()
         );
     }
     Ok(())
 }
 
-/// Parsed `epic` arguments.
+/// Which store a shared argument parser is parsing for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StoreCli {
+    Epic,
+    Amazon,
+    Gog,
+}
+
+impl StoreCli {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Epic => "epic",
+            Self::Amazon => "amazon",
+            Self::Gog => "gog",
+        }
+    }
+
+    fn program(self) -> &'static str {
+        match self {
+            Self::Epic => epic::PROGRAM,
+            Self::Amazon => amazon::PROGRAM,
+            // GOG's default `--program` is the library CLI; `--game-program`
+            // overrides the installer/launcher.
+            Self::Gog => gog::PROGRAM,
+        }
+    }
+
+    fn usage(self) -> String {
+        match self {
+            Self::Epic => epic_usage(),
+            Self::Amazon => amazon_usage(),
+            Self::Gog => gog_usage(),
+        }
+    }
+}
+
+/// Parsed store-CLI (`epic` / `amazon` / `gog`) arguments.
 #[derive(Debug, PartialEq, Eq)]
-struct EpicArgs {
+struct StoreArgs {
+    store: StoreCli,
     program: String,
+    /// The `gogdl` program, when `gog` is parsed (`--game-program`).
+    game_program: Option<String>,
+    /// The `gogdl` token file, when `gog` is parsed (`--auth-file`).
+    auth_file: Option<PathBuf>,
     log_dir: Option<PathBuf>,
     dir: Option<PathBuf>,
     json: bool,
@@ -1727,9 +2501,12 @@ struct EpicArgs {
     help: bool,
 }
 
-fn parse_epic_args(args: &[String]) -> Result<EpicArgs> {
-    let mut parsed = EpicArgs {
-        program: pitagames_stores::epic::PROGRAM.to_string(),
+fn parse_store_args(args: &[String], store: StoreCli) -> Result<StoreArgs> {
+    let mut parsed = StoreArgs {
+        store,
+        program: store.program().to_string(),
+        game_program: None,
+        auth_file: None,
         log_dir: None,
         dir: None,
         json: false,
@@ -1751,6 +2528,20 @@ fn parse_epic_args(args: &[String]) -> Result<EpicArgs> {
                     .with_context(|| "--program requires a path")?;
                 parsed.program = value.clone();
             }
+            "--game-program" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--game-program requires a path")?;
+                parsed.game_program = Some(value.clone());
+            }
+            "--auth-file" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--auth-file requires a path")?;
+                parsed.auth_file = Some(PathBuf::from(value));
+            }
             "--log-dir" => {
                 index += 1;
                 let value = args
@@ -1767,6 +2558,12 @@ fn parse_epic_args(args: &[String]) -> Result<EpicArgs> {
             _ if arg.starts_with("--program=") => {
                 parsed.program = arg["--program=".len()..].to_string();
             }
+            _ if arg.starts_with("--game-program=") => {
+                parsed.game_program = Some(arg["--game-program=".len()..].to_string());
+            }
+            _ if arg.starts_with("--auth-file=") => {
+                parsed.auth_file = Some(PathBuf::from(&arg["--auth-file=".len()..]));
+            }
             _ if arg.starts_with("--log-dir=") => {
                 parsed.log_dir = Some(PathBuf::from(&arg["--log-dir=".len()..]));
             }
@@ -1774,8 +2571,9 @@ fn parse_epic_args(args: &[String]) -> Result<EpicArgs> {
                 parsed.dir = Some(PathBuf::from(&arg["--dir=".len()..]));
             }
             other if other.starts_with('-') => bail!(
-                "unexpected argument `{other}` for `epic`\n\n{}",
-                epic_usage()
+                "unexpected argument `{other}` for `{}`\n\n{}",
+                store.label(),
+                store.usage()
             ),
             other => parsed.positional.push(other.to_string()),
         }
@@ -3336,7 +4134,9 @@ fn usage() -> String {
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
         "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
-    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n\n\
+    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
+    amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
+    gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
          Run `pitagames-cli <command> --help` for command options."
     )
 }
@@ -3506,6 +4306,67 @@ fn epic_usage() -> String {
         .to_string()
 }
 
+fn amazon_usage() -> String {
+    "USAGE:\n    pitagames-cli amazon <subcommand> [options]\n\n\
+     SUBCOMMANDS:\n    \
+     status                 CLI path, version and session (offline)\n    \
+     list                   Owned games (nile library list --json)\n    \
+     installed              Installed games (nile library list --installed)\n    \
+     sync                   Refresh nile's cached library from Amazon\n    \
+     auth                   Sign in through the browser and a pasted URL\n    \
+     logout                 Forget the stored Amazon session\n    \
+     install <id>           Install a game, streaming nile's progress\n    \
+     verify <id>            Repair an installed game (nile re-downloads)\n    \
+     launch <id>            Launch a game through nile\n\n\
+     OPTIONS:\n    \
+     --program <path>       nile binary to drive (default: nile from PATH)\n    \
+     --dir <path>           Install directory (default: $XDG_DATA_HOME/pitagames/games/amazon/<game>)\n    \
+     --log-dir <path>       Per-run transcripts (default: $XDG_DATA_HOME/pitagames/logs)\n    \
+     --dry-run              Print the planned argv instead of running it\n    \
+     --json                 Print status/lists/verify as JSON\n    \
+     -h, --help             Show this help\n\n\
+     nile is the Amazon CLI PitaGames wraps; without it the store shows as\n\
+     unavailable and read-only imports are the fallback (M2). nile exits 0 for\n\
+     almost every failure, so verdicts come from its own log lines: `install`\n\
+     passes --path so PitaGames' directory is authoritative, `verify` is a repair\n\
+     (it re-downloads missing files), and `launch` needs nile's `Launching` marker\n\
+     because a refusal also exits 0. The login is a browser sign-in (Amazon's 2FA\n\
+     happens there) followed by pasting the redirected amazon.com URL; a PTY echoes\n\
+     it, so the transcript stays local and is never printed."
+        .to_string()
+}
+
+fn gog_usage() -> String {
+    "USAGE:\n    pitagames-cli gog <subcommand> [options]\n\n\
+     SUBCOMMANDS:\n    \
+     status                 Both CLIs' paths, version and login status\n    \
+     list                   Owned games (lgogdownloader --list json)\n    \
+     auth                   Sign in through the browser and a pasted URL\n    \
+     install <id>           Install a game with gogdl, streaming progress\n    \
+     verify <id>            Repair an installed game (gogdl repair) — needs --dir\n    \
+     launch <id>            Launch a game through gogdl — needs --dir\n\n\
+     OPTIONS:\n    \
+     --program <path>       lgogdownloader binary to drive (default: from PATH)\n    \
+     --game-program <path>  gogdl binary to drive (default: gogdl from PATH)\n    \
+     --auth-file <path>     gogdl's token file (default: $XDG_CONFIG_HOME/pitagames/gog/auth.json)\n    \
+     --dir <path>           Install directory (default: $XDG_DATA_HOME/pitagames/games/gog/<game>)\n    \
+     --log-dir <path>       Per-run transcripts (default: $XDG_DATA_HOME/pitagames/logs)\n    \
+     --dry-run              Print the planned argv instead of running it\n    \
+     --json                 Print status/lists/verify as JSON\n    \
+     -h, --help             Show this help\n\n\
+     GOG is driven by two CLIs because they do different jobs: lgogdownloader\n\
+     lists the account's games with titles and signs in with a browser URL plus a\n\
+     pasted redirect; gogdl installs a launchable game directory, repairs it and\n\
+     launches it. Neither exposes a launch under lgogdownloader, and gogdl cannot\n\
+     list the library, so install/verify/launch use gogdl and list/auth use\n\
+     lgogdownloader. verify and launch need the game's directory (--dir), since\n\
+     gogdl addresses a game by both id and path. lgogdownloader's --list json is\n\
+     an account round-trip, so `install` looks the title up for the default path.\n\
+     A PTY echoes typed input, so the auth transcript can contain the code: it\n\
+     stays local and is never printed."
+        .to_string()
+}
+
 fn metadata_usage() -> String {
     "USAGE:\n    pitagames-cli metadata <appid>... [--language <code>] [--json]\n\n\
      ARGS:\n    \
@@ -3588,30 +4449,104 @@ mod tests {
 
     #[test]
     fn parses_epic_subcommands_and_shared_flags() {
-        let parsed = parse_epic_args(&[
-            "--program=/opt/legendary".to_string(),
-            "--dir".to_string(),
-            "/games/epic".to_string(),
-            "install".to_string(),
-            "Gizmo".to_string(),
-            "--json".to_string(),
-            "--dry-run".to_string(),
-        ])
+        let parsed = parse_store_args(
+            &[
+                "--program=/opt/legendary".to_string(),
+                "--dir".to_string(),
+                "/games/epic".to_string(),
+                "install".to_string(),
+                "Gizmo".to_string(),
+                "--json".to_string(),
+                "--dry-run".to_string(),
+            ],
+            StoreCli::Epic,
+        )
         .unwrap();
 
+        assert_eq!(parsed.store, StoreCli::Epic);
         assert_eq!(parsed.program, "/opt/legendary");
         assert_eq!(parsed.dir, Some(PathBuf::from("/games/epic")));
         assert_eq!(parsed.positional, ["install", "Gizmo"]);
         assert!(parsed.json && parsed.dry_run && !parsed.help);
 
-        let plain = parse_epic_args(&[]).unwrap();
+        let plain = parse_store_args(&[], StoreCli::Epic).unwrap();
         assert_eq!(plain.program, pitagames_stores::epic::PROGRAM);
         assert!(plain.positional.is_empty());
 
-        let error = parse_epic_args(&["--bogus".to_string()])
+        let error = parse_store_args(&["--bogus".to_string()], StoreCli::Epic)
             .unwrap_err()
             .to_string();
         assert!(error.contains("unexpected argument"), "{error}");
+    }
+
+    #[test]
+    fn parses_amazon_subcommands_with_niles_own_defaults() {
+        let parsed = parse_store_args(
+            &[
+                "--log-dir".to_string(),
+                "/tmp/logs".to_string(),
+                "install".to_string(),
+                "amzn1.adg.product.1".to_string(),
+            ],
+            StoreCli::Amazon,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.store, StoreCli::Amazon);
+        assert_eq!(parsed.program, pitagames_stores::amazon::PROGRAM);
+        assert_eq!(parsed.log_dir, Some(PathBuf::from("/tmp/logs")));
+        assert_eq!(parsed.positional, ["install", "amzn1.adg.product.1"]);
+
+        let plain = parse_store_args(&[], StoreCli::Amazon).unwrap();
+        assert_eq!(plain.program, "nile");
+
+        // The usage text a parse error points at is the store's own.
+        let error = parse_store_args(&["--bogus".to_string()], StoreCli::Amazon)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("for `amazon`"), "{error}");
+        assert!(error.contains("nile library list --json"), "{error}");
+    }
+
+    #[test]
+    fn parses_gog_subcommands_with_both_programs() {
+        let parsed = parse_store_args(
+            &[
+                "--program".to_string(),
+                "/opt/lgogdownloader".to_string(),
+                "--game-program=/opt/gogdl".to_string(),
+                "--auth-file".to_string(),
+                "/tmp/auth.json".to_string(),
+                "--dir=/games/gog".to_string(),
+                "install".to_string(),
+                "1207660623".to_string(),
+                "--dry-run".to_string(),
+            ],
+            StoreCli::Gog,
+        )
+        .unwrap();
+
+        assert_eq!(parsed.store, StoreCli::Gog);
+        assert_eq!(parsed.program, "/opt/lgogdownloader");
+        assert_eq!(parsed.game_program.as_deref(), Some("/opt/gogdl"));
+        assert_eq!(parsed.auth_file, Some(PathBuf::from("/tmp/auth.json")));
+        assert_eq!(parsed.dir, Some(PathBuf::from("/games/gog")));
+        assert_eq!(parsed.positional, ["install", "1207660623"]);
+        assert!(parsed.dry_run);
+
+        // `--program` defaults to the library CLI; the game CLI defaults to gogdl.
+        let plain = parse_store_args(&[], StoreCli::Gog).unwrap();
+        assert_eq!(plain.program, "lgogdownloader");
+        assert_eq!(plain.game_program, None);
+        let backend = gog_backend(&plain);
+        assert_eq!(backend.library_spec().program, "lgogdownloader");
+        assert_eq!(backend.game_spec().program, "gogdl");
+
+        let error = parse_store_args(&["--bogus".to_string()], StoreCli::Gog)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("for `gog`"), "{error}");
+        assert!(error.contains("lgogdownloader --list json"), "{error}");
     }
 
     #[test]

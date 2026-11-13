@@ -1,0 +1,4 @@
+Adios ID: amzn1.adg.product.ab888f57 GENRES: ['Action', 'Adventure']
+My ID: The Game ID: 790f3b07-fc9c GENRES: []
+
+*** TOTAL 2 ***

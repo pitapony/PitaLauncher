@@ -1,0 +1,33 @@
+[
+  {
+    "id": "entitlement-ab88",
+    "product": {
+      "id": "amzn1.adg.product.ab888f57",
+      "asin": "B08XYZ1234",
+      "sku": "amzn1.adg.product.ab888f57",
+      "title": "Adios",
+      "productDetail": {
+        "iconUrl": "https://m.media-amazon.com/images/I/icon-adios.png",
+        "details": {
+          "genres": ["Action", "Adventure"],
+          "developer": "Mischief",
+          "publisher": "Mischief",
+          "backgroundUrl1": "https://m.media-amazon.com/images/I/hero-adios.png"
+        }
+      }
+    }
+  },
+  {
+    "id": "entitlement-old",
+    "product": {
+      "id": "790f3b07-fc9c",
+      "asin": "B07OLD0001",
+      "sku": "790f3b07-fc9c",
+      "title": null,
+      "productDetail": {
+        "iconUrl": "https://m.media-amazon.com/images/I/icon-old.png",
+        "details": {}
+      }
+    }
+  }
+]

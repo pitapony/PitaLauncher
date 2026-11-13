@@ -34,8 +34,17 @@ pub fn data_home() -> Option<PathBuf> {
     env_path("XDG_DATA_HOME").or_else(|| home_dir().map(|home| home.join(".local/share")))
 }
 
+/// The XDG config base directory *without* the `pitagames` suffix.
+///
+/// Needed by anything that reads another application's XDG config: `nile`
+/// keeps its library cache and install records in `$XDG_CONFIG_HOME/nile`,
+/// which is why this is separate from [`config_dir`].
+pub fn config_home() -> Option<PathBuf> {
+    env_path("XDG_CONFIG_HOME").or_else(|| home_dir().map(|home| home.join(".config")))
+}
+
 pub fn config_dir() -> Option<PathBuf> {
-    xdg_dir("XDG_CONFIG_HOME", ".config")
+    config_home().map(|base| base.join(APP_DIR))
 }
 
 pub fn data_dir() -> Option<PathBuf> {
@@ -59,6 +68,29 @@ pub fn profiles_dir() -> Option<PathBuf> {
 /// directory; this is only the default.
 pub fn games_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("games"))
+}
+
+/// One filesystem-safe path component built from untrusted text.
+///
+/// A store's app title (or a command line) becomes exactly one component of an
+/// install directory, so separators and control characters turn into `-`, and
+/// an empty result, `.` or `..` falls back to `fallback` instead of letting the
+/// path escape the directory the caller chose.
+pub fn safe_component(name: &str, fallback: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|ch| match ch {
+            '/' | '\\' => '-',
+            ch if ch.is_control() => '-',
+            ch => ch,
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// `<XDG_DATA_HOME>/pitagames/pitagames.lock`: the single-instance lock file.
@@ -254,5 +286,35 @@ mod tests {
                 PathBuf::from("/usr/share")
             ]
         );
+    }
+
+    #[test]
+    fn config_home_is_the_xdg_base_without_the_app_suffix() {
+        let guard = ENV_LOCK.lock().unwrap();
+
+        // SAFETY: the only tests mutating XDG_CONFIG_HOME run under this lock.
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config") };
+        let home = config_home();
+        let app = config_dir();
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        drop(guard);
+
+        assert_eq!(home, Some(PathBuf::from("/tmp/xdg-config")));
+        assert_eq!(app, Some(PathBuf::from("/tmp/xdg-config/pitagames")));
+    }
+
+    #[test]
+    fn a_sanitized_component_cannot_escape_its_directory() {
+        assert_eq!(safe_component("Gizmo", "game"), "Gizmo");
+        assert_eq!(safe_component("  Adios  ", "game"), "Adios");
+        assert_eq!(
+            safe_component("../../etc/passwd", "game"),
+            "..-..-etc-passwd"
+        );
+        assert_eq!(safe_component("a/b\\c", "game"), "a-b-c");
+        assert_eq!(safe_component("tab\there", "game"), "tab-here");
+        assert_eq!(safe_component("..", "game"), "game");
+        assert_eq!(safe_component(".", "game"), "game");
+        assert_eq!(safe_component("   ", "game"), "game");
     }
 }

@@ -41,9 +41,9 @@ a separate M2 item.
 | `epic::PROGRAM` | `"legendary"` |
 | `epic::spec()` / `spec_with_program()` | the `CliSpec` preset (templates below) |
 | `epic::PROGRESS_PATTERN` | the one regex matching both progress line families |
-| `Epic` | facade: `new`, `with_program`, `status`, `spawn`, `output`, `stream`, `owned`, `installed`, `account`, `version` |
-| `StoreStatus` | `Ready { program }` or `CliMissing { program }` — the first state a store row shows |
-| `RunReport` | `command`, `outcome`, `text`, `errors`, `warnings`, `succeeded()`, `exited_cleanly()`, `failure_message()`, `log_path()` |
+| `Epic` | facade: `new`, `with_program`, `status`, `spawn`, `output`, `stream`, `owned`, `installed`, `account`, `version`, `report` |
+| `StoreStatus` | `Ready { program }` or `CliMissing { program }` — the first state a store row shows (shared with every backend, `stores::cli`) |
+| `RunReport` | `command`, `outcome`, `text`, `errors`, `warnings`, `format`, `succeeded()`, `exited_cleanly()`, `failure_message()`, `log_lines()`, `log_path()` (shared, `stores::report`) |
 | `VerifyReport` | `verified`, `corrupted`, `missing` — parsed, never taken from the exit code |
 | `EpicAccount` | `account`, `games_available`, `games_installed`, `config_directory` |
 | `EpicError` | `NoJson`, `Json`, `Failed { command, message }`, `Cli(..)` |
@@ -51,6 +51,12 @@ a separate M2 item.
 
 `Epic` is a thin facade on purpose: it holds no SQLite handle and no UI state,
 so the same calls serve the CLI today and the GUI's sync worker later.
+
+`RunReport`, `LogFormat`, `RunFailure` and `StoreStatus` were extracted when the
+second store backend arrived (`stores::report`, `stores::cli`): legendary and
+nile both log an error and exit `0`, only the line format differs
+(`[cli] INFO: …` here, `INFO [CLI]: …` in nile). `stores::epic` still re-exports
+the types, so nothing that used them moved.
 
 ## Argv
 
@@ -171,6 +177,11 @@ timeout (a person needs minutes to fetch a TOTP code), 10-minute hard cap.
 That log is a local diagnostic: it is never printed, never stored in SQLite and
 never shown in the UI. Redaction is an M4 hardening item. Ctrl-D on the prompt
 cancels the run (the driver sends `SIGHUP`, then `SIGKILL` to the group).
+
+The flow drives the handle itself (`spawn` → `write_stdin` → `wait`), so it gets
+its verdict from `Epic::report(&CliCommand::Auth, outcome)` — the same
+exit-`0`-with-an-error check as the other commands. Without it, a legendary
+refusal after the prompt would have printed "Authenticated."
 
 ## Status and version
 

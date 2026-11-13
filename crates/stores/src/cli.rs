@@ -81,8 +81,9 @@ const PTY_SIZE: PtySize = PtySize {
 /// One operation a store CLI understands.
 ///
 /// The variants carry exactly the values the argv templates may interpolate:
-/// `{id}`, `{dir}`, `{parent}` and `{name}` for an install (the last two are the
-/// two halves of `{dir}`), `{id}` for a verify or a launch, nothing for the
+/// `{id}` everywhere it applies, `{dir}`/`{parent}`/`{name}` for an install (the
+/// last two are the two halves of `{dir}`), and `{dir}` again for a verify or a
+/// launch that needs to be pointed at the installed game, nothing for the
 /// commands that only read or change the CLI's own state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliCommand {
@@ -91,16 +92,25 @@ pub enum CliCommand {
     Auth,
     /// Remove the stored session (`legendary auth --delete`).
     Logout,
+    /// Refresh the store's cached library (`nile library sync`).
+    Sync,
     Install {
         id: String,
         install_dir: PathBuf,
     },
     /// Check an installed game's files without downloading.
+    ///
+    /// `install_dir` is optional because not every CLI needs it: legendary and
+    /// nile address a game by id alone, while `gogdl` wants `--path` for both a
+    /// repair and a launch. When it is `Some`, the verify template may use
+    /// `{dir}`/`{parent}`/`{name}`.
     Verify {
         id: String,
+        install_dir: Option<PathBuf>,
     },
     Launch {
         id: String,
+        install_dir: Option<PathBuf>,
     },
     /// The CLI's own account/install summary.
     Status,
@@ -116,6 +126,7 @@ impl CliCommand {
             Self::ListOwned => "list-owned",
             Self::Auth => "auth",
             Self::Logout => "logout",
+            Self::Sync => "sync",
             Self::Install { .. } => "install",
             Self::Verify { .. } => "verify",
             Self::Launch { .. } => "launch",
@@ -198,6 +209,9 @@ pub struct CliSpec {
     pub auth: Vec<String>,
     /// `legendary auth --delete`: forget the stored session.
     pub logout: Vec<String>,
+    /// Refresh the store's own library cache; a store without one leaves this
+    /// empty and the command is rejected as unsupported.
+    pub sync: Vec<String>,
     /// Templated with `{id}`, `{dir}`, `{parent}` and `{name}`.
     pub install: Vec<String>,
     /// Templated with `{id}`.
@@ -214,13 +228,16 @@ impl CliSpec {
     /// Substitution is one pass and verbatim: an argument vector needs no
     /// quoting, and a substituted value is never rescanned for placeholders.
     /// A placeholder that is not available for the command (or malformed) is a
-    /// [`CliError::Template`], never silently dropped.
+    /// [`CliError::Template`], never silently dropped. A command whose template
+    /// is empty is [`CliError::Unsupported`], so a preset cannot run a CLI with
+    /// no arguments by accident.
     pub fn argv(&self, command: &CliCommand) -> Result<Vec<String>, CliError> {
         let (template, values): (&[String], Vec<(&str, Option<String>)>) = match command {
             CliCommand::ListInstalled => (&self.list_installed, Vec::new()),
             CliCommand::ListOwned => (&self.list_owned, Vec::new()),
             CliCommand::Auth => (&self.auth, Vec::new()),
             CliCommand::Logout => (&self.logout, Vec::new()),
+            CliCommand::Sync => (&self.sync, Vec::new()),
             CliCommand::Install { id, install_dir } => (
                 &self.install,
                 vec![
@@ -240,16 +257,61 @@ impl CliSpec {
                     ),
                 ],
             ),
-            CliCommand::Verify { id } => (&self.verify, vec![("id", Some(id.clone()))]),
-            CliCommand::Launch { id } => (&self.launch, vec![("id", Some(id.clone()))]),
+            // A verify or a launch carries the game's directory only when the
+            // caller knows it (gogdl needs `--path` for both); a backend whose
+            // template does not mention `{dir}` is unaffected.
+            CliCommand::Verify { id, install_dir } => (
+                &self.verify,
+                vec![("id", Some(id.clone()))]
+                    .into_iter()
+                    .chain(dir_values(install_dir))
+                    .collect(),
+            ),
+            CliCommand::Launch { id, install_dir } => (
+                &self.launch,
+                vec![("id", Some(id.clone()))]
+                    .into_iter()
+                    .chain(dir_values(install_dir))
+                    .collect(),
+            ),
             CliCommand::Status => (&self.status, Vec::new()),
             CliCommand::Version => (&self.version, Vec::new()),
         };
+        if template.is_empty() {
+            return Err(CliError::Unsupported {
+                command: command.as_str(),
+            });
+        }
         template
             .iter()
             .map(|token| substitute(token, &values))
             .collect()
     }
+}
+
+/// The `{dir}`/`{parent}`/`{name}` values for a command that carries an
+/// optional install directory.
+///
+/// A `None` entry is deliberately kept as `("dir", None)` (not omitted) so a
+/// template that mentions `{dir}` fails with `CliError::Template` instead of
+/// silently dropping the argument.
+fn dir_values(install_dir: &Option<PathBuf>) -> Vec<(&'static str, Option<String>)> {
+    let Some(dir) = install_dir else {
+        return vec![("dir", None), ("parent", None), ("name", None)];
+    };
+    vec![
+        ("dir", Some(dir.to_string_lossy().into_owned())),
+        (
+            "parent",
+            dir.parent()
+                .map(|parent| parent.to_string_lossy().into_owned()),
+        ),
+        (
+            "name",
+            dir.file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+        ),
+    ]
 }
 
 fn substitute(token: &str, values: &[(&str, Option<String>)]) -> Result<String, CliError> {
@@ -279,6 +341,54 @@ fn substitute(token: &str, values: &[(&str, Option<String>)]) -> Result<String, 
     }
     out.push_str(rest);
     Ok(out)
+}
+
+/// Whether a store's CLI is there, which is the first thing a store row shows.
+///
+/// Shared by every backend on the driver: the question is "did `resolve_program`
+/// find an executable", and the answer names the program either way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreStatus {
+    /// The program resolved to an executable file.
+    Ready { program: PathBuf },
+    /// Nothing by that name is on `PATH`; installs are unavailable.
+    CliMissing { program: String },
+}
+
+impl StoreStatus {
+    /// Probes a program name without running it.
+    pub fn probe(program: &str, path_override: Option<&str>) -> Self {
+        match resolve_program(program, path_override) {
+            Ok(program) => Self::Ready { program },
+            Err(_) => Self::CliMissing {
+                program: program.to_string(),
+            },
+        }
+    }
+
+    pub const fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready { .. })
+    }
+
+    /// The resolved program, when there is one.
+    pub fn path(&self) -> Option<&Path> {
+        match self {
+            Self::Ready { program } => Some(program),
+            Self::CliMissing { .. } => None,
+        }
+    }
+
+    /// The program name as it was asked for, for an error message.
+    pub fn program(&self) -> &str {
+        match self {
+            Self::Ready { program } => program
+                .file_name()
+                .and_then(|name| name.to_str())
+                .or_else(|| program.to_str())
+                .unwrap_or("cli"),
+            Self::CliMissing { program } => program,
+        }
+    }
 }
 
 /// Per-run driver settings.
@@ -330,6 +440,9 @@ impl CliOptions {
 pub enum CliError {
     #[error("CLI {program:?} was not found in PATH")]
     NotFound { program: String },
+
+    #[error("this preset has no template for `{command}`")]
+    Unsupported { command: &'static str },
 
     #[error("unsupported placeholder {placeholder:?} in {token:?}")]
     Template { token: String, placeholder: String },
@@ -1022,11 +1135,12 @@ mod tests {
             progress: parser,
             list_installed: Vec::new(),
             list_owned: Vec::new(),
-            auth: Vec::new(),
+            auth: vec!["auth".into()],
             logout: Vec::new(),
+            sync: Vec::new(),
             install: Vec::new(),
             verify: Vec::new(),
-            launch: Vec::new(),
+            launch: vec!["launch".into()],
             status: Vec::new(),
             version: Vec::new(),
         }
@@ -1062,6 +1176,7 @@ mod tests {
     fn run(spec: &CliSpec, options: &CliOptions) -> Result<CliOutcome, CliError> {
         let command = CliCommand::Launch {
             id: "test".to_string(),
+            install_dir: None,
         };
         CliHandle::spawn(spec, &command, options)?.wait()
     }
@@ -1153,10 +1268,14 @@ mod tests {
         spec.status = vec!["status".into(), "--offline".into(), "--json".into()];
         spec.version = vec!["--version".into()];
         spec.logout = vec!["auth".into(), "--delete".into()];
+        spec.sync = vec!["library".into(), "sync".into()];
 
         assert_eq!(
-            spec.argv(&CliCommand::Verify { id: "Gizmo".into() })
-                .unwrap(),
+            spec.argv(&CliCommand::Verify {
+                id: "Gizmo".into(),
+                install_dir: None,
+            })
+            .unwrap(),
             ["verify", "Gizmo"]
         );
         assert_eq!(
@@ -1168,8 +1287,46 @@ mod tests {
             spec.argv(&CliCommand::Logout).unwrap(),
             ["auth", "--delete"]
         );
-        assert_eq!(CliCommand::Verify { id: "x".into() }.as_str(), "verify");
+        assert_eq!(spec.argv(&CliCommand::Sync).unwrap(), ["library", "sync"]);
+        assert_eq!(
+            CliCommand::Verify {
+                id: "x".into(),
+                install_dir: None,
+            }
+            .as_str(),
+            "verify"
+        );
         assert_eq!(CliCommand::Status.as_str(), "status");
+        assert_eq!(CliCommand::Sync.as_str(), "sync");
+    }
+
+    #[test]
+    fn a_command_without_a_template_is_unsupported_not_an_empty_argv() {
+        let spec = spec("legendary", ProgressParser::Plain);
+        let error = spec.argv(&CliCommand::Sync).unwrap_err();
+        assert!(
+            matches!(error, CliError::Unsupported { command: "sync" }),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("no template for `sync`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn store_status_names_the_program_it_probed() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = StoreStatus::probe("no-such-cli-xyz", Some(dir.path().to_str().unwrap()));
+        assert!(!missing.is_ready());
+        assert_eq!(missing.program(), "no-such-cli-xyz");
+        assert_eq!(missing.path(), None);
+
+        let program = script(dir.path(), "fake-cli", "#!/bin/sh\nexit 0\n");
+        let ready = StoreStatus::probe("fake-cli", Some(dir.path().to_str().unwrap()));
+        assert!(ready.is_ready());
+        assert_eq!(ready.program(), "fake-cli");
+        assert_eq!(ready.path(), Some(program.as_path()));
     }
 
     #[test]
@@ -1177,19 +1334,29 @@ mod tests {
         let mut spec = spec("legendary", ProgressParser::Plain);
         spec.launch = vec!["launch".into(), "{dir}".into()];
         let error = spec
-            .argv(&CliCommand::Launch { id: "Gizmo".into() })
+            .argv(&CliCommand::Launch {
+                id: "Gizmo".into(),
+                install_dir: None,
+            })
             .unwrap_err();
         assert!(matches!(error, CliError::Template { .. }), "{error}");
 
         spec.launch = vec!["launch".into(), "{id".into()];
         let error = spec
-            .argv(&CliCommand::Launch { id: "Gizmo".into() })
+            .argv(&CliCommand::Launch {
+                id: "Gizmo".into(),
+                install_dir: None,
+            })
             .unwrap_err();
         assert!(matches!(error, CliError::Template { .. }), "{error}");
 
         spec.launch = vec!["launch".into(), "plain".into()];
         assert_eq!(
-            spec.argv(&CliCommand::Launch { id: "x".into() }).unwrap(),
+            spec.argv(&CliCommand::Launch {
+                id: "x".into(),
+                install_dir: None,
+            })
+            .unwrap(),
             ["launch", "plain"]
         );
     }
@@ -1199,7 +1366,10 @@ mod tests {
         let mut spec = spec("legendary", ProgressParser::Plain);
         spec.launch = vec!["launch".into(), "{id}".into()];
         let argv = spec
-            .argv(&CliCommand::Launch { id: "{dir}".into() })
+            .argv(&CliCommand::Launch {
+                id: "{dir}".into(),
+                install_dir: None,
+            })
             .unwrap();
         assert_eq!(argv, ["launch", "{dir}"]);
     }
@@ -1652,6 +1822,7 @@ mod tests {
             &spec,
             &CliCommand::Launch {
                 id: marker.to_string_lossy().into_owned(),
+                install_dir: None,
             },
             &options,
         )
@@ -1696,8 +1867,15 @@ mod tests {
             idle_timeout: None,
             ..options(dir.path())
         };
-        let handle =
-            CliHandle::spawn(&spec, &CliCommand::Launch { id: "test".into() }, &options).unwrap();
+        let handle = CliHandle::spawn(
+            &spec,
+            &CliCommand::Launch {
+                id: "test".into(),
+                install_dir: None,
+            },
+            &options,
+        )
+        .unwrap();
         let first = handle.next_event().unwrap().unwrap();
         assert_eq!(first, ProgressEvent::Line("waiting".into()));
         handle.cancel();

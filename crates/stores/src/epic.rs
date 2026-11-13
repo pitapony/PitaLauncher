@@ -31,7 +31,7 @@
 //! Everything here is headless: no Dioxus, no SQLite, no Steam. The GUI's store
 //! status and library sync land on top of these functions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use pitagames_core::paths;
 use pitagames_core::{Game, GameId, OwnedGame, Store};
@@ -40,9 +40,12 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::{
-    CliCommand, CliError, CliHandle, CliOptions, CliOutcome, CliSpec, ProgressEvent,
-    ProgressParser, resolve_program,
+    CliCommand, CliError, CliHandle, CliOptions, CliOutcome, CliSpec, ProgressEvent, ProgressParser,
 };
+use crate::report::{LogFormat, extract_json};
+
+pub use crate::cli::StoreStatus;
+pub use crate::report::RunReport;
 
 /// The program this backend drives.
 pub const PROGRAM: &str = "legendary";
@@ -56,9 +59,6 @@ pub const PROGRAM: &str = "legendary";
 /// regex would move the bar backwards before the download even starts.
 pub const PROGRESS_PATTERN: &str =
     r"(?:= Progress:[^(]*?|Verification progress:[^(]*\()([0-9]{1,3}(?:\.[0-9]+)?)%";
-
-/// The level tags legendary's log formatter writes (`[name] LEVEL: message`).
-const LOG_LEVELS: [&str; 6] = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL", "FATAL"];
 
 fn args(values: &[&str]) -> Vec<String> {
     values.iter().map(|value| (*value).to_string()).collect()
@@ -86,6 +86,9 @@ pub fn spec_with_program(program: impl Into<String>) -> CliSpec {
         // auth run answerable with `write_stdin`.
         auth: args(&["auth", "--disable-webview"]),
         logout: args(&["auth", "--delete"]),
+        // legendary keeps its library itself; `legendary list` refreshes on its
+        // own, so there is no separate sync step to expose.
+        sync: Vec::new(),
         // legendary installs into `<base-path>/<game-folder>`; the two halves of
         // the requested directory keep PitaGames' path authoritative. `--yes`
         // answers the "do you wish to install" prompt, and `--disable-sdl`
@@ -120,59 +123,10 @@ pub fn spec_with_program(program: impl Into<String>) -> CliSpec {
 /// command line) and becomes one path component: no separator, no control
 /// character, and never `.`/`..`. `None` only when there is no data directory.
 pub fn install_dir(app_name: &str) -> Option<PathBuf> {
-    paths::games_dir().map(|dir| dir.join("epic").join(safe_component(app_name)))
-}
-
-fn safe_component(name: &str) -> String {
-    let cleaned: String = name
-        .chars()
-        .map(|ch| match ch {
-            '/' | '\\' => '-',
-            ch if ch.is_control() => '-',
-            ch => ch,
-        })
-        .collect();
-    let trimmed = cleaned.trim();
-    // With the separators gone, only the two traversal names can still escape.
-    if trimmed.is_empty() || trimmed == "." || trimmed == ".." {
-        "epic-game".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-/// Whether the CLI is there, which is the first thing a store status row shows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoreStatus {
-    /// The program resolved to an executable file.
-    Ready { program: PathBuf },
-    /// Nothing by that name is on `PATH`; installs are unavailable.
-    CliMissing { program: String },
-}
-
-impl StoreStatus {
-    pub const fn is_ready(&self) -> bool {
-        matches!(self, Self::Ready { .. })
-    }
-
-    /// The resolved program, when there is one.
-    pub fn path(&self) -> Option<&Path> {
-        match self {
-            Self::Ready { program } => Some(program),
-            Self::CliMissing { .. } => None,
-        }
-    }
-
-    /// The program name as it was asked for, for an error message.
-    pub fn program(&self) -> &str {
-        match self {
-            Self::Ready { program } => program
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(PROGRAM),
-            Self::CliMissing { program } => program,
-        }
-    }
+    paths::games_dir().map(|dir| {
+        dir.join("epic")
+            .join(paths::safe_component(app_name, "epic-game"))
+    })
 }
 
 /// The Epic backend.
@@ -211,12 +165,7 @@ impl Epic {
     /// `path_override` is a `PATH` value (tests and the `--program` flag use it);
     /// `None` reads the inherited environment.
     pub fn status(&self, path_override: Option<&str>) -> StoreStatus {
-        match resolve_program(&self.spec.program, path_override) {
-            Ok(program) => StoreStatus::Ready { program },
-            Err(_) => StoreStatus::CliMissing {
-                program: self.spec.program.clone(),
-            },
-        }
+        StoreStatus::probe(&self.spec.program, path_override)
     }
 
     /// Starts one operation on the PTY driver.
@@ -247,7 +196,11 @@ impl Epic {
         while let Some(event) = handle.next_event()? {
             on_event(&event);
         }
-        Ok(RunReport::new(command.as_str(), handle.wait()?))
+        Ok(RunReport::new(
+            command.as_str(),
+            handle.wait()?,
+            LogFormat::Legendary,
+        ))
     }
 
     /// The account's owned games, DLC excluded.
@@ -277,92 +230,14 @@ impl Epic {
         let report = report.require_success()?;
         Ok(parse_version(&report.text))
     }
-}
 
-/// What a finished run produced, with the CLI's own log levels split out.
-///
-/// The driver already reports the exit status, cancellation and timeouts. This
-/// adds the two things a store backend needs: the whole text (for a JSON parser)
-/// and the lines the CLI logged at `ERROR`/`WARNING`, which is how a legendary
-/// run that exits `0` after refusing to install is caught.
-#[derive(Debug, Clone)]
-pub struct RunReport {
-    pub command: &'static str,
-    pub outcome: CliOutcome,
-    /// Every event's text, one line each (ANSI already stripped by the driver).
-    pub text: String,
-    /// Lines logged at `ERROR`, `CRITICAL` or `FATAL`.
-    pub errors: Vec<String>,
-    /// Lines logged at `WARNING`.
-    pub warnings: Vec<String>,
-}
-
-impl RunReport {
-    fn new(command: &'static str, outcome: CliOutcome) -> Self {
-        let mut text = String::new();
-        let mut errors = Vec::new();
-        let mut warnings = Vec::new();
-        for event in &outcome.events {
-            let Some(line) = event_text(event) else {
-                continue;
-            };
-            match log_level(line) {
-                Some("ERROR" | "CRITICAL" | "FATAL") => errors.push(line.to_string()),
-                Some("WARNING") => warnings.push(line.to_string()),
-                _ => {}
-            }
-            text.push_str(line);
-            text.push('\n');
-        }
-        Self {
-            command,
-            outcome,
-            text,
-            errors,
-            warnings,
-        }
-    }
-
-    /// The run exited `0`, was not cancelled and logged no error.
+    /// Wraps a finished run the caller drove itself in the backend's report.
     ///
-    /// This is the verdict for the library and install/verify operations, which
-    /// print nothing but legendary's own log lines. It is *not* the verdict for
-    /// `launch`: a game writes to the same PTY, so an engine that logs
-    /// `[SomeEngine] ERROR: …` while exiting `0` must not fail the launch. That
-    /// path uses [`RunReport::exited_cleanly`].
-    pub fn succeeded(&self) -> bool {
-        self.outcome.success && self.errors.is_empty()
-    }
-
-    /// The run exited `0` and was not cancelled or killed.
-    pub fn exited_cleanly(&self) -> bool {
-        self.outcome.success
-    }
-
-    /// Why the run did not succeed: the terminal event's message, or the last
-    /// error line when the CLI exited `0` anyway.
-    pub fn failure_message(&self) -> Option<String> {
-        match self.outcome.events.last() {
-            Some(ProgressEvent::Failed { message, .. }) => Some(message.clone()),
-            _ => self.errors.last().cloned(),
-        }
-    }
-
-    fn require_success(self) -> Result<Self, EpicError> {
-        if self.succeeded() {
-            return Ok(self);
-        }
-        Err(EpicError::Failed {
-            command: self.command,
-            message: self
-                .failure_message()
-                .unwrap_or_else(|| format!("exited with code {}", self.outcome.code)),
-        })
-    }
-
-    /// The per-run raw transcript, when logging was enabled.
-    pub fn log_path(&self) -> Option<&Path> {
-        self.outcome.log_path.as_deref()
+    /// Interactive flows (auth) need `spawn` + `write_stdin` + `wait`, so they
+    /// cannot go through [`Epic::stream`]; this gives them the same log-level
+    /// verdict, which is how a refusal that exits `0` is still caught.
+    pub fn report(&self, command: &CliCommand, outcome: CliOutcome) -> RunReport {
+        RunReport::new(command.as_str(), outcome, LogFormat::Legendary)
     }
 }
 
@@ -420,6 +295,15 @@ pub enum EpicError {
     Cli(#[from] CliError),
 }
 
+impl From<crate::report::RunFailure> for EpicError {
+    fn from(failure: crate::report::RunFailure) -> Self {
+        Self::Failed {
+            command: failure.command,
+            message: failure.message,
+        }
+    }
+}
+
 /// Parses `legendary list --json` (owned games).
 pub fn parse_owned(output: &str) -> Result<Vec<OwnedGame>, EpicError> {
     let entries: Vec<OwnedEntry> = decode(output)?;
@@ -449,7 +333,7 @@ pub fn parse_installed(output: &str) -> Result<Vec<Game>, EpicError> {
 
 /// Parses `legendary status --offline --json`.
 pub fn parse_account(output: &str) -> Result<EpicAccount, EpicError> {
-    let json = extract_json(output).ok_or(EpicError::NoJson)?;
+    let json = extract_json(output, LogFormat::Legendary).ok_or(EpicError::NoJson)?;
     Ok(serde_json::from_str(&json)?)
 }
 
@@ -566,60 +450,8 @@ impl InstalledEntry {
 }
 
 fn decode<T: DeserializeOwned>(output: &str) -> Result<Vec<T>, EpicError> {
-    let json = extract_json(output).ok_or(EpicError::NoJson)?;
+    let json = extract_json(output, LogFormat::Legendary).ok_or(EpicError::NoJson)?;
     Ok(serde_json::from_str(&json)?)
-}
-
-/// Pulls the JSON payload out of a PTY-merged run.
-///
-/// The normal case is that the stream is exactly the JSON document (legendary's
-/// `--json` path prints nothing else), so that is tried first. Only when that
-/// fails are log lines removed, and if the result is still not a document, the
-/// span from the first `[`/`{` line to the last `]`/`}` line is tried. The last
-/// step is what makes a run that started with `[cli] INFO: …` parseable.
-fn extract_json(output: &str) -> Option<String> {
-    if serde_json::from_str::<serde_json::Value>(output).is_ok() {
-        return Some(output.to_string());
-    }
-
-    let lines: Vec<&str> = output
-        .lines()
-        .filter(|line| log_level(line).is_none())
-        .map(str::trim_end)
-        .filter(|line| !line.is_empty())
-        .collect();
-    let joined = lines.join("\n");
-    if serde_json::from_str::<serde_json::Value>(&joined).is_ok() {
-        return Some(joined);
-    }
-
-    let start = lines.iter().position(|line| {
-        let text = line.trim_start();
-        text.starts_with('[') || text.starts_with('{')
-    })?;
-    let end = lines.iter().rposition(|line| {
-        let text = line.trim_end();
-        text.ends_with(']') || text.ends_with('}')
-    })?;
-    (start <= end).then(|| lines[start..=end].join("\n"))
-}
-
-fn event_text(event: &ProgressEvent) -> Option<&str> {
-    match event {
-        ProgressEvent::Line(text)
-        | ProgressEvent::Stage(text)
-        | ProgressEvent::Percent(_, text) => Some(text.as_str()),
-        ProgressEvent::Done | ProgressEvent::Failed { .. } => None,
-    }
-}
-
-/// The level of a legendary log line (`[cli] ERROR: message`), if it is one.
-fn log_level(line: &str) -> Option<&'static str> {
-    let rest = line.trim_start().strip_prefix('[')?;
-    let (_, after) = rest.split_once("] ")?;
-    LOG_LEVELS
-        .into_iter()
-        .find(|level| after.starts_with(level) && after[level.len()..].starts_with(':'))
 }
 
 #[cfg(test)]
@@ -627,15 +459,14 @@ mod tests {
     use super::*;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::sync::Mutex;
+    use std::path::Path;
 
+    use crate::TEST_ENV_LOCK;
     use crate::cli::{CliCommand, ProgressParser};
 
     const LIST: &str = include_str!("../../../fixtures/legendary/list.json");
     const LIST_INSTALLED: &str = include_str!("../../../fixtures/legendary/list-installed.json");
     const STATUS: &str = include_str!("../../../fixtures/legendary/status.json");
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn percentages(line: &str) -> Option<f32> {
         let regex = Regex::new(PROGRESS_PATTERN).unwrap();
@@ -670,13 +501,19 @@ mod tests {
         );
         assert_eq!(spec.argv(&CliCommand::Version).unwrap(), ["--version"]);
         assert_eq!(
-            spec.argv(&CliCommand::Verify { id: "Gizmo".into() })
-                .unwrap(),
+            spec.argv(&CliCommand::Verify {
+                id: "Gizmo".into(),
+                install_dir: None,
+            })
+            .unwrap(),
             ["verify", "Gizmo"]
         );
         assert_eq!(
-            spec.argv(&CliCommand::Launch { id: "Gizmo".into() })
-                .unwrap(),
+            spec.argv(&CliCommand::Launch {
+                id: "Gizmo".into(),
+                install_dir: None,
+            })
+            .unwrap(),
             ["launch", "--skip-version-check", "Gizmo"]
         );
 
@@ -830,7 +667,7 @@ mod tests {
 
     #[test]
     fn the_default_install_dir_is_one_safe_component() {
-        let guard = ENV_LOCK.lock().unwrap();
+        let guard = TEST_ENV_LOCK.lock().unwrap();
         // SAFETY: only the tests under this lock touch XDG_DATA_HOME.
         unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-epic") };
         let plain = install_dir("Gizmo");
@@ -954,7 +791,10 @@ mod tests {
         let epic = Epic::with_program("legendary");
         let report = epic
             .output(
-                &CliCommand::Launch { id: "Gizmo".into() },
+                &CliCommand::Launch {
+                    id: "Gizmo".into(),
+                    install_dir: None,
+                },
                 &options(dir.path()),
             )
             .unwrap();

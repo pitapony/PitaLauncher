@@ -4,17 +4,23 @@
 //! [`StoreBackend`] trait; Steam is read natively from VDF/ACF manifests and
 //! `localconfig.vdf`, and its per-game config is written format-preservingly
 //! (`localconfig.vdf` launch options, `config.vdf` compatibility-tool mappings).
-//! [`cli`] is the PTY driver those stores share, and [`epic`] is the first
-//! backend on top of it (`legendary`: auth, list, install, verify, launch).
+//! [`cli`] is the PTY driver those stores share, [`report`] is how a finished
+//! run is judged (both CLIs log an error and exit `0`), and [`epic`], [`amazon`]
+//! and [`gog`] are the backends on top of it (`legendary`: auth, list, install,
+//! verify, launch; `nile`: the same plus a library sync; GOG: `lgogdownloader`
+//! for the library/login and `gogdl` for install/repair/launch).
 
 use std::path::PathBuf;
 
 pub mod acf;
+pub mod amazon;
 pub mod cli;
 pub mod compat_tool;
 pub mod epic;
+pub mod gog;
 pub mod install;
 pub mod localconfig;
+pub mod report;
 pub mod steam;
 pub mod steam_config;
 pub mod vdf;
@@ -22,17 +28,17 @@ mod vdf_edit;
 pub mod watch;
 
 pub use acf::{AppManifest, DownloadProgress, InstallPhase, ManifestError, flags};
+pub use amazon::{Amazon, AmazonAccount, AmazonError, VerifyReport as AmazonVerifyReport};
 pub use cli::{
     CliCommand, CliError, CliHandle, CliOptions, CliOutcome, CliSpec, ProgressEvent,
-    ProgressParser, TimeoutKind, resolve_program,
+    ProgressParser, StoreStatus, TimeoutKind, resolve_program,
 };
 pub use compat_tool::{CompatTool, DEFAULT_PRIORITY};
-pub use epic::{
-    Epic, EpicAccount, EpicError, RunReport, StoreStatus, VerifyReport, parse_account,
-    parse_installed, parse_owned, parse_version, verify_report,
-};
+pub use epic::{Epic, EpicAccount, EpicError};
+pub use gog::{Gog, GogAccount, GogError};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
+pub use report::{LogFormat, LogLine, RunFailure, RunReport};
 pub use steam::{
     LibraryList, ScanReport, discover_libraries, parse_library_folders, scan_steam, user_configs,
 };
@@ -42,6 +48,14 @@ pub use steam_config::{
     read_launch_options, restore_compat_tool, restore_launch_options,
 };
 pub use watch::{ChangeOp, DEFAULT_DEBOUNCE, Debouncer, LibraryChange, LibraryWatcher, WatchError};
+
+/// One lock for every test that mutates the process environment.
+///
+/// `std::env` is process-wide, and the crate's tests run in parallel, so the
+/// XDG and store-CLI variables are serialized across modules instead of per
+/// module (two module-local locks still race each other).
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Errors that cross the store boundary.
 #[derive(Debug, thiserror::Error)]
