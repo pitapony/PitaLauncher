@@ -14,10 +14,12 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, bail};
 
 use pitagames_core::desktop::{self, DesktopEntry};
+use pitagames_core::paths;
 use pitagames_core::{
     AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
     shim_launch_options, shim_profile_path, steam_install,
 };
+use pitagames_db::{Db, GameRepository};
 use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
@@ -38,6 +40,7 @@ use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
     self, CompatRestoreReport, CompatWriteReport, SteamProcessState, WriteOptions, WriteReport,
 };
+use pitagames_stores::sync::{self, Backends, SyncReport};
 use pitagames_stores::{
     CliCommand, CliOptions, CliSpec, DEFAULT_PRIORITY, DownloadProgress, ProgressEvent,
 };
@@ -2880,7 +2883,8 @@ fn print_planned(program: &str, spec: &CliSpec, command: &CliCommand) {
 /// `stores` probes each CLI store without installing anything: is the program
 /// on `PATH`, which version, is there a session, and how many games the store
 /// sees. `stores updates` unifies the update signals — Steam's manifest state
-/// and the CLI stores' own install flags — into one list.
+/// and the CLI stores' own install flags — into one list. `stores sync` is the
+/// write side: it folds each store's listings into the database's `games` table.
 fn stores(args: &[String]) -> Result<()> {
     let parsed = parse_stores_args(args)?;
     if parsed.help {
@@ -2888,18 +2892,27 @@ fn stores(args: &[String]) -> Result<()> {
         return Ok(());
     }
 
-    if parsed.subcommand.as_deref() == Some("updates") {
-        stores_updates(&parsed)
-    } else {
-        stores_status(&parsed)
+    if let Some(name) = parsed.subcommand.as_deref()
+        && !matches!(name, "status" | "updates" | "sync")
+    {
+        bail!(
+            "unknown subcommand `{name}` for `stores`\n\n{}",
+            stores_usage()
+        );
+    }
+
+    match parsed.subcommand.as_deref() {
+        Some("updates") => stores_updates(&parsed),
+        Some("sync") => stores_sync(&parsed),
+        _ => stores_status(&parsed),
     }
 }
 
 /// The status rows for the CLI stores.
 fn stores_status(parsed: &StoresArgs) -> Result<()> {
-    if parsed.with_stores || parsed.steam_root.is_some() {
+    if parsed.with_stores || parsed.steam_root.is_some() || parsed.db.is_some() || parsed.dry_run {
         bail!(
-            "--with-stores and --steam-root belong to `stores updates`\n\n{}",
+            "--with-stores, --steam-root, --db and --dry-run do not belong to `stores` (status)\n\n{}",
             stores_usage()
         );
     }
@@ -2913,7 +2926,7 @@ fn stores_status(parsed: &StoresArgs) -> Result<()> {
     }
 
     let options = stores_options(parsed);
-    let reports: Vec<StoreStatusReport> = STORE_ORDER
+    let reports: Vec<StoreStatusReport> = status::CLI_STORES
         .iter()
         .copied()
         .filter(|store| filters.is_empty() || filters.contains(store))
@@ -2937,9 +2950,11 @@ fn stores_updates(parsed: &StoresArgs) -> Result<()> {
         || parsed.list
         || parsed.program.is_some()
         || parsed.game_program.is_some()
+        || parsed.db.is_some()
+        || parsed.dry_run
     {
         bail!(
-            "--store, --list and --program belong to `stores` (status)\n\n{}",
+            "--store, --list, --program, --db and --dry-run do not belong to `stores updates`\n\n{}",
             stores_usage()
         );
     }
@@ -3044,8 +3059,145 @@ fn collect_store_installs(options: &CliOptions, games: &mut Vec<Game>, notes: &m
     }
 }
 
-/// The stores a status row can describe, in the order they are shown.
-const STORE_ORDER: [Store; 3] = [Store::Epic, Store::Amazon, Store::Gog];
+/// The library sync: fold each CLI store's two listings into cached rows.
+///
+/// `stores` probes; `stores sync` writes. For each store it reads the rows the
+/// cache already holds, merges the fresh listing over them
+/// ([`pitagames_stores::sync::merge`]) and replaces that store's rows in SQLite.
+/// Other stores are untouched, so a Steam scan and an Epic sync share a table
+/// without either deleting the other's rows.
+///
+/// A store whose listing failed is reported and skipped, never written: a CLI
+/// that logs an error and exits `0` (legendary, nile) would otherwise look like
+/// an empty library and delete every row the store owns.
+fn stores_sync(parsed: &StoresArgs) -> Result<()> {
+    if parsed.list || parsed.with_stores || parsed.steam_root.is_some() {
+        bail!(
+            "--list, --with-stores and --steam-root do not belong to `stores sync`\n\n{}",
+            stores_usage()
+        );
+    }
+
+    let filters = store_filters(&parsed.filters)?;
+    if (parsed.program.is_some() || parsed.game_program.is_some()) && filters.len() != 1 {
+        bail!(
+            "--program and --game-program need exactly one --store\n\n{}",
+            stores_usage()
+        );
+    }
+
+    let stores: Vec<Store> = status::CLI_STORES
+        .iter()
+        .copied()
+        .filter(|store| filters.is_empty() || filters.contains(store))
+        .collect();
+    let db_path = match &parsed.db {
+        Some(path) => path.clone(),
+        None => paths::data_dir()
+            .map(|dir| dir.join("pitagames.db"))
+            .context("no data directory (HOME is unset); pass --db <path>")?,
+    };
+
+    let options = stores_options(parsed);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("could not start the async runtime")?;
+    let reports = runtime
+        .block_on(sync_stores(
+            &db_path,
+            &stores,
+            &sync_backends(parsed),
+            &options,
+            parsed.dry_run,
+        ))
+        .with_context(|| format!("could not sync into {}", db_path.display()))?;
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&reports)?);
+        return Ok(());
+    }
+
+    for report in &reports {
+        print_sync_row(report);
+    }
+    if parsed.dry_run {
+        println!("\nDry run: nothing was written to {}.", db_path.display());
+    }
+    Ok(())
+}
+
+/// The three backends a sync drives, with any `--program` override applied.
+fn sync_backends(parsed: &StoresArgs) -> Backends {
+    let epic = match &parsed.program {
+        Some(program) => Epic::with_program(program),
+        None => Epic::new(),
+    };
+    let amazon = match &parsed.program {
+        Some(program) => Amazon::with_program(program),
+        None => Amazon::new(),
+    };
+    let gog = Gog::with_programs(
+        parsed
+            .program
+            .clone()
+            .unwrap_or_else(|| gog::PROGRAM.to_string()),
+        parsed
+            .game_program
+            .clone()
+            .unwrap_or_else(|| gog::GAME_PROGRAM.to_string()),
+    );
+    Backends { epic, amazon, gog }
+}
+
+/// Runs the listings, merges them over the cache and writes the result.
+async fn sync_stores(
+    db_path: &Path,
+    stores: &[Store],
+    backends: &Backends,
+    options: &CliOptions,
+    dry_run: bool,
+) -> Result<Vec<SyncReport>> {
+    let db = Db::open(db_path).await?;
+    let mut reports = Vec::new();
+
+    for store in stores {
+        let library = backends.library(*store, options);
+        let cached = db.store_games(*store).await?;
+        let rows = sync::merge(&cached, &library);
+        let applied = library.can_replace() && !dry_run;
+        let removed = if applied {
+            db.replace_store_games(*store, &rows).await?.removed
+        } else {
+            0
+        };
+        reports.push(SyncReport::new(&library, &rows, removed, applied));
+    }
+
+    Ok(reports)
+}
+
+fn print_sync_row(report: &SyncReport) {
+    if report.applied {
+        let removed = match report.removed {
+            0 => String::new(),
+            1 => "  (1 row removed)".to_string(),
+            count => format!("  ({count} rows removed)"),
+        };
+        println!(
+            "{:<7} synced    {} rows · {} installed · {} to install{}",
+            report.store, report.rows, report.installed, report.owned_only, removed
+        );
+    } else {
+        println!(
+            "{:<7} skipped   (the listing was incomplete; the cache is unchanged)",
+            report.store
+        );
+    }
+    for warning in &report.warnings {
+        println!("        warning: {warning}");
+    }
+}
 
 fn store_report(store: Store, parsed: &StoresArgs, options: &CliOptions) -> StoreStatusReport {
     let list = parsed.list;
@@ -3144,7 +3296,7 @@ fn store_filters(values: &[String]) -> Result<Vec<Store>> {
         let store: Store = value.parse().map_err(|_| {
             anyhow::anyhow!("unknown store `{value}`; expected epic, amazon or gog")
         })?;
-        if !STORE_ORDER.contains(&store) {
+        if !status::CLI_STORES.contains(&store) {
             bail!("`{value}` has no CLI store backend (expected epic, amazon or gog)");
         }
         if !stores.contains(&store) {
@@ -3167,6 +3319,8 @@ struct StoresArgs {
     game_program: Option<String>,
     log_dir: Option<PathBuf>,
     steam_root: Option<PathBuf>,
+    db: Option<PathBuf>,
+    dry_run: bool,
     json: bool,
     help: bool,
 }
@@ -3180,6 +3334,7 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
         match arg {
             "--json" => parsed.json = true,
             "--list" => parsed.list = true,
+            "--dry-run" => parsed.dry_run = true,
             "--with-stores" => parsed.with_stores = true,
             "-h" | "--help" => parsed.help = true,
             "--store" => parsed
@@ -3196,6 +3351,7 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
                 parsed.steam_root =
                     Some(PathBuf::from(flag_value(args, &mut index, "--steam-root")?))
             }
+            "--db" => parsed.db = Some(PathBuf::from(flag_value(args, &mut index, "--db")?)),
             _ if arg.starts_with("--store=") => parsed.filters.push(after_eq(arg).to_string()),
             _ if arg.starts_with("--program=") => parsed.program = Some(after_eq(arg).to_string()),
             _ if arg.starts_with("--game-program=") => {
@@ -3207,6 +3363,7 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
             _ if arg.starts_with("--steam-root=") => {
                 parsed.steam_root = Some(PathBuf::from(after_eq(arg)))
             }
+            _ if arg.starts_with("--db=") => parsed.db = Some(PathBuf::from(after_eq(arg))),
             other if !other.starts_with('-') => {
                 if parsed.subcommand.is_some() {
                     bail!(
@@ -4951,7 +5108,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    stores     Show each CLI store's status, or the unified update list\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -5038,25 +5195,33 @@ fn prefix_usage() -> String {
 
 fn stores_usage() -> String {
     "USAGE:\n    pitagames-cli stores [status] [--store <name>] [--list] [--json]\n\
-     \x20                 pitagames-cli stores updates [--steam-root <dir>] [--with-stores] [--json]\n\n\
+     \x20                 pitagames-cli stores updates [--steam-root <dir>] [--with-stores] [--json]\n\
+     \x20                 pitagames-cli stores sync [--store <name>] [--db <path>] [--dry-run] [--json]\n\n\
      SUBCOMMANDS:\n    \
      status                 Each CLI store's row (default)\n    \
-     updates                The unified 'update available' list\n\n\
+     updates                The unified 'update available' list\n    \
+     sync                   Cache each CLI store's library in the database\n\n\
      OPTIONS:\n    \
-     --store <name>         Limit status to epic, amazon or gog (repeatable)\n    \
+     --store <name>         Limit to epic, amazon or gog (repeatable; status, sync)\n    \
      --list                 Also fetch owned/installed counts (status only)\n    \
      --program <path>       Override the CLI to probe (one --store; GOG: the library CLI)\n    \
      --game-program <path>  Override GOG's gogdl program\n    \
      --log-dir <dir>        Where per-run CLI logs go\n    \
      --steam-root <dir>     Steam root to scan for updates (updates only)\n    \
      --with-stores          Include the CLI stores' installs in the update list\n    \
+     --db <path>            Database to write (sync only; default: the XDG one)\n    \
+     --dry-run              Merge and report, but do not write (sync only)\n    \
      --json                 Print the result as JSON\n    \
      -h, --help             Show this help\n\n\
      A status row shows whether each store's CLI is on PATH, its version, the\n\
      signed-in account and (with --list) the game counts. A CLI that is missing or\n\
      signed out is a row state, not an error: the launcher keeps working for the\n\
      stores that are ready. updates unifies Steam's manifest state with each CLI\n\
-     store's own install flag; Amazon and GOG expose no update signal yet."
+     store's own install flag; Amazon and GOG expose no update signal yet.\n\n\
+     sync folds each store's owned and installed listings into one round of game\n\
+     rows and replaces that store's rows in the database. A listing that failed is\n\
+     reported and leaves the cache untouched — an empty answer is not an empty\n\
+     library — and other stores' rows are never deleted."
         .to_string()
 }
 
@@ -5797,6 +5962,18 @@ mod tests {
         assert_eq!(updates.steam_root, Some(PathBuf::from("/steam")));
         assert!(updates.with_stores);
 
+        let sync = parse_stores_args(&[
+            "sync".to_string(),
+            "--store=epic".to_string(),
+            "--db=/tmp/x.db".to_string(),
+            "--dry-run".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(sync.subcommand.as_deref(), Some("sync"));
+        assert_eq!(sync.filters, ["epic"]);
+        assert_eq!(sync.db, Some(PathBuf::from("/tmp/x.db")));
+        assert!(sync.dry_run);
+
         assert!(parse_stores_args(&["status".to_string(), "extra".to_string()]).is_err());
         assert!(parse_stores_args(&["--store".to_string()]).is_err());
         assert!(parse_stores_args(&["--bogus".to_string()]).is_err());
@@ -5848,10 +6025,193 @@ mod tests {
         assert!(stores(&["--with-stores".to_string()]).is_err());
         // `--list` is a status option.
         assert!(stores(&["updates".to_string(), "--list".to_string()]).is_err());
+        // `--db`/`--dry-run` are `sync` options.
+        assert!(stores(&["--dry-run".to_string()]).is_err());
+        assert!(stores(&["updates".to_string(), "--dry-run".to_string()]).is_err());
+        assert!(stores(&["--db".to_string(), "/tmp/x.db".to_string()]).is_err());
+        // `--list` and `--steam-root` are not sync options either.
+        assert!(stores(&["sync".to_string(), "--list".to_string()]).is_err());
         // A program override needs exactly one store selected.
         assert!(stores(&["--program".to_string(), "/tmp/cli".to_string()]).is_err());
+        assert!(
+            stores(&[
+                "sync".to_string(),
+                "--program".to_string(),
+                "/tmp/cli".to_string()
+            ])
+            .is_err()
+        );
         // Steam has no CLI store backend.
         assert!(stores(&["--store".to_string(), "steam".to_string()]).is_err());
+        // Only the three subcommands exist.
+        assert!(stores(&["bogus".to_string()]).is_err());
+    }
+
+    /// A fake `legendary` answering both listings from the checked-in fixtures.
+    fn fake_legendary(dir: &Path) -> String {
+        let list = dir.join("list.json");
+        let installed = dir.join("list-installed.json");
+        std::fs::write(&list, include_str!("../../../fixtures/legendary/list.json")).unwrap();
+        std::fs::write(
+            &installed,
+            include_str!("../../../fixtures/legendary/list-installed.json"),
+        )
+        .unwrap();
+
+        let program = dir.join("legendary");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 list-installed) cat '{installed}' ;;\n\
+                 list) cat '{list}' ;;\n\
+                 *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+                 esac\n",
+                installed = installed.display(),
+                list = list.display(),
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&program, permissions).unwrap();
+        }
+        program.to_string_lossy().into_owned()
+    }
+
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn stores_sync_writes_one_stores_rows_and_keeps_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake_legendary(dir.path());
+        let db_path = dir.path().join("pitagames.db");
+
+        // A previous state: a Steam row, two Epic rows, one of which the store
+        // no longer owns.
+        let runtime = test_runtime();
+        runtime.block_on(async {
+            let db = Db::open(&db_path).await.unwrap();
+            db.upsert_game(&Game::new(GameId::new(Store::Steam, "620"), "Portal 2"))
+                .await
+                .unwrap();
+            db.upsert_game(&Game::new(GameId::new(Store::Epic, "Gone"), "Gone"))
+                .await
+                .unwrap();
+        });
+
+        stores(&[
+            "sync".to_string(),
+            "--store".to_string(),
+            "epic".to_string(),
+            "--program".to_string(),
+            program.clone(),
+            "--db".to_string(),
+            db_path.to_string_lossy().into_owned(),
+            "--log-dir".to_string(),
+            dir.path().join("logs").to_string_lossy().into_owned(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        runtime.block_on(async {
+            let db = Db::open(&db_path).await.unwrap();
+            let epic = db.store_games(Store::Epic).await.unwrap();
+            let titles: Vec<&str> = epic.iter().map(|game| game.title.as_str()).collect();
+            assert_eq!(titles, ["Gizmo", "Sugar"], "Gone was dropped, no DLC row");
+            assert!(epic[0].installed && epic[0].install_dir.is_some());
+            assert!(!epic[1].installed, "an owned game is an Install row");
+
+            assert!(
+                db.game(&GameId::new(Store::Steam, "620"))
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "another store's rows are never deleted"
+            );
+        });
+    }
+
+    #[test]
+    fn stores_sync_dry_run_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = fake_legendary(dir.path());
+        let db_path = dir.path().join("pitagames.db");
+
+        stores(&[
+            "sync".to_string(),
+            "--store=epic".to_string(),
+            "--program".to_string(),
+            program,
+            "--db".to_string(),
+            db_path.to_string_lossy().into_owned(),
+            "--log-dir".to_string(),
+            dir.path().join("logs").to_string_lossy().into_owned(),
+            "--dry-run".to_string(),
+        ])
+        .unwrap();
+
+        test_runtime().block_on(async {
+            let db = Db::open(&db_path).await.unwrap();
+            assert!(db.store_games(Store::Epic).await.unwrap().is_empty());
+        });
+    }
+
+    #[test]
+    fn stores_sync_leaves_an_incomplete_listing_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        // A legendary that logs an error and exits 0 for both listings: the
+        // classic exit-0 trap, which must never look like an empty library.
+        let program = dir.path().join("legendary");
+        std::fs::write(
+            &program,
+            "#!/bin/sh\n\
+             echo '[cli] ERROR: No saved credentials' >&2\n\
+             exit 0\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = std::fs::metadata(&program).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&program, permissions).unwrap();
+        }
+        let db_path = dir.path().join("pitagames.db");
+
+        let runtime = test_runtime();
+        runtime.block_on(async {
+            let db = Db::open(&db_path).await.unwrap();
+            db.upsert_game(&Game::new(GameId::new(Store::Epic, "Gizmo"), "Gizmo"))
+                .await
+                .unwrap();
+        });
+
+        stores(&[
+            "sync".to_string(),
+            "--store=epic".to_string(),
+            "--program".to_string(),
+            program.to_string_lossy().into_owned(),
+            "--db".to_string(),
+            db_path.to_string_lossy().into_owned(),
+            "--log-dir".to_string(),
+            dir.path().join("logs").to_string_lossy().into_owned(),
+        ])
+        .unwrap();
+
+        runtime.block_on(async {
+            let db = Db::open(&db_path).await.unwrap();
+            let epic = db.store_games(Store::Epic).await.unwrap();
+            assert_eq!(epic.len(), 1, "the failed sync wrote nothing");
+            assert_eq!(epic[0].id.store_id, "Gizmo");
+        });
     }
 
     #[test]

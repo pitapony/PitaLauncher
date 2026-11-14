@@ -27,6 +27,10 @@ use crate::gog::Gog;
 /// files need verifying before an update (Epic's `needs_verification`).
 pub const UPDATE_TAG: &str = "needs-verification";
 
+/// The stores that have a command-line backend, in the order their rows are
+/// shown. Steam is absent: it needs no CLI and no session.
+pub const CLI_STORES: [Store; 3] = [Store::Epic, Store::Amazon, Store::Gog];
+
 /// Whether a CLI store has a usable session.
 ///
 /// Three values, not two: "the CLI answered and there is no session" is the

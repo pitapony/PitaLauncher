@@ -4222,6 +4222,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "pitagames-core",
+ "pitagames-db",
  "pitagames-metadata",
  "pitagames-platform",
  "pitagames-secrets",

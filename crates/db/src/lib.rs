@@ -116,6 +116,15 @@ pub struct StoredMetadata {
     pub fetched_at: OffsetDateTime,
 }
 
+/// What one store's row replacement did, for a sync report.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LibraryChange {
+    /// Rows inserted or updated.
+    pub written: usize,
+    /// Rows dropped because the store's listing no longer names them.
+    pub removed: usize,
+}
+
 /// Game rows, keyed by `(store, store_id)`.
 #[async_trait]
 pub trait GameRepository {
@@ -133,6 +142,19 @@ pub trait GameRepository {
 
     /// All games, ordered case-insensitively by title.
     async fn games(&self) -> Result<Vec<Game>>;
+
+    /// One store's cached rows, ordered case-insensitively by title.
+    ///
+    /// This is what a library sync merges its fresh listing over.
+    async fn store_games(&self, store: Store) -> Result<Vec<Game>>;
+
+    /// Replace one store's cached rows with `games`, in one transaction.
+    ///
+    /// Rows of every other store are untouched: a sync only ever speaks for the
+    /// store whose clients it ran. Rows missing from `games` are deleted, and
+    /// the playtime/`last_played` of rows that survive are preserved — they come
+    /// from the store's own data, not from a listing.
+    async fn replace_store_games(&self, store: Store, games: &[Game]) -> Result<LibraryChange>;
 
     /// Replace the playtime. `None` for `last_played` keeps the stored value.
     async fn set_playtime(
@@ -230,6 +252,35 @@ SELECT store, store_id, title, install_dir, exe, installed, size_bytes,
 FROM games
 "#;
 
+/// Bind one `UPSERT_GAME` onto any executor (pool, connection or transaction).
+///
+/// Playtime and `last_played` are deliberately absent from the `DO UPDATE` set:
+/// a store listing never knows them, so a rescan must not wipe them.
+async fn bind_upsert<'e, E>(executor: E, game: &Game, now: i64) -> Result<usize>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let tags = serde_json::to_string(&game.tags)?;
+    let result = sqlx::query(UPSERT_GAME)
+        .bind(game.id.store.as_str())
+        .bind(&game.id.store_id)
+        .bind(&game.title)
+        .bind(game.install_dir.as_deref().map(path_text))
+        .bind(game.exe.as_deref().map(path_text))
+        .bind(game.installed)
+        .bind(game.size_bytes.map(|value| value as i64))
+        .bind(game.version.as_deref())
+        .bind(game.last_updated.map(OffsetDateTime::unix_timestamp))
+        .bind(game.playtime.as_secs() as i64)
+        .bind(game.last_played.map(OffsetDateTime::unix_timestamp))
+        .bind(game.anticheat.as_str())
+        .bind(tags)
+        .bind(now)
+        .execute(executor)
+        .await?;
+    Ok(result.rows_affected() as usize)
+}
+
 #[async_trait]
 impl GameRepository for Db {
     async fn upsert_game(&self, game: &Game) -> Result<()> {
@@ -243,25 +294,7 @@ impl GameRepository for Db {
         let mut written = 0usize;
 
         for game in games {
-            let tags = serde_json::to_string(&game.tags)?;
-            let result = sqlx::query(UPSERT_GAME)
-                .bind(game.id.store.as_str())
-                .bind(&game.id.store_id)
-                .bind(&game.title)
-                .bind(game.install_dir.as_deref().map(path_text))
-                .bind(game.exe.as_deref().map(path_text))
-                .bind(game.installed)
-                .bind(game.size_bytes.map(|value| value as i64))
-                .bind(game.version.as_deref())
-                .bind(game.last_updated.map(OffsetDateTime::unix_timestamp))
-                .bind(game.playtime.as_secs() as i64)
-                .bind(game.last_played.map(OffsetDateTime::unix_timestamp))
-                .bind(game.anticheat.as_str())
-                .bind(tags)
-                .bind(now)
-                .execute(&mut *tx)
-                .await?;
-            written += result.rows_affected() as usize;
+            written += bind_upsert(&mut *tx, game, now).await?;
         }
 
         tx.commit().await?;
@@ -282,6 +315,54 @@ impl GameRepository for Db {
         let sql = format!("{SELECT_GAME} ORDER BY title COLLATE NOCASE, store, store_id");
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
         rows.iter().map(game_from_row).collect()
+    }
+
+    async fn store_games(&self, store: Store) -> Result<Vec<Game>> {
+        let sql = format!("{SELECT_GAME} WHERE store = ? ORDER BY title COLLATE NOCASE, store_id");
+        let rows = sqlx::query(&sql)
+            .bind(store.as_str())
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(game_from_row).collect()
+    }
+
+    async fn replace_store_games(&self, store: Store, games: &[Game]) -> Result<LibraryChange> {
+        if let Some(foreign) = games.iter().find(|game| game.id.store != store) {
+            return Err(Error::Data {
+                column: "games.store",
+                message: format!(
+                    "cannot cache a {} row while replacing {}",
+                    foreign.id.store, store
+                ),
+            });
+        }
+
+        let now = now_seconds();
+        let mut tx = self.pool.begin().await?;
+        let mut change = LibraryChange::default();
+
+        for game in games {
+            change.written += bind_upsert(&mut *tx, game, now).await?;
+        }
+
+        let cached: Vec<String> = sqlx::query_scalar("SELECT store_id FROM games WHERE store = ?")
+            .bind(store.as_str())
+            .fetch_all(&mut *tx)
+            .await?;
+        for store_id in cached {
+            if games.iter().any(|game| game.id.store_id == store_id) {
+                continue;
+            }
+            let result = sqlx::query("DELETE FROM games WHERE store = ? AND store_id = ?")
+                .bind(store.as_str())
+                .bind(&store_id)
+                .execute(&mut *tx)
+                .await?;
+            change.removed += result.rows_affected() as usize;
+        }
+
+        tx.commit().await?;
+        Ok(change)
     }
 
     async fn set_playtime(
@@ -870,6 +951,135 @@ mod tests {
         assert!(db.remove_game(&game.id).await.unwrap());
         assert!(!db.remove_game(&game.id).await.unwrap());
         assert!(db.game(&game.id).await.unwrap().is_none());
+    }
+
+    fn epic_game(id: &str, title: &str) -> Game {
+        Game::new(GameId::new(Store::Epic, id), title)
+    }
+
+    #[tokio::test]
+    async fn replacing_a_stores_rows_writes_and_drops_in_one_shot() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.replace_store_games(
+            Store::Epic,
+            &[epic_game("Gizmo", "Gizmo"), epic_game("Sugar", "Sugar")],
+        )
+        .await
+        .unwrap();
+
+        let mut gizmo = epic_game("Gizmo", "Gizmo");
+        gizmo.installed = true;
+        gizmo.install_dir = Some(PathBuf::from("/games/epic/Gizmo"));
+        let change = db
+            .replace_store_games(Store::Epic, &[gizmo.clone()])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            change,
+            LibraryChange {
+                written: 1,
+                removed: 1
+            }
+        );
+        let rows = db.store_games(Store::Epic).await.unwrap();
+        assert_eq!(rows, vec![gizmo]);
+    }
+
+    #[tokio::test]
+    async fn replacing_one_store_never_touches_another() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.upsert_games(&[steam_game("620", "Portal 2"), epic_game("Gizmo", "Gizmo")])
+            .await
+            .unwrap();
+
+        let change = db
+            .replace_store_games(Store::Epic, &[epic_game("Sugar", "Sugar")])
+            .await
+            .unwrap();
+
+        assert_eq!(change.removed, 1);
+        assert!(
+            db.game(&GameId::new(Store::Steam, "620"))
+                .await
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            db.game(&GameId::new(Store::Epic, "Gizmo"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(db.store_games(Store::Epic).await.unwrap().len(), 1);
+        assert_eq!(db.games().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_row_keeps_the_playtime_the_store_reported_earlier() {
+        let db = Db::open_in_memory().await.unwrap();
+        let game = epic_game("Gizmo", "Gizmo");
+        db.upsert_game(&game).await.unwrap();
+        let played_at = OffsetDateTime::from_unix_timestamp(1_720_000_000).unwrap();
+        db.set_playtime(&game.id, Duration::from_secs(7200), Some(played_at))
+            .await
+            .unwrap();
+
+        // The fresh listing carries no playtime; the resync must not zero it.
+        db.replace_store_games(Store::Epic, std::slice::from_ref(&game))
+            .await
+            .unwrap();
+
+        let loaded = db.game(&game.id).await.unwrap().unwrap();
+        assert_eq!(loaded.playtime, Duration::from_secs(7200));
+        assert_eq!(loaded.last_played, Some(played_at));
+    }
+
+    #[tokio::test]
+    async fn an_empty_listing_clears_that_store_but_not_the_database() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.upsert_games(&[steam_game("620", "Portal 2"), epic_game("Gizmo", "Gizmo")])
+            .await
+            .unwrap();
+
+        let change = db.replace_store_games(Store::Epic, &[]).await.unwrap();
+        assert_eq!(
+            change,
+            LibraryChange {
+                written: 0,
+                removed: 1
+            }
+        );
+        assert!(db.store_games(Store::Epic).await.unwrap().is_empty());
+        assert_eq!(db.games().await.unwrap().len(), 1);
+
+        // Replacing again with the same empty set is a no-op.
+        assert_eq!(
+            db.replace_store_games(Store::Epic, &[]).await.unwrap(),
+            LibraryChange::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_store_row_is_refused_before_any_write() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.replace_store_games(Store::Epic, &[epic_game("Gizmo", "Gizmo")])
+            .await
+            .unwrap();
+
+        let error = db
+            .replace_store_games(Store::Epic, &[steam_game("620", "Portal 2")])
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, Error::Data { column, .. } if column == "games.store"),
+            "{error}"
+        );
+        assert_eq!(
+            db.store_games(Store::Epic).await.unwrap(),
+            vec![epic_game("Gizmo", "Gizmo")],
+            "the refused transaction wrote nothing"
+        );
     }
 
     #[tokio::test]

@@ -25,9 +25,9 @@ update signals, which every store reports differently:
 This slice is the model both the CLI and the GUI render, plus the one function
 that folds those shapes into a single list. It is read-only and
 hardware-independent, so it ships while the M0 hardware closer waits on machine
-access, and it is the foundation the (still open) store status UI wiring — the
-install queue, the library sync writes and the in-app re-auth terminal — builds
-on.
+access, and it is the foundation the store status wiring builds on — the library
+sync writes now ship (`docs/m2-store-sync.md`), the install queue driver and the
+in-app re-auth terminal are still open.
 
 ## `stores::status` — the row model
 
@@ -187,15 +187,17 @@ noted that GOG exposes no signal.
   GOG cannot even list installed games through this path.
 - **In-app re-auth is M2.5.** The screen names the CLI command; it does not run
   the interactive login.
-- **Nothing writes to the database yet.** The counts are live CLI answers, not
-  cached rows, and the install queue still has no GUI consumer — both belong to
-  the store status *wiring*, which is the next item.
+- **Nothing writes to the database from this screen.** The counts are live CLI
+  answers, not cached rows. The library sync now writes those rows
+  (`docs/m2-store-sync.md`); the GUI's install flow and the queue consumer are
+  still open.
 - **GOG's two programs are probed, not their versions.** Only the library CLI's
   `--version` is read; `gogdl` has no version probe in this row.
 
 ## Deliberately not in this slice
 
-- The install queue's GUI consumer and the DB writes for the CLI stores' library.
+- The install queue's GUI consumer (the library sync, `docs/m2-store-sync.md`, is
+  the first half of the wiring).
 - The in-app PTY terminal for auth (M2.5).
 - Per-store update *application* (running the store's update command).
 - SteamGridDB or artwork for imported games.

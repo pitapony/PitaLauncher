@@ -10,7 +10,10 @@
 //! [`gog`] are the backends on top of it (`legendary`: auth, list, install,
 //! verify, launch; `nile`: the same plus a library sync; GOG: `lgogdownloader`
 //! for the library/login and `gogdl` for install/repair/launch). [`queue`] is the
-//! serial install queue those backends share, with the disk-space pre-check.
+//! serial install queue those backends share, with the disk-space pre-check, and
+//! [`sync`] folds the two listings each backend can answer into one round of
+//! `Game` rows and merges them over the cache without deleting anything a failed
+//! listing could not vouch for.
 
 use std::path::PathBuf;
 
@@ -28,6 +31,7 @@ pub mod report;
 pub mod status;
 pub mod steam;
 pub mod steam_config;
+pub mod sync;
 pub mod vdf;
 mod vdf_edit;
 pub mod watch;
@@ -47,8 +51,8 @@ pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use queue::{InstallJob, InstallQueue, JobProgress, JobState, QueueError, StartOutcome};
 pub use report::{LogFormat, LogLine, RunFailure, RunReport};
 pub use status::{
-    CliTool, RowState, SessionState, StoreStatusReport, UPDATE_TAG, UpdateAvailable, UpdateSource,
-    stores, updates,
+    CLI_STORES, CliTool, RowState, SessionState, StoreStatusReport, UPDATE_TAG, UpdateAvailable,
+    UpdateSource, stores, updates,
 };
 pub use steam::{
     LibraryList, ScanReport, discover_libraries, parse_library_folders, scan_steam, user_configs,
@@ -58,6 +62,7 @@ pub use steam_config::{
     WriteReport, apply_compat_tool, apply_launch_options, detect_steam_process, read_compat_tool,
     read_launch_options, restore_compat_tool, restore_launch_options,
 };
+pub use sync::{Backends, StoreLibrary, SyncReport};
 pub use watch::{ChangeOp, DEFAULT_DEBOUNCE, Debouncer, LibraryChange, LibraryWatcher, WatchError};
 
 /// One lock for every test that mutates the process environment.
