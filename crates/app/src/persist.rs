@@ -127,3 +127,30 @@ pub async fn clear_owned(db: &Db) -> Result<usize, String> {
         .await
         .map_err(|error| format!("could not clear the owned-games cache: {error}"))
 }
+
+/// The non-Steam rows a previous library sync wrote, in store order.
+///
+/// These are never scanned: `pitagames_stores::sync` is their only writer, and a
+/// store whose CLI is missing simply keeps what the cache holds.
+pub async fn load_store_rows(db: &Db) -> Result<Vec<Game>, String> {
+    let mut rows = Vec::new();
+    for store in pitagames_stores::status::CLI_STORES {
+        let mut found = db
+            .store_games(store)
+            .await
+            .map_err(|error| format!("could not read the {store} rows: {error}"))?;
+        rows.append(&mut found);
+    }
+    Ok(rows)
+}
+
+/// Remember an install the launcher finished, so the next start shows it
+/// without waiting for a store sync.
+pub async fn record_install(db: &Db, game: &Game) -> Result<(), String> {
+    db.upsert_game(game).await.map_err(|error| {
+        format!(
+            "could not save the install of {}: {error}",
+            game.id.store_id
+        )
+    })
+}

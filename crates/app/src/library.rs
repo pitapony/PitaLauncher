@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use pitagames_art::ArtRequest;
 use pitagames_core::launch::{steam_install, steam_run};
-use pitagames_core::{Game, OwnedGame};
+use pitagames_core::{Game, GameId, OwnedGame};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_stores::{InstallPhase, scan_steam};
@@ -33,6 +33,27 @@ impl GameEntry {
     /// The store's own id (Steam appid for now).
     pub fn app_id(&self) -> &str {
         &self.game.id.store_id
+    }
+
+    /// The storefront this row belongs to.
+    pub fn store(&self) -> pitagames_core::Store {
+        self.game.id.store
+    }
+
+    /// Whether the row came from the Steam scan, which is the only store whose
+    /// launch and config writes are wired so far.
+    pub fn is_steam(&self) -> bool {
+        self.game.id.store == pitagames_core::Store::Steam
+    }
+
+    /// Whether the Play button can actually start this game.
+    ///
+    /// Steam goes through its own client (`steam://run/<appid>`). The CLI
+    /// stores install fine but need the umu/Proton hand-off to launch, which is
+    /// the next slice — so a non-Steam row shows its install state instead of a
+    /// button that would do nothing.
+    pub fn play_is_wired(&self) -> bool {
+        self.is_steam()
     }
 
     /// The store description and art URLs, when the cache has them.
@@ -62,8 +83,15 @@ impl GameEntry {
         self.game.installed && !self.phase.is_busy()
     }
 
-    /// The install URL applies to both "not installed" and "update waiting".
+    /// The install action applies to both "not installed" and "update waiting".
+    ///
+    /// Steam installs through its client; the CLI stores install through
+    /// [`pitagames_stores::installer`], which is why the grid branches on the
+    /// store before offering the button.
     pub fn can_install(&self) -> bool {
+        if !self.is_steam() {
+            return !self.game.installed;
+        }
         matches!(
             self.phase,
             InstallPhase::NotInstalled | InstallPhase::UpdateAvailable
@@ -79,9 +107,14 @@ impl GameEntry {
         }
     }
 
-    /// Grid meta line: store, appid, size, playtime when known.
+    /// Grid meta line: store, id, size, playtime when known.
     pub fn meta_line(&self) -> String {
-        let mut parts = vec!["steam".to_string(), format!("appid {}", self.app_id())];
+        let mut parts = vec![self.game.id.store.as_str().to_string()];
+        if self.is_steam() {
+            parts.push(format!("appid {}", self.app_id()));
+        } else {
+            parts.push(self.app_id().to_string());
+        }
 
         if let Some(bytes) = self.size_bytes() {
             parts.push(crate::format::human_bytes(bytes));
@@ -271,7 +304,58 @@ impl Library {
         }
     }
 
-    /// Copy cached store metadata onto the scanned games, matched by id.
+    /// Fold the cached rows of the non-Steam stores into the grid.
+    ///
+    /// These rows are not scanned: they are what the last library sync wrote
+    /// (`stores::sync` + `pitagames_db::GameRepository::replace_store_games`),
+    /// so a store that could not be listed keeps whatever the cache holds. A row
+    /// replaces a same-id entry in place (an install started in this session
+    /// already flipped it) and keeps its stored playtime; a new one becomes an
+    /// `Installed`/`NotInstalled` card depending on what the store reported.
+    ///
+    /// Steam rows in `rows` are ignored: the scan is their source of truth.
+    pub fn apply_store_rows(&mut self, rows: &[Game]) {
+        for row in rows
+            .iter()
+            .filter(|row| row.id.store != pitagames_core::Store::Steam)
+        {
+            let phase = if row.installed {
+                InstallPhase::Installed
+            } else {
+                InstallPhase::NotInstalled
+            };
+            match self.games.iter_mut().find(|entry| entry.game.id == row.id) {
+                Some(entry) => {
+                    entry.game = row.clone();
+                    entry.phase = phase;
+                }
+                None => self.games.push(GameEntry {
+                    game: row.clone(),
+                    phase,
+                    metadata: None,
+                    owned: false,
+                }),
+            }
+        }
+
+        self.sort();
+    }
+
+    /// Mark a store install as finished, in memory.
+    ///
+    /// The worker already wrote the row to SQLite; this is the grid catching up
+    /// without a rescan. Returns whether the row was found.
+    pub fn apply_install(&mut self, id: &GameId, target: &Path) -> bool {
+        let Some(entry) = self.games.iter_mut().find(|entry| &entry.game.id == id) else {
+            return false;
+        };
+        entry.game.installed = true;
+        entry.game.install_dir = Some(target.to_path_buf());
+        entry.phase = InstallPhase::Installed;
+        true
+    }
+
+    /// Copy cached store metadata onto the rows, matched by store and id.
     ///
     /// Negative cache entries are copied too: they carry the fetch timestamp
     /// that keeps a delisted app from being retried on every launch.
@@ -871,5 +955,108 @@ mod tests {
         assert_eq!(library.games.len(), before);
         assert!(!library.owned.pending);
         assert_eq!(library.owned.warnings, ["Steam rejected the API key"]);
+    }
+
+    fn store_row(store: Store, id: &str, title: &str, installed: bool) -> Game {
+        let mut game = Game::new(GameId::new(store, id), title);
+        game.installed = installed;
+        game
+    }
+
+    #[test]
+    fn cached_store_rows_join_the_grid_and_leave_steam_alone() {
+        let mut library = library();
+        let steam_before = library.games[0].clone();
+
+        library.apply_store_rows(&[
+            store_row(Store::Epic, "Gizmo", "Gizmo Deluxe", false),
+            store_row(Store::Gog, "1207658930", "A Game", true),
+            // Steam rows are the scan's business: the cache cannot overrule it.
+            store_row(Store::Steam, "570", "Dota 2", false),
+        ]);
+
+        let titles: Vec<&str> = library.games.iter().map(|entry| entry.title()).collect();
+        assert_eq!(
+            titles,
+            [
+                "A Game",
+                "Dota 2",
+                "Gizmo Deluxe",
+                "portal",
+                "Uninstalled Demo"
+            ],
+            "the merged grid is sorted by title"
+        );
+
+        let dota = library
+            .games
+            .iter()
+            .find(|entry| entry.app_id() == "570")
+            .unwrap();
+        assert_eq!(*dota, steam_before, "the Steam row is untouched");
+
+        let epic = library
+            .games
+            .iter()
+            .find(|entry| entry.app_id() == "Gizmo")
+            .unwrap();
+        assert_eq!(epic.phase, InstallPhase::NotInstalled);
+        assert!(epic.can_install(), "a missing store game offers Install");
+        assert!(!epic.play_is_wired(), "the umu hand-off is a later slice");
+        assert!(!epic.is_steam());
+
+        let gog = library
+            .games
+            .iter()
+            .find(|entry| entry.app_id() == "1207658930")
+            .unwrap();
+        assert_eq!(gog.phase, InstallPhase::Installed);
+        assert!(
+            !gog.can_install(),
+            "an installed store game has nothing to fetch"
+        );
+    }
+
+    #[test]
+    fn merging_the_same_store_rows_twice_changes_nothing() {
+        let mut library = library();
+        let rows = [
+            store_row(Store::Epic, "Gizmo", "Gizmo Deluxe", false),
+            store_row(Store::Amazon, "amzn1", "Sugar", true),
+        ];
+
+        library.apply_store_rows(&rows);
+        let once = library.games.clone();
+        library.apply_store_rows(&rows);
+        assert_eq!(library.games, once, "a re-sync replaces rows in place");
+    }
+
+    #[test]
+    fn a_store_row_names_its_store_and_its_own_id() {
+        let mut library = Library::default();
+        library.apply_store_rows(&[store_row(Store::Epic, "Gizmo", "Gizmo", false)]);
+        assert_eq!(library.games[0].meta_line(), "epic · Gizmo");
+
+        let mut library = Library::default();
+        library.apply_store_rows(&[store_row(Store::Gog, "1207658930", "Game", true)]);
+        assert_eq!(library.games[0].meta_line(), "gog · 1207658930");
+    }
+
+    #[test]
+    fn a_finished_store_install_flips_its_row() {
+        let mut library = Library::default();
+        library.apply_store_rows(&[store_row(Store::Epic, "Gizmo", "Gizmo", false)]);
+        let id = GameId::new(Store::Epic, "Gizmo");
+
+        assert!(library.apply_install(&id, Path::new("/games/epic/Gizmo")));
+
+        let entry = &library.games[0];
+        assert!(entry.game.installed);
+        assert_eq!(entry.phase, InstallPhase::Installed);
+        assert_eq!(
+            entry.game.install_dir.as_deref(),
+            Some(Path::new("/games/epic/Gizmo"))
+        );
+        assert!(!library.apply_install(&GameId::new(Store::Gog, "1"), Path::new("/games")));
     }
 }

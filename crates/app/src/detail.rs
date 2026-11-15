@@ -226,12 +226,19 @@ pub fn Detail(props: DetailProps) -> Element {
                 }
             }
         }
-        None => rsx! {
-            p {
-                style: "margin:0;font-size:12px;color:#78788a;",
+        None => {
+            let message = if entry.is_steam() {
                 "No store metadata cached yet. Steam is asked in the background after the library loads."
+            } else {
+                "No description yet: this store's library listing carries only titles."
+            };
+            rsx! {
+                p {
+                    style: "margin:0;font-size:12px;color:#78788a;",
+                    "{message}"
+                }
             }
-        },
+        }
     };
 
     let profile_rows = rows.read().clone();
@@ -240,6 +247,11 @@ pub fn Detail(props: DetailProps) -> Element {
     let name = new_name.read().clone();
     let error_text = error.read().clone();
     let can_play = entry.can_play();
+    // Steam is the only store whose launch path is wired so far: the CLI stores
+    // need the umu/Proton hand-off, so they show their install state instead.
+    let play_wired = entry.play_is_wired();
+    let is_steam = entry.is_steam();
+    let store_label = entry.store().as_str();
 
     // The selected profile, resolved from the live rows so the Runtime panel
     // edits exactly the profile the "active" badge marks.
@@ -349,28 +361,37 @@ pub fn Detail(props: DetailProps) -> Element {
                         "{status}"
                     }
                 }
-                button {
-                    disabled: !can_play,
-                    onclick: move |_| {
-                        error.set(String::new());
-                        let app_id = play_entry.app_id().to_string();
-                        if let Err(launch_error) = library::spawn_steam(&app_id) {
-                            error.set(format!("Could not ask Steam to run appid {app_id}: {launch_error}"));
-                            return;
-                        }
-                        let Some(db) = play_db.clone() else {
-                            return;
-                        };
-                        let id = play_entry.game.id.clone();
-                        let playtime = play_entry.playtime();
-                        spawn(async move {
-                            if let Err(message) = persist::record_launch(&db, &id, playtime).await {
-                                error.set(message);
+                if play_wired {
+                    button {
+                        disabled: !can_play,
+                        onclick: move |_| {
+                            error.set(String::new());
+                            let app_id = play_entry.app_id().to_string();
+                            if let Err(launch_error) = library::spawn_steam(&app_id) {
+                                error.set(format!("Could not ask Steam to run appid {app_id}: {launch_error}"));
+                                return;
                             }
-                        });
-                    },
-                    style: play_style(can_play),
-                    "Play"
+                            let Some(db) = play_db.clone() else {
+                                return;
+                            };
+                            let id = play_entry.game.id.clone();
+                            let playtime = play_entry.playtime();
+                            spawn(async move {
+                                if let Err(message) = persist::record_launch(&db, &id, playtime).await {
+                                    error.set(message);
+                                }
+                            });
+                        },
+                        style: play_style(can_play),
+                        "Play"
+                    }
+                } else {
+                    // A button that cannot launch is worse than a sentence that
+                    // says so; the grid's Install action is the way forward here.
+                    span {
+                        style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:#78788a;font-size:12px;",
+                        "Launching {store_label} games is not wired up yet."
+                    }
                 }
             }
 
@@ -426,427 +447,436 @@ pub fn Detail(props: DetailProps) -> Element {
                 {about_body}
             }
 
-            div {
-                style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
-                h3 {
-                    style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
-                    "Profiles"
-                }
-                p {
-                    style: "margin:0;font-size:12px;color:#78788a;",
-                    "A profile picks the Proton build and graphics settings this game launches with. New profiles start from the safe defaults."
-                }
-
-                if !has_profiles {
-                    div {
-                        style: "padding:16px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
-                        "No profiles yet."
+            if is_steam {
+                div {
+                    style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
+                    h3 {
+                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                        "Profiles"
                     }
-                }
+                    p {
+                        style: "margin:0;font-size:12px;color:#78788a;",
+                        "A profile picks the Proton build and graphics settings this game launches with. New profiles start from the safe defaults."
+                    }
 
-                for row in profile_rows {
-                    {
-                        let profile_name = row.profile.name.clone();
-                        let is_active = selected_name.as_deref() == Some(profile_name.as_str());
-                        let pick_name = profile_name.clone();
-                        let pick_proton = row.profile.proton.clone();
-                        let pick_wrappers = row.profile.wrappers.clone();
-                        let pick_diagnostics = row.profile.diagnostics;
-                        let delete_name = profile_name.clone();
-                        let delete_db = db.clone();
-                        let delete_game = game_id.clone();
+                    if !has_profiles {
+                        div {
+                            style: "padding:16px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
+                            "No profiles yet."
+                        }
+                    }
 
-                        rsx! {
-                            div {
-                                key: "{profile_name}",
-                                style: "display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;background:#1e1e28;border:1px solid #2c2c38;",
-                                span {
-                                    style: "font-size:13px;color:#e8e8ee;",
-                                    "{profile_name}"
-                                }
-                                if is_active {
+                    for row in profile_rows {
+                        {
+                            let profile_name = row.profile.name.clone();
+                            let is_active = selected_name.as_deref() == Some(profile_name.as_str());
+                            let pick_name = profile_name.clone();
+                            let pick_proton = row.profile.proton.clone();
+                            let pick_wrappers = row.profile.wrappers.clone();
+                            let pick_diagnostics = row.profile.diagnostics;
+                            let delete_name = profile_name.clone();
+                            let delete_db = db.clone();
+                            let delete_game = game_id.clone();
+
+                            rsx! {
+                                div {
+                                    key: "{profile_name}",
+                                    style: "display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;background:#1e1e28;border:1px solid #2c2c38;",
                                     span {
-                                        style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#7a9ad6;",
-                                        "active"
+                                        style: "font-size:13px;color:#e8e8ee;",
+                                        "{profile_name}"
                                     }
-                                }
-                                button {
-                                    onclick: move |_| {
-                                        selected.set(Some(pick_name.clone()));
-                                        proton_choice.set(pick_proton.clone());
-                                        wrapper_draft.set(WrapperDraft::from_chain(&pick_wrappers));
-                                        diagnostics_draft
-                                            .set(DiagnosticsDraft::from_diagnostics(&pick_diagnostics));
-                                    },
-                                    style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
-                                    "Use"
-                                }
-                                button {
-                                    onclick: move |_| {
-                                        let db = delete_db.clone();
-                                        let game_id = delete_game.clone();
-                                        let name = delete_name.clone();
-                                        spawn(async move {
-                                            let Some(db) = db else {
-                                                error.set("Profiles are unavailable until the database opens.".to_string());
-                                                return;
-                                            };
-                                            match persist::delete_profile(&db, &game_id, &name).await {
-                                                Ok(_) => load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await,
-                                                Err(message) => error.set(message),
-                                            }
-                                        });
-                                    },
-                                    style: "padding:6px 12px;border-radius:8px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:12px;cursor:pointer;",
-                                    "Delete"
+                                    if is_active {
+                                        span {
+                                            style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#7a9ad6;",
+                                            "active"
+                                        }
+                                    }
+                                    button {
+                                        onclick: move |_| {
+                                            selected.set(Some(pick_name.clone()));
+                                            proton_choice.set(pick_proton.clone());
+                                            wrapper_draft.set(WrapperDraft::from_chain(&pick_wrappers));
+                                            diagnostics_draft
+                                                .set(DiagnosticsDraft::from_diagnostics(&pick_diagnostics));
+                                        },
+                                        style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
+                                        "Use"
+                                    }
+                                    button {
+                                        onclick: move |_| {
+                                            let db = delete_db.clone();
+                                            let game_id = delete_game.clone();
+                                            let name = delete_name.clone();
+                                            spawn(async move {
+                                                let Some(db) = db else {
+                                                    error.set("Profiles are unavailable until the database opens.".to_string());
+                                                    return;
+                                                };
+                                                match persist::delete_profile(&db, &game_id, &name).await {
+                                                    Ok(_) => load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await,
+                                                    Err(message) => error.set(message),
+                                                }
+                                            });
+                                        },
+                                        style: "padding:6px 12px;border-radius:8px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:12px;cursor:pointer;",
+                                        "Delete"
+                                    }
                                 }
                             }
                         }
                     }
-                }
 
-                div {
-                    style: "display:flex;gap:8px;padding-top:4px;",
-                    input {
-                        placeholder: "New profile name",
-                        value: "{name}",
-                        oninput: move |event| new_name.set(event.value()),
-                        style: "flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;outline:none;font-size:13px;",
-                    }
-                    button {
-                        disabled: name.trim().is_empty(),
-                        onclick: move |_| {
-                            let name = new_name.read().trim().to_string();
-                            if name.is_empty() {
-                                return;
-                            }
-                            let db = create_db.clone();
-                            let game_id = create_game.clone();
-                            spawn(async move {
-                                let Some(db) = db else {
-                                    error.set("Profiles are unavailable until the database opens.".to_string());
+                    div {
+                        style: "display:flex;gap:8px;padding-top:4px;",
+                        input {
+                            placeholder: "New profile name",
+                            value: "{name}",
+                            oninput: move |event| new_name.set(event.value()),
+                            style: "flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;outline:none;font-size:13px;",
+                        }
+                        button {
+                            disabled: name.trim().is_empty(),
+                            onclick: move |_| {
+                                let name = new_name.read().trim().to_string();
+                                if name.is_empty() {
                                     return;
-                                };
-                                match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
-                                    Ok(_) => {
-                                        new_name.set(String::new());
-                                        load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
-                                    }
-                                    Err(message) => error.set(message),
                                 }
-                            });
-                        },
-                        style: create_style(name.trim().is_empty()),
-                        "Save profile"
+                                let db = create_db.clone();
+                                let game_id = create_game.clone();
+                                spawn(async move {
+                                    let Some(db) = db else {
+                                        error.set("Profiles are unavailable until the database opens.".to_string());
+                                        return;
+                                    };
+                                    match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
+                                        Ok(_) => {
+                                            new_name.set(String::new());
+                                            load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
+                                        }
+                                        Err(message) => error.set(message),
+                                    }
+                                });
+                            },
+                            style: create_style(name.trim().is_empty()),
+                            "Save profile"
+                        }
                     }
+                }
+            } else {
+                div {
+                    style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;line-height:1.5;",
+                    "Per-game runtime settings (the Proton build, the wrapper chain and the diagnostics toggles) arrive with the umu/Proton hand-off that will launch this store's games."
                 }
             }
 
-            div {
-                style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
-                h3 {
-                    style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
-                    "Runtime"
-                }
-                p {
-                    style: "margin:0;font-size:12px;color:#78788a;",
-                    "PitaGames launches this game through pitagames-shim. Pick the Proton build and wrapper chain for the active profile, then route the game through the shim in Steam's launch options."
-                }
-
-                if let Some(profile) = selected_profile.clone() {
-                    div {
-                        style: "font-size:11px;color:#78788a;",
-                        "Editing the active profile "
-                        span { style: "color:#a8a8b8;", "{profile.name}" }
-                        "."
-                    }
-                } else {
-                    div {
-                        style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
-                        "Create and select a profile to pick a Proton build."
-                    }
-                }
-
+            if is_steam {
                 div {
-                    style: "display:flex;flex-direction:column;gap:6px;",
-                    for (index, option) in proton_options.into_iter().enumerate() {
-                        {
-                            let reference = option.reference.clone();
-                            let chosen = reference == current_choice;
-                            let label = option.label.clone();
-                            let detail = option.detail.clone();
-                            rsx! {
-                                button {
-                                    key: "{index}",
-                                    onclick: move |_| proton_choice.set(reference.clone()),
-                                    style: choice_style(chosen),
-                                    span {
-                                        style: "font-size:13px;font-weight:600;color:#e8e8ee;",
-                                        "{label}"
-                                    }
-                                    span {
-                                        style: "font-size:11px;color:#9a9aac;overflow-wrap:anywhere;",
-                                        "{detail}"
+                    style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
+                    h3 {
+                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                        "Runtime"
+                    }
+                    p {
+                        style: "margin:0;font-size:12px;color:#78788a;",
+                        "PitaGames launches this game through pitagames-shim. Pick the Proton build and wrapper chain for the active profile, then route the game through the shim in Steam's launch options."
+                    }
+
+                    if let Some(profile) = selected_profile.clone() {
+                        div {
+                            style: "font-size:11px;color:#78788a;",
+                            "Editing the active profile "
+                            span { style: "color:#a8a8b8;", "{profile.name}" }
+                            "."
+                        }
+                    } else {
+                        div {
+                            style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
+                            "Create and select a profile to pick a Proton build."
+                        }
+                    }
+
+                    div {
+                        style: "display:flex;flex-direction:column;gap:6px;",
+                        for (index, option) in proton_options.into_iter().enumerate() {
+                            {
+                                let reference = option.reference.clone();
+                                let chosen = reference == current_choice;
+                                let label = option.label.clone();
+                                let detail = option.detail.clone();
+                                rsx! {
+                                    button {
+                                        key: "{index}",
+                                        onclick: move |_| proton_choice.set(reference.clone()),
+                                        style: choice_style(chosen),
+                                        span {
+                                            style: "font-size:13px;font-weight:600;color:#e8e8ee;",
+                                            "{label}"
+                                        }
+                                        span {
+                                            style: "font-size:11px;color:#9a9aac;overflow-wrap:anywhere;",
+                                            "{detail}"
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
 
-                WrapperEditor { draft: wrapper_draft }
+                    WrapperEditor { draft: wrapper_draft }
 
-                DiagnosticsEditor { draft: diagnostics_draft }
+                    DiagnosticsEditor { draft: diagnostics_draft }
 
-                div {
-                    style: "display:flex;gap:8px;flex-wrap:wrap;",
-                    button {
-                        disabled: !save_available,
-                        onclick: move |_| {
-                            runtime_message.set(String::new());
-                            let Some(profile) = save_target.clone() else {
-                                runtime_message.set("Create and select a profile first.".to_string());
-                                return;
-                            };
-                            let Some(report) = save_report.clone() else {
-                                runtime_message.set("Proton discovery is not ready yet.".to_string());
-                                return;
-                            };
-                            let Some(db) = save_db.clone() else {
-                                runtime_message.set("Profiles are unavailable until the database opens.".to_string());
-                                return;
-                            };
-                            let game = save_game.clone();
-                            let choice = proton_choice();
-                            let draft = wrapper_draft();
-                            let diagnostics = diagnostics_draft();
-                            spawn(async move {
-                                let mut profile = profile;
-                                profile.proton = choice;
-                                if let Err(message) = draft.apply_to(&mut profile) {
-                                    runtime_message.set(message);
-                                    return;
-                                }
-                                if let Err(message) = diagnostics.apply_to(&mut profile) {
-                                    runtime_message.set(message);
-                                    return;
-                                }
-                                if let Err(message) = persist::save_profile(&db, &profile).await {
-                                    runtime_message.set(message);
-                                    return;
-                                }
-                                match runtime::write_shim_profile(&profile, &report) {
-                                    Ok((path, compiled)) => {
-                                        runtime_message.set(format!(
-                                            "Wrote {} · {} environment entr{}",
-                                            path.display(),
-                                            compiled.env.len(),
-                                            if compiled.env.len() == 1 { "y" } else { "ies" }
-                                        ));
-                                        load_profiles(Some(db), game, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
-                                    }
-                                    Err(message) => runtime_message.set(message),
-                                }
-                            });
-                        },
-                        style: action_style(save_available),
-                        "Save & write profile"
-                    }
-
-                    if let Some(root) = route_root.clone() {
+                    div {
+                        style: "display:flex;gap:8px;flex-wrap:wrap;",
                         button {
-                            onclick: {
-                                let root = root.clone();
-                                let app_id = route_app.clone();
-                                move |_| {
-                                    runtime_message.set(String::new());
-                                    let root = root.clone();
-                                    let app_id = app_id.clone();
-                                    spawn(async move {
-                                        match runtime::apply(&root, &app_id, false) {
-                                            Ok(report) => {
-                                                runtime_message.set(format!(
-                                                    "Routed through the shim: {}",
-                                                    report.applied.unwrap_or_default()
-                                                ));
-                                                routing.set(Some(runtime::routing_status(&root, &app_id)));
-                                            }
-                                            Err(message) => runtime_message.set(message),
-                                        }
-                                    });
-                                }
-                            },
-                            style: action_style(true),
-                            "Route through PitaGames"
-                        }
-                        button {
-                            onclick: {
-                                let root = root.clone();
-                                let app_id = route_app.clone();
-                                move |_| {
-                                    runtime_message.set(String::new());
-                                    let root = root.clone();
-                                    let app_id = app_id.clone();
-                                    spawn(async move {
-                                        match runtime::restore(&root, &app_id, false) {
-                                            Ok(report) => {
-                                                runtime_message.set(format!(
-                                                    "Restored original options: {}",
-                                                    report.restored.unwrap_or_else(|| "(not set)".to_string())
-                                                ));
-                                                routing.set(Some(runtime::routing_status(&root, &app_id)));
-                                            }
-                                            Err(message) => runtime_message.set(message),
-                                        }
-                                    });
-                                }
-                            },
-                            style: action_style(true),
-                            "Restore original"
-                        }
-                        button {
-                            disabled: current_tool.is_none(),
-                            onclick: {
-                                let root = root.clone();
-                                let app_id = route_app.clone();
-                                let tool_name = current_tool.clone();
-                                move |_| {
-                                    runtime_message.set(String::new());
-                                    let Some(name) = tool_name.clone() else {
-                                        runtime_message.set(
-                                            "Pick a build in a compatibilitytools.d folder first; Steam manages its own Proton builds.".to_string(),
-                                        );
+                            disabled: !save_available,
+                            onclick: move |_| {
+                                runtime_message.set(String::new());
+                                let Some(profile) = save_target.clone() else {
+                                    runtime_message.set("Create and select a profile first.".to_string());
+                                    return;
+                                };
+                                let Some(report) = save_report.clone() else {
+                                    runtime_message.set("Proton discovery is not ready yet.".to_string());
+                                    return;
+                                };
+                                let Some(db) = save_db.clone() else {
+                                    runtime_message.set("Profiles are unavailable until the database opens.".to_string());
+                                    return;
+                                };
+                                let game = save_game.clone();
+                                let choice = proton_choice();
+                                let draft = wrapper_draft();
+                                let diagnostics = diagnostics_draft();
+                                spawn(async move {
+                                    let mut profile = profile;
+                                    profile.proton = choice;
+                                    if let Err(message) = draft.apply_to(&mut profile) {
+                                        runtime_message.set(message);
                                         return;
-                                    };
-                                    let root = root.clone();
-                                    let app_id = app_id.clone();
-                                    spawn(async move {
-                                        let tool = CompatTool::new(name);
-                                        match runtime::apply_compat(&root, &app_id, &tool, false) {
-                                            Ok(report) => {
-                                                let applied = report
-                                                    .applied
-                                                    .map(|tool| tool.name)
-                                                    .unwrap_or_default();
-                                                runtime_message.set(format!(
-                                                    "Steam now forces {applied} for this game."
-                                                ));
-                                                compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
-                                            }
-                                            Err(message) => runtime_message.set(message),
+                                    }
+                                    if let Err(message) = diagnostics.apply_to(&mut profile) {
+                                        runtime_message.set(message);
+                                        return;
+                                    }
+                                    if let Err(message) = persist::save_profile(&db, &profile).await {
+                                        runtime_message.set(message);
+                                        return;
+                                    }
+                                    match runtime::write_shim_profile(&profile, &report) {
+                                        Ok((path, compiled)) => {
+                                            runtime_message.set(format!(
+                                                "Wrote {} · {} environment entr{}",
+                                                path.display(),
+                                                compiled.env.len(),
+                                                if compiled.env.len() == 1 { "y" } else { "ies" }
+                                            ));
+                                            load_profiles(Some(db), game, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
                                         }
-                                    });
-                                }
+                                        Err(message) => runtime_message.set(message),
+                                    }
+                                });
                             },
-                            style: action_style(current_tool.is_some()),
-                            "Force in Steam"
+                            style: action_style(save_available),
+                            "Save & write profile"
                         }
-                        button {
-                            disabled: compat_status.is_none(),
-                            onclick: {
-                                let root = root.clone();
-                                let app_id = route_app.clone();
-                                move |_| {
-                                    runtime_message.set(String::new());
+
+                        if let Some(root) = route_root.clone() {
+                            button {
+                                onclick: {
                                     let root = root.clone();
-                                    let app_id = app_id.clone();
-                                    spawn(async move {
-                                        match runtime::clear_compat(&root, &app_id, false) {
-                                            Ok(_) => {
-                                                runtime_message.set(
-                                                    "Cleared the forced compatibility tool; Steam decides again.".to_string(),
-                                                );
-                                                compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                    let app_id = route_app.clone();
+                                    move |_| {
+                                        runtime_message.set(String::new());
+                                        let root = root.clone();
+                                        let app_id = app_id.clone();
+                                        spawn(async move {
+                                            match runtime::apply(&root, &app_id, false) {
+                                                Ok(report) => {
+                                                    runtime_message.set(format!(
+                                                        "Routed through the shim: {}",
+                                                        report.applied.unwrap_or_default()
+                                                    ));
+                                                    routing.set(Some(runtime::routing_status(&root, &app_id)));
+                                                }
+                                                Err(message) => runtime_message.set(message),
                                             }
-                                            Err(message) => runtime_message.set(message),
-                                        }
-                                    });
-                                }
-                            },
-                            style: action_style(compat_status.is_some()),
-                            "Clear forced build"
-                        }
-                        button {
-                            onclick: {
-                                let root = root.clone();
-                                let app_id = route_app.clone();
-                                move |_| {
-                                    runtime_message.set(String::new());
+                                        });
+                                    }
+                                },
+                                style: action_style(true),
+                                "Route through PitaGames"
+                            }
+                            button {
+                                onclick: {
                                     let root = root.clone();
-                                    let app_id = app_id.clone();
-                                    spawn(async move {
-                                        match runtime::restore_compat(&root, &app_id, false) {
-                                            Ok(report) => {
-                                                let restored = report
-                                                    .restored
-                                                    .map(|tool| tool.name)
-                                                    .unwrap_or_else(|| "Steam decides".to_string());
-                                                runtime_message.set(format!(
-                                                    "Restored the original compatibility tool: {restored}."
-                                                ));
-                                                compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                    let app_id = route_app.clone();
+                                    move |_| {
+                                        runtime_message.set(String::new());
+                                        let root = root.clone();
+                                        let app_id = app_id.clone();
+                                        spawn(async move {
+                                            match runtime::restore(&root, &app_id, false) {
+                                                Ok(report) => {
+                                                    runtime_message.set(format!(
+                                                        "Restored original options: {}",
+                                                        report.restored.unwrap_or_else(|| "(not set)".to_string())
+                                                    ));
+                                                    routing.set(Some(runtime::routing_status(&root, &app_id)));
+                                                }
+                                                Err(message) => runtime_message.set(message),
                                             }
-                                            Err(message) => runtime_message.set(message),
-                                        }
-                                    });
-                                }
-                            },
-                            style: action_style(true),
-                            "Restore forced build"
+                                        });
+                                    }
+                                },
+                                style: action_style(true),
+                                "Restore original"
+                            }
+                            button {
+                                disabled: current_tool.is_none(),
+                                onclick: {
+                                    let root = root.clone();
+                                    let app_id = route_app.clone();
+                                    let tool_name = current_tool.clone();
+                                    move |_| {
+                                        runtime_message.set(String::new());
+                                        let Some(name) = tool_name.clone() else {
+                                            runtime_message.set(
+                                                "Pick a build in a compatibilitytools.d folder first; Steam manages its own Proton builds.".to_string(),
+                                            );
+                                            return;
+                                        };
+                                        let root = root.clone();
+                                        let app_id = app_id.clone();
+                                        spawn(async move {
+                                            let tool = CompatTool::new(name);
+                                            match runtime::apply_compat(&root, &app_id, &tool, false) {
+                                                Ok(report) => {
+                                                    let applied = report
+                                                        .applied
+                                                        .map(|tool| tool.name)
+                                                        .unwrap_or_default();
+                                                    runtime_message.set(format!(
+                                                        "Steam now forces {applied} for this game."
+                                                    ));
+                                                    compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                                }
+                                                Err(message) => runtime_message.set(message),
+                                            }
+                                        });
+                                    }
+                                },
+                                style: action_style(current_tool.is_some()),
+                                "Force in Steam"
+                            }
+                            button {
+                                disabled: compat_status.is_none(),
+                                onclick: {
+                                    let root = root.clone();
+                                    let app_id = route_app.clone();
+                                    move |_| {
+                                        runtime_message.set(String::new());
+                                        let root = root.clone();
+                                        let app_id = app_id.clone();
+                                        spawn(async move {
+                                            match runtime::clear_compat(&root, &app_id, false) {
+                                                Ok(_) => {
+                                                    runtime_message.set(
+                                                        "Cleared the forced compatibility tool; Steam decides again.".to_string(),
+                                                    );
+                                                    compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                                }
+                                                Err(message) => runtime_message.set(message),
+                                            }
+                                        });
+                                    }
+                                },
+                                style: action_style(compat_status.is_some()),
+                                "Clear forced build"
+                            }
+                            button {
+                                onclick: {
+                                    let root = root.clone();
+                                    let app_id = route_app.clone();
+                                    move |_| {
+                                        runtime_message.set(String::new());
+                                        let root = root.clone();
+                                        let app_id = app_id.clone();
+                                        spawn(async move {
+                                            match runtime::restore_compat(&root, &app_id, false) {
+                                                Ok(report) => {
+                                                    let restored = report
+                                                        .restored
+                                                        .map(|tool| tool.name)
+                                                        .unwrap_or_else(|| "Steam decides".to_string());
+                                                    runtime_message.set(format!(
+                                                        "Restored the original compatibility tool: {restored}."
+                                                    ));
+                                                    compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
+                                                }
+                                                Err(message) => runtime_message.set(message),
+                                            }
+                                        });
+                                    }
+                                },
+                                style: action_style(true),
+                                "Restore forced build"
+                            }
                         }
                     }
-                }
 
-                if let Some(status) = routing_status.clone() {
+                    if let Some(status) = routing_status.clone() {
+                        div {
+                            style: "display:flex;flex-direction:column;gap:2px;font-size:11px;color:#78788a;",
+                            span { "Steam: {status.steam.describe()}" }
+                            if let Some(value) = status.launch_options.clone() {
+                                span { "Launch options: {value}" }
+                            } else {
+                                span { "Launch options: (not set)" }
+                            }
+                            if status.shim_installed {
+                                span { style: "color:#7a9ad6;", "Routed through pitagames-shim." }
+                            }
+                            span { "{compat_label}" }
+                            if let Some(warning) = status.warning.clone() {
+                                span { style: "color:#d8b070;", "{warning}" }
+                            }
+                        }
+                    }
+
                     div {
-                        style: "display:flex;flex-direction:column;gap:2px;font-size:11px;color:#78788a;",
-                        span { "Steam: {status.steam.describe()}" }
-                        if let Some(value) = status.launch_options.clone() {
-                            span { "Launch options: {value}" }
+                        style: "display:flex;flex-direction:column;gap:6px;padding-top:4px;",
+                        div {
+                            style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                            span {
+                                style: "font-size:12px;font-weight:600;color:#e8e8ee;",
+                                "Command"
+                            }
+                            CopyButton { text: command_text.clone() }
+                            span {
+                                style: "font-size:11px;color:#78788a;",
+                                "what pitagames-shim will run (the same line as --explain)"
+                            }
+                        }
+                        if let Some(message) = command_error.clone() {
+                            span {
+                                style: "padding:8px 12px;border-radius:8px;background:#3a2a1e;color:#e0c090;font-size:12px;overflow-wrap:anywhere;",
+                                "{message}"
+                            }
                         } else {
-                            span { "Launch options: (not set)" }
-                        }
-                        if status.shim_installed {
-                            span { style: "color:#7a9ad6;", "Routed through pitagames-shim." }
-                        }
-                        span { "{compat_label}" }
-                        if let Some(warning) = status.warning.clone() {
-                            span { style: "color:#d8b070;", "{warning}" }
+                            code {
+                                style: "display:block;padding:10px 12px;border-radius:8px;background:#14141b;border:1px solid #26262f;color:#b8c8e8;font-family:monospace;font-size:11px;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text;",
+                                "{command_text}"
+                            }
                         }
                     }
-                }
 
-                div {
-                    style: "display:flex;flex-direction:column;gap:6px;padding-top:4px;",
-                    div {
-                        style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                        span {
-                            style: "font-size:12px;font-weight:600;color:#e8e8ee;",
-                            "Command"
+                    if !runtime_note.is_empty() {
+                        div {
+                            style: "padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;overflow-wrap:anywhere;",
+                            "{runtime_note}"
                         }
-                        CopyButton { text: command_text.clone() }
-                        span {
-                            style: "font-size:11px;color:#78788a;",
-                            "what pitagames-shim will run (the same line as --explain)"
-                        }
-                    }
-                    if let Some(message) = command_error.clone() {
-                        span {
-                            style: "padding:8px 12px;border-radius:8px;background:#3a2a1e;color:#e0c090;font-size:12px;overflow-wrap:anywhere;",
-                            "{message}"
-                        }
-                    } else {
-                        code {
-                            style: "display:block;padding:10px 12px;border-radius:8px;background:#14141b;border:1px solid #26262f;color:#b8c8e8;font-family:monospace;font-size:11px;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text;",
-                            "{command_text}"
-                        }
-                    }
-                }
-
-                if !runtime_note.is_empty() {
-                    div {
-                        style: "padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;overflow-wrap:anywhere;",
-                        "{runtime_note}"
                     }
                 }
             }

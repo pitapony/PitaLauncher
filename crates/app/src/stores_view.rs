@@ -19,24 +19,38 @@ use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::Store;
 use pitagames_stores::cli::CliOptions;
 use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport};
+use pitagames_stores::sync::{Backends, StoreLibrary};
 
 use crate::copy::CopyButton;
+use crate::library::Library;
+use crate::store_sync;
 
 /// A finished probe: the rows and the `list` flag they were fetched with.
 type ProbeReply = (bool, Vec<StoreStatusReport>);
 
-/// The render-side end of the store-status channel.
+/// A finished library sync: what each store's CLI reported.
+type SyncReply = Vec<(Store, StoreLibrary)>;
+
+/// The render-side end of a worker channel.
 ///
 /// Cloning shares one receiver. `use_hook` needs a `Clone` value and an
 /// `UnboundedReceiver` is not one, so the receiver sits behind an async mutex,
 /// exactly like the activation channel.
-#[derive(Clone)]
-struct Probes {
-    sender: UnboundedSender<ProbeReply>,
-    receiver: Rc<AsyncMutex<Option<UnboundedReceiver<ProbeReply>>>>,
+struct Channel<T> {
+    sender: UnboundedSender<T>,
+    receiver: Rc<AsyncMutex<Option<UnboundedReceiver<T>>>>,
 }
 
-impl Probes {
+impl<T> Clone for Channel<T> {
+    fn clone(&self) -> Self {
+        Self {
+            sender: self.sender.clone(),
+            receiver: Rc::clone(&self.receiver),
+        }
+    }
+}
+
+impl<T> Channel<T> {
     fn new() -> Self {
         let (sender, receiver) = unbounded();
         Self {
@@ -45,43 +59,79 @@ impl Probes {
         }
     }
 
-    /// Probe every store on a worker thread. A CLI run can take seconds, so it
-    /// must never run on the render thread.
-    fn start(&self, list: bool) {
-        let sender = self.sender.clone();
-        let spawned = thread::Builder::new()
-            .name("pitagames-store-status".to_string())
-            .spawn(move || {
-                let options = CliOptions {
-                    log_dir: pitagames_core::paths::logs_dir(),
-                    ..CliOptions::default()
-                };
-                let reports = status::stores(&options, list);
-                // A closed receiver only means the screen is gone.
-                let _ = sender.unbounded_send((list, reports));
-            });
-
-        if let Err(error) = spawned {
-            eprintln!("[pitagames] store status probe could not start: {error}");
-        }
-    }
-
-    /// Wait for the next probe result; `None` once the channel closes.
-    async fn next(&self) -> Option<ProbeReply> {
+    /// Wait for the next result; `None` once the channel closes.
+    async fn next(&self) -> Option<T> {
         let mut slot = self.receiver.lock().await;
         let receiver = slot.as_mut()?;
         receiver.next().await
     }
 }
 
+/// The CLI options every worker here uses: transcripts under the data dir.
+fn cli_options() -> CliOptions {
+    CliOptions {
+        log_dir: pitagames_core::paths::logs_dir(),
+        ..CliOptions::default()
+    }
+}
+
+/// Probe every store on a worker thread. A CLI run can take seconds, so it must
+/// never run on the render thread.
+fn start_probe(sender: UnboundedSender<ProbeReply>, list: bool) {
+    let spawned = thread::Builder::new()
+        .name("pitagames-store-status".to_string())
+        .spawn(move || {
+            let reports = status::stores(&cli_options(), list);
+            // A closed receiver only means the screen is gone.
+            let _ = sender.unbounded_send((list, reports));
+        });
+
+    if let Err(error) = spawned {
+        eprintln!("[pitagames] store status probe could not start: {error}");
+    }
+}
+
+/// Fetch every store's library on a worker thread.
+///
+/// The merge and the write are async SQLite work, so they stay in the drain
+/// future; this half only runs the CLIs, which block.
+fn start_sync(sender: UnboundedSender<SyncReply>) {
+    let spawned = thread::Builder::new()
+        .name("pitagames-store-sync".to_string())
+        .spawn(move || {
+            let backends = Backends::new();
+            let fetched = store_sync::fetch(&backends, &cli_options(), &status::CLI_STORES);
+            let _ = sender.unbounded_send(fetched);
+        });
+
+    if let Err(error) = spawned {
+        eprintln!("[pitagames] store sync could not start: {error}");
+    }
+}
+
+/// Props for the Stores screen.
+#[derive(Props, Clone, PartialEq)]
+pub struct StoresViewProps {
+    /// The grid's library, so a finished sync can add its rows without a restart.
+    pub library: Signal<Option<Library>>,
+    /// Where the synced rows are written.
+    pub db: Signal<Option<pitagames_db::Db>>,
+}
+
 /// The Stores screen.
 #[allow(non_snake_case)]
-pub fn StoresView() -> Element {
+pub fn StoresView(props: StoresViewProps) -> Element {
     let mut rows = use_signal(|| None::<Vec<StoreStatusReport>>);
     let mut pending = use_signal(|| true);
     let mut counts = use_signal(|| false);
+    let mut syncing = use_signal(|| false);
+    let mut sync_message = use_signal(String::new);
+    let mut sync_problems = use_signal(Vec::<String>::new);
 
-    let probes = use_hook(Probes::new);
+    let probes = use_hook(Channel::<ProbeReply>::new);
+    let syncs = use_hook(Channel::<SyncReply>::new);
+    let db_state = props.db;
+    let mut library_state = props.library;
 
     // The drain future starts the first probe, then renders every reply.
     let drain_probes = probes.clone();
@@ -89,7 +139,7 @@ pub fn StoresView() -> Element {
         let drain = drain_probes.clone();
         let starter = drain_probes.clone();
         async move {
-            starter.start(false);
+            start_probe(starter.sender.clone(), false);
             while let Some((list, reports)) = drain.next().await {
                 rows.set(Some(reports));
                 counts.set(list);
@@ -98,12 +148,61 @@ pub fn StoresView() -> Element {
         }
     });
 
+    // The sync drain: the CLIs ran on a thread, so this half merges the answer
+    // over the cache, writes it and folds the rows into the grid.
+    let drain_syncs = syncs.clone();
+    use_future(move || {
+        let drain = drain_syncs.clone();
+        async move {
+            while let Some(fetched) = drain.next().await {
+                let Some(db) = (*db_state.read()).clone() else {
+                    syncing.set(false);
+                    sync_message
+                        .set("The library cannot be saved until the database opens.".to_string());
+                    continue;
+                };
+
+                let (synced, problems) = store_sync::apply_all(&db, &fetched).await;
+
+                let mut total_rows = 0;
+                let mut applied = 0;
+                {
+                    let mut guard = library_state.write();
+                    for store in &synced {
+                        total_rows += store.report.rows;
+                        if store.report.applied {
+                            applied += 1;
+                        }
+                        if let Some(library) = guard.as_mut() {
+                            library.apply_store_rows(&store.rows);
+                        }
+                    }
+                }
+
+                let mut message = format!(
+                    "{total_rows} game(s) from {applied} of {} store(s).",
+                    status::CLI_STORES.len()
+                );
+                if !problems.is_empty() {
+                    message.push_str(&format!(" {} warning(s).", problems.len()));
+                }
+                sync_message.set(message);
+                sync_problems.set(problems);
+                syncing.set(false);
+            }
+        }
+    });
+
     let refresh_probes = probes.clone();
     let counts_probes = probes.clone();
+    let sync_starter = syncs.clone();
 
     let loaded = rows();
     let is_pending = pending();
     let show_counts = counts();
+    let is_syncing = syncing();
+    let message = sync_message();
+    let problems = sync_problems();
 
     rsx! {
         div {
@@ -127,7 +226,7 @@ pub fn StoresView() -> Element {
                     disabled: is_pending,
                     onclick: move |_| {
                         pending.set(true);
-                        refresh_probes.start(show_counts);
+                        start_probe(refresh_probes.sender.clone(), show_counts);
                     },
                     style: action_style(!is_pending),
                     "Refresh"
@@ -137,16 +236,48 @@ pub fn StoresView() -> Element {
                     onclick: move |_| {
                         let next = !show_counts;
                         pending.set(true);
-                        counts_probes.start(next);
+                        start_probe(counts_probes.sender.clone(), next);
                     },
                     style: action_style(!is_pending),
                     if show_counts { "Hide game counts" } else { "Show game counts" }
+                }
+                button {
+                    disabled: is_syncing,
+                    onclick: move |_| {
+                        syncing.set(true);
+                        sync_message.set(String::new());
+                        sync_problems.set(Vec::new());
+                        start_sync(sync_starter.sender.clone());
+                    },
+                    style: action_style(!is_syncing),
+                    "Sync libraries"
                 }
                 if is_pending {
                     span {
                         style: "font-size:11px;color:#7a9ad6;",
                         "checking…"
                     }
+                }
+                if is_syncing {
+                    span {
+                        style: "font-size:11px;color:#7a9ad6;",
+                        "syncing…"
+                    }
+                }
+            }
+
+            if !message.is_empty() {
+                div {
+                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;",
+                    span { "{message}" }
+                }
+            }
+
+            for problem in problems.iter().take(3) {
+                div {
+                    key: "{problem}",
+                    style: "padding:8px 12px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:11px;overflow-wrap:anywhere;",
+                    "{problem}"
                 }
             }
 

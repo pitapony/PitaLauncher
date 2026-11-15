@@ -16,14 +16,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::stream::{self, StreamExt};
-use pitagames_core::{GameId, Store};
+use pitagames_core::{Game, GameId, Store};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
+use pitagames_stores::queue::{InstallJob, JobState, StartOutcome};
 use time::OffsetDateTime;
 
 use downloads::{DownloadEvent, Downloads};
 use library::{Library, OWNED_METADATA_PER_RUN};
 use steam_account::Account;
+use store_installs::{InstallEvent, Installs};
 
 mod account;
 mod activation;
@@ -42,6 +44,8 @@ mod log_view;
 mod persist;
 mod runtime;
 mod steam_account;
+mod store_installs;
+mod store_sync;
 mod stores_view;
 mod tray;
 mod wrappers;
@@ -188,7 +192,7 @@ fn App() -> Element {
     // after it opens shows up without a second copy of the game.
     let mut selected_game = use_signal(|| None::<GameId>);
     let mut query = use_signal(String::new);
-    let notice = use_signal(String::new);
+    let mut notice = use_signal(String::new);
     // Art is optional: until the cache/server is up, cards show placeholders.
     let mut art_state = use_signal(|| None::<std::sync::Arc<art::ArtContext>>);
     // Bumped whenever a new image lands on disk; re-renders the <img> sources.
@@ -200,6 +204,9 @@ fn App() -> Element {
     // The single metadata fetch channel; its worker holds the only client, so
     // the 200/5-minute budget is global rather than per-task.
     let mut metadata_queue = use_signal(|| None::<MetadataQueue>);
+    // The CLI stores' install queue and the worker reports feeding it.
+    let mut installs = use_signal(Installs::default);
+    let mut install_events = use_signal(|| None::<UnboundedSender<InstallEvent>>);
 
     // Activation: the socket thread forwards "focus" requests here, and this
     // future raises the window on the event-loop thread (tao window calls are
@@ -216,6 +223,41 @@ fn App() -> Element {
                 if request == pitagames_core::activation::Activation::Focus {
                     activation::raise_window();
                     eprintln!("[pitagames] raised the window for a second launch");
+                }
+            }
+        }
+    });
+
+    // The CLI-store install queue's channel: one future owns the receiver, and
+    // the grid holds a sender once the window is up.
+    let install_channel = use_hook(store_installs::InstallChannel::new);
+
+    // Drive the install queue: fold each worker report in, flip the row a
+    // finished install turned into a real directory, and hand the next queued
+    // job to a thread. The queue is serial by design, so this is the only place
+    // that starts work.
+    let install_drain = install_channel.clone();
+    use_future(move || {
+        let channel = install_drain.clone();
+        async move {
+            while let Some(event) = channel.next().await {
+                let finished = match &event {
+                    InstallEvent::Finished { index, result } => Some((*index, result.clone())),
+                    InstallEvent::Progress { .. } => None,
+                };
+
+                installs.write().apply(&event);
+
+                if let Some((index, result)) = finished {
+                    let job = installs.read().job(index).cloned();
+                    match (result, job) {
+                        (Ok(()), Some(job)) => {
+                            record_store_install(job, library_state, db_state, notice)
+                        }
+                        (Err(message), _) => notice.set(message),
+                        (Ok(()), None) => {}
+                    }
+                    pump_installs(installs, install_events, notice);
                 }
             }
         }
@@ -245,148 +287,160 @@ fn App() -> Element {
     // One task owns the background work: scan, persist, then drain download
     // events for the lifetime of the window. Scans are file IO only, so running
     // them here (once) is cheaper than a worker pool.
-    use_future(move || async move {
-        let mut library = Library::load();
-        let mut metadata_db = None;
-        let mut owned_stale = false;
-        // Read-only and fast; the detail page needs it as soon as a game opens.
-        proton_state.set(Some(runtime::discover_proton()));
+    let install_sender_channel = install_channel.clone();
+    use_future(move || {
+        let channel = install_sender_channel.clone();
+        async move {
+            let mut library = Library::load();
+            let mut metadata_db = None;
+            let mut owned_stale = false;
+            // Read-only and fast; the detail page needs it as soon as a game opens.
+            proton_state.set(Some(runtime::discover_proton()));
 
-        match persist::open_default().await {
-            Ok(db) => {
-                let games = library.snapshot_games();
-                match persist::sync(&db, &games).await {
-                    Ok(stored) => library.apply_stored(&stored),
-                    Err(error) => library.warnings.push(error),
-                }
-                match persist::load_metadata(&db).await {
-                    Ok(rows) => library.apply_metadata(&rows),
-                    Err(error) => library.metadata_warnings.push(error),
-                }
-                // The owned cache is optional; a read failure is a warning.
-                match persist::load_owned(&db).await {
-                    Ok((owned, fetched_at)) => {
-                        if let Some(fetched_at) = fetched_at {
-                            let total = owned.len();
-                            library.apply_owned(&owned, total, fetched_at);
-                            owned_stale = steam_account::is_stale(
-                                Some(fetched_at),
-                                OffsetDateTime::now_utc(),
-                            );
-                        } else {
-                            owned_stale = true;
-                        }
+            match persist::open_default().await {
+                Ok(db) => {
+                    let games = library.snapshot_games();
+                    match persist::sync(&db, &games).await {
+                        Ok(stored) => library.apply_stored(&stored),
+                        Err(error) => library.warnings.push(error),
                     }
-                    Err(error) => library.metadata_warnings.push(error),
+                    match persist::load_metadata(&db).await {
+                        Ok(rows) => library.apply_metadata(&rows),
+                        Err(error) => library.metadata_warnings.push(error),
+                    }
+                    // The owned cache is optional; a read failure is a warning.
+                    match persist::load_owned(&db).await {
+                        Ok((owned, fetched_at)) => {
+                            if let Some(fetched_at) = fetched_at {
+                                let total = owned.len();
+                                library.apply_owned(&owned, total, fetched_at);
+                                owned_stale = steam_account::is_stale(
+                                    Some(fetched_at),
+                                    OffsetDateTime::now_utc(),
+                                );
+                            } else {
+                                owned_stale = true;
+                            }
+                        }
+                        Err(error) => library.metadata_warnings.push(error),
+                    }
+                    // The CLI stores' cached rows (a previous sync or a finished
+                    // install here). They are never scanned, so a store whose CLI
+                    // is missing simply keeps what the cache holds.
+                    match persist::load_store_rows(&db).await {
+                        Ok(rows) => library.apply_store_rows(&rows),
+                        Err(error) => library.metadata_warnings.push(error),
+                    }
+                    metadata_db = Some(db.clone());
+                    db_state.set(Some(db));
                 }
-                metadata_db = Some(db.clone());
-                db_state.set(Some(db));
+                Err(error) => library
+                    .warnings
+                    .push(format!("Playtime will not be saved: {error}")),
             }
-            Err(error) => library
-                .warnings
-                .push(format!("Playtime will not be saved: {error}")),
-        }
 
-        // The key and SteamID need the Steam root for `userdata`, so read them
-        // after the scan; the library renders either way.
-        let account = Account::load(library.steam_root.as_deref());
-        let account_ready = account.is_ready();
-        if account.is_configured() {
-            library.owned.pending = owned_stale;
-        }
-        account_state.set(Some(account));
-
-        // Only ask the store for ids the cache cannot answer; this is what the
-        // 200-requests-per-five-minutes budget in `pitagames-metadata` gates.
-        // Installed games are refreshed in full; owned ones are capped per run.
-        let metadata_targets = library.metadata_candidates(
-            CachePolicy::DEFAULT,
-            OffsetDateTime::now_utc(),
-            OWNED_METADATA_PER_RUN,
-        );
-        library.metadata_pending = !metadata_targets.is_empty();
-
-        // Art is decorative: if the cache, server or HTTP client cannot start,
-        // the library still renders with placeholders.
-        let art_context = match art::ArtContext::start().await {
-            Ok(context) => {
-                art_state.set(Some(context.clone()));
-                Some(context)
+            // The key and SteamID need the Steam root for `userdata`, so read them
+            // after the scan; the library renders either way.
+            let account = Account::load(library.steam_root.as_deref());
+            let account_ready = account.is_ready();
+            if account.is_configured() {
+                library.owned.pending = owned_stale;
             }
-            Err(error) => {
-                library.metadata_warnings.push(error);
-                None
-            }
-        };
+            account_state.set(Some(account));
 
-        // Publish the channels before the library: once the grid is on screen,
-        // every button must find a sender.
-        let (sender, mut receiver) = unbounded::<DownloadEvent>();
-        events.set(Some(sender.clone()));
+            // Only ask the store for ids the cache cannot answer; this is what the
+            // 200-requests-per-five-minutes budget in `pitagames-metadata` gates.
+            // Installed games are refreshed in full; owned ones are capped per run.
+            let metadata_targets = library.metadata_candidates(
+                CachePolicy::DEFAULT,
+                OffsetDateTime::now_utc(),
+                OWNED_METADATA_PER_RUN,
+            );
+            library.metadata_pending = !metadata_targets.is_empty();
 
-        // Images for metadata that was already cached need no store request.
-        let art_requests = library.art_requests();
-        let libraries = library.libraries.clone();
-        let in_flight: Vec<(String, String)> = library
-            .in_flight()
-            .iter()
-            .map(|entry| (entry.app_id().to_string(), entry.title().to_string()))
-            .collect();
-        library_state.set(Some(library));
-
-        if let Some(context) = art_context.clone()
-            && !art_requests.is_empty()
-        {
-            spawn(warm_art(context, art_requests, art_revision));
-        }
-
-        // Metadata is fetched after the first paint: a slow or offline store
-        // must never hold up the library. One worker owns the client and the
-        // budget; the owned refresh and later scans enqueue into it.
-        let metadata_db_worker = metadata_db.clone();
-        if let Some(db) = metadata_db_worker {
-            let (metadata_sender, metadata_receiver) = unbounded::<Vec<u32>>();
-            let queue = MetadataQueue {
-                sender: Some(metadata_sender),
-                queued: Arc::new(AtomicUsize::new(0)),
+            // Art is decorative: if the cache, server or HTTP client cannot start,
+            // the library still renders with placeholders.
+            let art_context = match art::ArtContext::start().await {
+                Ok(context) => {
+                    art_state.set(Some(context.clone()));
+                    Some(context)
+                }
+                Err(error) => {
+                    library.metadata_warnings.push(error);
+                    None
+                }
             };
-            metadata_queue.set(Some(queue.clone()));
-            spawn(metadata_worker(
-                db,
-                library_state,
-                metadata_receiver,
-                queue.counter(),
-                art_context.clone(),
-                art_revision,
-            ));
-            queue.enqueue(metadata_targets);
-        }
 
-        // Refresh the account's owned list after the first paint: one request
-        // for the whole library, only when a key is configured and the cache
-        // has aged out.
-        if account_ready
-            && owned_stale
-            && let Some(account) = account_state.read().clone()
-            && let (Some(key), Some(steam_id)) = (account.key().cloned(), account.steam_id)
-        {
-            let queue = (*metadata_queue.read()).clone();
-            spawn(refresh_owned(
-                key,
-                steam_id,
-                library_state,
-                metadata_db.clone(),
-                queue,
-            ));
-        }
+            // Publish the channels before the library: once the grid is on screen,
+            // every button must find a sender.
+            let (sender, mut receiver) = unbounded::<DownloadEvent>();
+            events.set(Some(sender.clone()));
+            install_events.set(Some(channel.sender()));
 
-        // Steam may already be downloading: follow those without a click.
-        for (app_id, title) in in_flight {
-            start_download(board, &sender, &libraries, &app_id, &title);
-        }
+            // Images for metadata that was already cached need no store request.
+            let art_requests = library.art_requests();
+            let libraries = library.libraries.clone();
+            let in_flight: Vec<(String, String)> = library
+                .in_flight()
+                .iter()
+                .map(|entry| (entry.app_id().to_string(), entry.title().to_string()))
+                .collect();
+            library_state.set(Some(library));
 
-        while let Some(event) = receiver.next().await {
-            board.write().apply(&event);
+            if let Some(context) = art_context.clone()
+                && !art_requests.is_empty()
+            {
+                spawn(warm_art(context, art_requests, art_revision));
+            }
+
+            // Metadata is fetched after the first paint: a slow or offline store
+            // must never hold up the library. One worker owns the client and the
+            // budget; the owned refresh and later scans enqueue into it.
+            let metadata_db_worker = metadata_db.clone();
+            if let Some(db) = metadata_db_worker {
+                let (metadata_sender, metadata_receiver) = unbounded::<Vec<u32>>();
+                let queue = MetadataQueue {
+                    sender: Some(metadata_sender),
+                    queued: Arc::new(AtomicUsize::new(0)),
+                };
+                metadata_queue.set(Some(queue.clone()));
+                spawn(metadata_worker(
+                    db,
+                    library_state,
+                    metadata_receiver,
+                    queue.counter(),
+                    art_context.clone(),
+                    art_revision,
+                ));
+                queue.enqueue(metadata_targets);
+            }
+
+            // Refresh the account's owned list after the first paint: one request
+            // for the whole library, only when a key is configured and the cache
+            // has aged out.
+            if account_ready
+                && owned_stale
+                && let Some(account) = account_state.read().clone()
+                && let (Some(key), Some(steam_id)) = (account.key().cloned(), account.steam_id)
+            {
+                let queue = (*metadata_queue.read()).clone();
+                spawn(refresh_owned(
+                    key,
+                    steam_id,
+                    library_state,
+                    metadata_db.clone(),
+                    queue,
+                ));
+            }
+
+            // Steam may already be downloading: follow those without a click.
+            for (app_id, title) in in_flight {
+                start_download(board, &sender, &libraries, &app_id, &title);
+            }
+
+            while let Some(event) = receiver.next().await {
+                board.write().apply(&event);
+            }
         }
     });
 
@@ -425,8 +479,23 @@ fn App() -> Element {
     let active_downloads: Vec<downloads::Download> = downloads_snapshot.active().cloned().collect();
     let finished_downloads: Vec<downloads::Download> =
         downloads_snapshot.finished().cloned().collect();
-    let active_count = downloads_snapshot.active_count();
-    let nothing_tracked = downloads_snapshot.rows().is_empty();
+    // The CLI stores install in-process, so their queue has its own rows on
+    // this board: same screen, different backend.
+    let install_snapshot: Installs = (*installs.read()).clone();
+    let store_active: Vec<(usize, InstallJob)> = install_snapshot
+        .active()
+        .into_iter()
+        .map(|(index, job)| (index, job.clone()))
+        .collect();
+    let store_finished: Vec<(usize, InstallJob)> = install_snapshot
+        .finished()
+        .into_iter()
+        .map(|(index, job)| (index, job.clone()))
+        .collect();
+    let active_count = downloads_snapshot.active_count() + install_snapshot.active_count();
+    let nothing_tracked = downloads_snapshot.rows().is_empty()
+        && store_active.is_empty()
+        && store_finished.is_empty();
     let has_finished = !finished_downloads.is_empty();
     let current_view = view();
     let db_handle = (*db_state.read()).clone();
@@ -438,10 +507,21 @@ fn App() -> Element {
     let subtitle = match snapshot.as_ref() {
         None => "Scanning…".to_string(),
         Some(library) => {
+            let steam_games = library
+                .games
+                .iter()
+                .filter(|entry| entry.is_steam())
+                .count();
             let mut subtitle = match &library.steam_root {
-                Some(root) => format!("{} Steam games · {}", library.games.len(), root.display()),
+                Some(root) => format!("{steam_games} Steam games · {}", root.display()),
                 None => "No Steam library on this machine".to_string(),
             };
+            // The CLI stores' rows come from the cache, not a scan; saying so
+            // keeps the count honest when only some of them are synced.
+            let other_stores = library.games.len() - steam_games;
+            if other_stores > 0 {
+                subtitle.push_str(&format!(" · {other_stores} from other stores"));
+            }
             if let Some(total) = library.owned.total {
                 subtitle.push_str(&format!(" · {total} owned"));
             }
@@ -466,6 +546,8 @@ fn App() -> Element {
             notice,
             events,
             db: db_state,
+            installs,
+            install_events,
         }
     };
 
@@ -477,6 +559,159 @@ fn App() -> Element {
                 div {
                     style: "padding:40px 0;color:#78788a;",
                     "Nothing downloading. Installs and updates started here or in Steam show up as they happen."
+                }
+            }
+
+            if !store_active.is_empty() || !store_finished.is_empty() {
+                div {
+                    style: "display:flex;align-items:center;gap:12px;margin-top:8px;",
+                    span {
+                        style: "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#78788a;",
+                        "Store installs"
+                    }
+                    if !store_finished.is_empty() {
+                        button {
+                            onclick: move |_| {
+                                installs.write().clear_finished();
+                            },
+                            style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;",
+                            "Clear finished"
+                        }
+                    }
+                }
+
+                for (index, job) in store_active {
+                    {
+                        let title = job.title.clone();
+                        let store = job.id.store.as_str();
+                        let store_id = job.id.store_id.clone();
+                        let state = job.state.label();
+                        let percent = job.progress.percent;
+                        let width = percent.unwrap_or(0.0);
+                        let percent_label = percent
+                            .map(|percent| format!("{percent:.0}%"))
+                            .unwrap_or_default();
+                        let stage = job.progress.stage.clone().unwrap_or_default();
+                        let target = job.target.display().to_string();
+                        let queued = job.state == JobState::Queued;
+
+                        rsx! {
+                            div {
+                                key: "store-active-{index}",
+                                style: "display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;",
+
+                                div {
+                                    style: "display:flex;align-items:baseline;gap:12px;",
+                                    span {
+                                        style: "font-size:14px;font-weight:600;color:#ffffff;",
+                                        "{title}"
+                                    }
+                                    span {
+                                        style: "font-size:11px;text-transform:uppercase;letter-spacing:0.06em;color:#7a9ad6;",
+                                        "{state}"
+                                    }
+                                    span {
+                                        style: "margin-left:auto;font-size:11px;color:#78788a;",
+                                        "{percent_label}"
+                                    }
+                                }
+
+                                div {
+                                    style: "height:6px;border-radius:3px;background:#2c2c38;overflow:hidden;",
+                                    div {
+                                        style: "height:100%;width:{width}%;background:#5a7ad6;",
+                                    }
+                                }
+
+                                div {
+                                    style: "display:flex;align-items:baseline;gap:10px;font-size:11px;color:#78788a;",
+                                    span { "{store} · {store_id}" }
+                                    if !stage.is_empty() {
+                                        span {
+                                            style: "overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                            "{stage}"
+                                        }
+                                    }
+                                    if queued {
+                                        button {
+                                            onclick: move |_| {
+                                                installs.write().cancel(index);
+                                            },
+                                            style: "margin-left:auto;padding:5px 10px;border-radius:7px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:11px;cursor:pointer;",
+                                            "Cancel"
+                                        }
+                                    }
+                                }
+
+                                span {
+                                    style: "font-size:10px;color:#5a5a68;overflow-wrap:anywhere;",
+                                    "{target}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                for (index, job) in store_finished {
+                    {
+                        let title = job.title.clone();
+                        let meta = format!(
+                            "{} · {} · {}",
+                            job.id.store,
+                            job.id.store_id,
+                            job.state.label()
+                        );
+                        let message = match &job.state {
+                            JobState::Failed { message } => message.clone(),
+                            _ => String::new(),
+                        };
+                        let retry = matches!(
+                            job.state,
+                            JobState::Failed { .. } | JobState::Cancelled
+                        );
+
+                        rsx! {
+                            div {
+                                key: "store-done-{index}",
+                                style: "display:flex;flex-direction:column;gap:4px;padding:12px 14px;border-radius:12px;background:#1a1a22;border:1px solid #26262f;",
+                                div {
+                                    style: "display:flex;align-items:center;gap:12px;",
+                                    span {
+                                        style: "font-size:13px;color:#c8c8d4;",
+                                        "{title}"
+                                    }
+                                    span {
+                                        style: "font-size:11px;color:#78788a;",
+                                        "{meta}"
+                                    }
+                                    if retry {
+                                        button {
+                                            onclick: move |_| {
+                                                if installs.write().retry(index) {
+                                                    pump_installs(installs, install_events, notice);
+                                                }
+                                            },
+                                            style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
+                                            "Retry"
+                                        }
+                                    }
+                                    button {
+                                        onclick: move |_| {
+                                            installs.write().remove(index);
+                                        },
+                                        style: "padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;margin-left:auto;",
+                                        "Remove"
+                                    }
+                                }
+                                if !message.is_empty() {
+                                    span {
+                                        style: "font-size:11px;color:#e8a0a0;overflow-wrap:anywhere;",
+                                        "{message}"
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -669,7 +904,7 @@ fn App() -> Element {
                     style: "flex:1;min-height:0;overflow-y:auto;",
                     if let Some(entry) = detail_entry {
                         detail::Detail {
-                            key: "{entry.app_id()}",
+                            key: "{entry.store().as_str()}-{entry.app_id()}",
                             entry,
                             db: detail::DbHandle(db_handle.clone()),
                             view,
@@ -687,7 +922,10 @@ fn App() -> Element {
             } else if current_view == View::Stores {
                 div {
                     style: "flex:1;min-height:0;overflow-y:auto;",
-                    stores_view::StoresView {}
+                    stores_view::StoresView {
+                        library: library_state,
+                        db: db_state,
+                    }
                 }
             } else if current_view == View::Account {
                 div {
@@ -729,6 +967,10 @@ struct LibraryGridProps {
     pub notice: Signal<String>,
     pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
     pub db: Signal<Option<pitagames_db::Db>>,
+    /// The CLI stores' install queue: a card whose game is queued reads its
+    /// state here, and its Install button enqueues into it.
+    pub installs: Signal<Installs>,
+    pub install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
 }
 
 /// The windowed library grid.
@@ -752,6 +994,8 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let mut notice = props.notice;
     let events = props.events;
     let db = props.db;
+    let mut installs = props.installs;
+    let install_events = props.install_events;
 
     let mut scroll_top = use_signal(|| 0.0f64);
     let mut viewport_width = use_signal(|| 0.0f64);
@@ -785,6 +1029,10 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
 
     let art_context = art_state.read().clone();
     let downloads_snapshot: Downloads = (*board.read()).clone();
+    let installs_snapshot: Installs = (*installs.read()).clone();
+    // Whether the store queue has a worker; the Install button is disabled until
+    // the startup future publishes its sender.
+    let install_ready = (*install_events.read()).is_some();
     let libraries = state.libraries.clone();
     let events_sender: Option<UnboundedSender<DownloadEvent>> = (*events.read()).clone();
     let db_handle = (*db.read()).clone();
@@ -826,7 +1074,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         if !has_games {
             div {
                 style: "flex:1;padding:48px 32px;color:#78788a;",
-                "No installed Steam games found."
+                "No games yet. PitaGames reads Steam's own libraries; open Stores and choose \"Sync libraries\" to fetch your Epic, Amazon and GOG games."
             }
         } else if window.is_empty() {
             div {
@@ -898,13 +1146,21 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 let meta = entry.meta_line();
                                 let status = entry.status_label().unwrap_or_default();
                                 let can_play = entry.can_play();
-                                let show_play = entry.game.installed;
+                                // Only Steam has a launch path so far; a CLI
+                                // store row shows its install state instead of a
+                                // button that would do nothing.
+                                let show_play = entry.game.installed && entry.play_is_wired();
                                 let can_install = entry.can_install();
                                 let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
                                     "Update"
                                 } else {
                                     "Install"
                                 };
+                                // A queued/running CLI-store install owns the
+                                // card's action slot, so a second click cannot
+                                // queue a duplicate.
+                                let queued = installs_snapshot.active_label(&game_id);
+                                let steam_install = entry.is_steam();
                                 let tracked = downloads_snapshot
                                     .get(&app_id)
                                     .is_some_and(|row| !row.state.is_finished());
@@ -913,15 +1169,21 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 let play_db = db_handle.clone();
                                 let play_game_id = game_id.clone();
                                 let install_id = app_id.clone();
+                                let install_game = game_id.clone();
                                 let install_title = title.clone();
+                                let card_key = format!("{}-{app_id}", entry.store().as_str());
                                 let install_sender = events_sender.clone();
-                                let install_enabled = install_sender.is_some();
+                                let install_enabled = if steam_install {
+                                    install_sender.is_some()
+                                } else {
+                                    install_ready
+                                };
                                 let install_libraries = libraries.clone();
                                 let open_id = game_id.clone();
 
                                 rsx! {
                                     div {
-                                        key: "{app_id}",
+                                        key: "{card_key}",
                                         onclick: move |_| {
                                             selected_game.set(Some(open_id.clone()));
                                             view.set(View::Detail);
@@ -990,12 +1252,38 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                 }
                                             }
 
-                                            if can_install {
+                                            if let Some(label) = queued {
+                                                span {
+                                                    style: "flex:1;align-self:center;font-size:11px;color:#7a9ad6;",
+                                                    "{label}"
+                                                }
+                                            } else if can_install {
                                                 button {
                                                     disabled: !install_enabled,
                                                     onclick: move |event| {
+                                                        // The card itself opens the detail page;
+                                                        // the buttons below only do their own action.
                                                         event.stop_propagation();
                                                         notice.set(String::new());
+
+                                                        // The CLI stores run their own client, so
+                                                        // the queue owns the install and the
+                                                        // Downloads board shows it.
+                                                        if !steam_install {
+                                                            match pitagames_stores::installer::plan(&install_game, &install_title) {
+                                                                Ok(plan) => {
+                                                                    if let Err(error) = installs.write().enqueue(plan.job()) {
+                                                                        notice.set(error.to_string());
+                                                                        return;
+                                                                    }
+                                                                    pump_installs(installs, install_events, notice);
+                                                                    view.set(View::Downloads);
+                                                                }
+                                                                Err(error) => notice.set(error.to_string()),
+                                                            }
+                                                            return;
+                                                        }
+
                                                         if let Err(error) = library::spawn_install(&install_id) {
                                                             notice.set(format!("Could not ask Steam to install appid {install_id}: {error}"));
                                                             return;
@@ -1015,6 +1303,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                 span {
                                                     style: "flex:1;align-self:center;font-size:11px;color:#7a9ad6;",
                                                     "in downloads"
+                                                }
+                                            } else if !show_play {
+                                                span {
+                                                    style: "flex:1;align-self:center;font-size:11px;color:#78788a;",
+                                                    "installed"
                                                 }
                                             }
                                         }
@@ -1071,6 +1364,74 @@ fn start_download(
     });
 
     true
+}
+
+/// Start the next queued CLI-store install, if any, on a worker thread.
+///
+/// The queue is serial: `start_next` refuses while a job is running, so this
+/// only ever hands one job to a worker. A job the disk pre-check refused is
+/// already `Failed` (and its row says why), so the loop keeps looking for one
+/// it can start.
+fn pump_installs(
+    mut installs: Signal<Installs>,
+    install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    mut notice: Signal<String>,
+) {
+    let Some(sender) = (*install_events.read()).clone() else {
+        return;
+    };
+
+    loop {
+        // The write guard must not outlive the call: `start_next` takes it, and
+        // the `Started` arm reads the job back through a second borrow.
+        let outcome = installs.write().start_next();
+        match outcome {
+            StartOutcome::Started { index } => {
+                let job = installs.read().job(index).cloned();
+                if let Some(job) = job {
+                    store_installs::spawn(job, index, sender.clone());
+                }
+                return;
+            }
+            StartOutcome::Skipped {
+                available,
+                required,
+                ..
+            } => notice.set(format!(
+                "Not enough free space for one queued install: {} needed, {} available.",
+                format::human_bytes(required),
+                format::human_bytes(available)
+            )),
+            StartOutcome::Busy | StartOutcome::Empty => return,
+        }
+    }
+}
+
+/// A store install finished: flip the row and remember it.
+///
+/// The store CLI created the directory, so the row is installed from now on;
+/// the write is what keeps it installed after a restart without another sync.
+fn record_store_install(
+    job: InstallJob,
+    mut library_state: Signal<Option<Library>>,
+    db_state: Signal<Option<pitagames_db::Db>>,
+    mut notice: Signal<String>,
+) {
+    if let Some(library) = library_state.write().as_mut() {
+        library.apply_install(&job.id, &job.target);
+    }
+
+    let Some(db) = (*db_state.read()).clone() else {
+        return;
+    };
+    let mut game = Game::new(job.id, job.title);
+    game.installed = true;
+    game.install_dir = Some(job.target);
+    spawn(async move {
+        if let Err(error) = persist::record_install(&db, &game).await {
+            notice.set(error);
+        }
+    });
 }
 
 /// The single metadata worker: one client, one rate budget, many batches.

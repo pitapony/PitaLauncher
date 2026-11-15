@@ -10,10 +10,11 @@
 //! [`gog`] are the backends on top of it (`legendary`: auth, list, install,
 //! verify, launch; `nile`: the same plus a library sync; GOG: `lgogdownloader`
 //! for the library/login and `gogdl` for install/repair/launch). [`queue`] is the
-//! serial install queue those backends share, with the disk-space pre-check, and
+//! serial install queue those backends share, with the disk-space pre-check,
 //! [`sync`] folds the two listings each backend can answer into one round of
 //! `Game` rows and merges them over the cache without deleting anything a failed
-//! listing could not vouch for.
+//! listing could not vouch for, and [`installer`] turns a queued job into the
+//! backend run that fills its directory.
 
 use std::path::PathBuf;
 
@@ -25,6 +26,7 @@ pub mod epic;
 pub mod gog;
 pub mod import;
 pub mod install;
+pub mod installer;
 pub mod localconfig;
 pub mod queue;
 pub mod report;
@@ -47,6 +49,7 @@ pub use epic::{Epic, EpicAccount, EpicError};
 pub use gog::{Gog, GogAccount, GogError};
 pub use import::{ImportReport, Importer, Origin, SourceReport};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
+pub use installer::{InstallPlan, InstallRun, InstallerError};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use queue::{InstallJob, InstallQueue, JobProgress, JobState, QueueError, StartOutcome};
 pub use report::{LogFormat, LogLine, RunFailure, RunReport};
