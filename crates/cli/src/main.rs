@@ -16,8 +16,8 @@ use anyhow::{Context, Result, bail};
 use pitagames_core::desktop::{self, DesktopEntry};
 use pitagames_core::paths;
 use pitagames_core::{
-    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Store, read_shim_profile,
-    shim_launch_options, shim_profile_path, steam_install,
+    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, ProtonRef, ShimProfile, Store,
+    read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_db::{Db, GameRepository};
 use pitagames_platform::anticheat::{
@@ -25,6 +25,8 @@ use pitagames_platform::anticheat::{
 };
 use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::disk;
+use pitagames_platform::launch as handoff;
+use pitagames_platform::launch::{Outcome, Prepared};
 use pitagames_platform::logs as log_files;
 use pitagames_platform::prefix::{self, Prefix};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
@@ -77,6 +79,7 @@ fn run() -> Result<()> {
         "import" => import(&args.collect::<Vec<_>>()),
         "prefix" => prefix(&args.collect::<Vec<_>>()),
         "disk" => disk(&args.collect::<Vec<_>>()),
+        "launch" => launch(&args.collect::<Vec<_>>()),
         "stores" => stores(&args.collect::<Vec<_>>()),
         "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
         "activate" => activate(&args.collect::<Vec<_>>()),
@@ -2878,6 +2881,305 @@ fn print_planned(program: &str, spec: &CliSpec, command: &CliCommand) {
     );
 }
 
+/// Compose one non-Steam launch, and optionally run it.
+///
+/// The diagnostic for the umu/Proton hand-off: exactly what the GUI does
+/// (`platform::launch::prepare`), printed as the command it will exec. `--exe`
+/// lets a checkout exercise it without a store row, and a native executable
+/// runs directly, so the whole path is testable without `umu-run` or a Proton
+/// build on the machine.
+fn launch(args: &[String]) -> Result<()> {
+    let parsed = parse_launch_args(args)?;
+    if parsed.help {
+        println!("{}", launch_usage());
+        return Ok(());
+    }
+
+    let (game, prepared) = plan_launch(&parsed)?;
+
+    if parsed.run {
+        let outcome = run_launch(&game, &prepared, &parsed)?;
+        if parsed.json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "launch": prepared,
+                    "outcome": outcome,
+                }))?
+            );
+        }
+        if !outcome.success() {
+            bail!("{}", outcome.summary());
+        }
+        return Ok(());
+    }
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&prepared)?);
+    } else {
+        print_launch(&game, &prepared);
+    }
+    Ok(())
+}
+
+/// Resolve the row, runtime and Proton a launch needs, then compose it.
+fn plan_launch(parsed: &LaunchArgs) -> Result<(Game, Prepared)> {
+    let game_id = match parsed.positional.as_slice() {
+        [store, id] => GameId::new(
+            Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+            id.clone(),
+        ),
+        _ => bail!("expected `<store> <id>`\n\n{}", launch_usage()),
+    };
+
+    let game = load_launch_game(&game_id, parsed)?;
+    let proton = resolve_launch_proton(parsed.proton.as_deref())?;
+    let root = match parsed.root.clone() {
+        Some(root) => root,
+        None => prefix::default_root().context(
+            "cannot determine the prefix root; pass --root <dir> (or set PITAGAMES_PREFIX_DIR)",
+        )?,
+    };
+    let runtime = read_runtime(&game_id, parsed.profiles.as_deref());
+
+    let prepared = handoff::prepare(&handoff::Handoff {
+        game: &game,
+        runtime: runtime.as_ref(),
+        proton: proton.as_ref(),
+        prefix_root: &root,
+        session: parsed.session,
+    })?;
+
+    Ok((game, prepared))
+}
+
+/// The game row: the store's own, or a synthetic one made from `--exe`.
+fn load_launch_game(id: &GameId, parsed: &LaunchArgs) -> Result<Game> {
+    let db_path = match &parsed.db {
+        Some(path) => Some(path.clone()),
+        None => paths::data_dir().map(|dir| dir.join("pitagames.db")),
+    };
+    let row = match db_path.filter(|path| path.is_file()) {
+        Some(path) => read_game_row(&path, id)?,
+        None => None,
+    };
+
+    match (row, parsed.exe.clone()) {
+        (Some(mut game), Some(exe)) => {
+            game.exe = Some(exe);
+            game.installed = true;
+            Ok(game)
+        }
+        (Some(game), None) => Ok(game),
+        (None, Some(exe)) => {
+            let mut game = Game::new(
+                id.clone(),
+                parsed.title.clone().unwrap_or_else(|| id.store_id.clone()),
+            );
+            game.installed = true;
+            game.exe = Some(exe);
+            Ok(game)
+        }
+        (None, None) => bail!(
+            "no {store} row for {id}; pass --exe <path>, or run `pitagames-cli stores sync` first",
+            store = id.store,
+            id = id.store_id
+        ),
+    }
+}
+
+/// One row out of the cache; `None` when the store has never been synced.
+fn read_game_row(path: &Path, id: &GameId) -> Result<Option<Game>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("could not start the async runtime")?;
+    runtime
+        .block_on(async {
+            let db = Db::open(path).await?;
+            let rows = db.store_games(id.store).await?;
+            Ok::<_, anyhow::Error>(rows.into_iter().find(|game| game.id == *id))
+        })
+        .with_context(|| format!("could not read {}", path.display()))
+}
+
+/// The Proton a launch uses: an explicit path, else the best discovered build.
+///
+/// A machine with no build is not an error here — [`handoff::prepare`] only
+/// needs one for a Windows game, and it says so by name.
+fn resolve_launch_proton(path: Option<&Path>) -> Result<Option<ProtonInstall>> {
+    if let Some(path) = path {
+        return ProtonInstall::from_dir(path, ProtonSource::Explicit)
+            .map(Some)
+            .map_err(|error| anyhow::anyhow!("{error}"));
+    }
+    Ok(proton::discover().resolve(&ProtonRef::Auto).unwrap_or(None))
+}
+
+/// The compiled profile written for this game, if any.
+///
+/// A corrupt file is a warning, not a refusal: the shim's contract is that a
+/// broken profile never blocks a launch, and the hand-off keeps it.
+fn read_runtime(id: &GameId, dir: Option<&Path>) -> Option<ShimProfile> {
+    let dir = match dir {
+        Some(dir) => dir.to_path_buf(),
+        None => paths::profiles_dir()?,
+    };
+    let path = shim_profile_path(&dir, id);
+    if !path.is_file() {
+        return None;
+    }
+    match read_shim_profile(&path) {
+        Ok(profile) => Some(profile),
+        Err(error) => {
+            eprintln!("warning: {error}; launching with the profile ignored");
+            None
+        }
+    }
+}
+
+fn print_launch(game: &Game, prepared: &Prepared) {
+    println!(
+        "{} ({}) → {}",
+        game.title,
+        prepared.game_key,
+        prepared.mode.label()
+    );
+    match &prepared.prefix {
+        Some(prefix) => println!("  prefix   {}", prefix.display()),
+        None => println!("  prefix   none (native executable)"),
+    }
+    println!("  command  {}", prepared.render());
+}
+
+/// Start the prepared launch and wait for the game to end.
+fn run_launch(game: &Game, prepared: &Prepared, parsed: &LaunchArgs) -> Result<Outcome> {
+    let log = parsed
+        .log
+        .clone()
+        .or_else(|| handoff::RunOptions::default_log_for(&game.id));
+    let options = handoff::RunOptions {
+        log_path: log.as_deref(),
+        grace: handoff::DEFAULT_GRACE,
+    };
+    let mut session = handoff::start(&prepared.spec, &options).with_context(|| {
+        format!(
+            "could not start {} (is umu-run installed?)",
+            prepared.spec.program.display()
+        )
+    })?;
+
+    if !parsed.json {
+        println!("Running {} (pid {})", game.title, session.pid());
+        if let Some(log) = session.log_path() {
+            println!("  log      {}", log.display());
+        }
+    }
+
+    let outcome = session.wait().context("lost the game process")?;
+    if !parsed.json {
+        println!("  {}", outcome.summary());
+    }
+    Ok(outcome)
+}
+
+/// Parsed `launch` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct LaunchArgs {
+    positional: Vec<String>,
+    exe: Option<PathBuf>,
+    title: Option<String>,
+    proton: Option<PathBuf>,
+    root: Option<PathBuf>,
+    profiles: Option<PathBuf>,
+    db: Option<PathBuf>,
+    log: Option<PathBuf>,
+    session: bool,
+    run: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_launch_args(args: &[String]) -> Result<LaunchArgs> {
+    let mut parsed = LaunchArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--session" => parsed.session = true,
+            "--run" => parsed.run = true,
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            "--exe" | "--title" | "--proton" | "--root" | "--profiles" | "--db" | "--log" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                apply_launch_flag(&mut parsed, arg, value)?;
+            }
+            _ if arg.starts_with("--exe=")
+                || arg.starts_with("--title=")
+                || arg.starts_with("--proton=")
+                || arg.starts_with("--root=")
+                || arg.starts_with("--profiles=")
+                || arg.starts_with("--db=")
+                || arg.starts_with("--log=") =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_launch_flag(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
+            other => bail!(
+                "unexpected argument `{other}` for `launch`\n\n{}",
+                launch_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn apply_launch_flag(parsed: &mut LaunchArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a value");
+    }
+    match flag {
+        "--exe" => parsed.exe = Some(PathBuf::from(value)),
+        "--title" => parsed.title = Some(value.to_string()),
+        "--proton" => parsed.proton = Some(PathBuf::from(value)),
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--profiles" => parsed.profiles = Some(PathBuf::from(value)),
+        "--db" => parsed.db = Some(PathBuf::from(value)),
+        "--log" => parsed.log = Some(PathBuf::from(value)),
+        other => bail!("internal error: unknown launch flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn launch_usage() -> String {
+    "USAGE:\n    pitagames-cli launch <store> <id> [options]\n\n\
+     Compose the umu/Proton hand-off for one non-Steam game and print the\n\
+     command it will exec. `--exe` builds a row without the database.\n\n\
+     OPTIONS:\n    \
+     --exe <path>        Use this executable (required when the cache has no row)\n    \
+     --title <title>     Title for a game the database does not know\n    \
+     --proton <path>     Proton build to use (default: best discovered build)\n    \
+     --root <dir>        Prefix root (default: $PITAGAMES_PREFIX_DIR or XDG)\n    \
+     --profiles <dir>    Read <dir>/<store>-<id>.json (default: XDG profiles dir)\n    \
+     --db <path>         Database to read the game row from\n    \
+     --session           PITAGAMES_SESSION=1: drop a gamescope wrapper\n    \
+     --run               Start the game and wait for it to end\n    \
+     --log <path>        Transcript for --run (default: <logs>/<store>-<id>-<ts>.log)\n    \
+     --json              Print the prepared launch as JSON\n    \
+     -h, --help          Show this help"
+        .to_string()
+}
+
+/// Show each CLI store's status, its updates, or sync its library.
 /// The store status rows and the unified update list.
 ///
 /// `stores` probes each CLI store without installing anything: is the program
@@ -5108,7 +5410,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -5891,6 +6193,165 @@ mod tests {
             ])
             .is_err(),
             "unknown store"
+        );
+    }
+
+    #[test]
+    fn parses_launch_arguments() {
+        let parsed = parse_launch_args(&[
+            "epic".to_string(),
+            "Gizmo".to_string(),
+            "--exe".to_string(),
+            "/games/Gizmo/Gizmo.exe".to_string(),
+            "--proton=/opt/proton-cachyos".to_string(),
+            "--root".to_string(),
+            "/data/prefixes".to_string(),
+            "--profiles=/data/profiles".to_string(),
+            "--db".to_string(),
+            "/data/pitagames.db".to_string(),
+            "--log".to_string(),
+            "/data/logs/run.log".to_string(),
+            "--session".to_string(),
+            "--run".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.positional, ["epic", "Gizmo"]);
+        assert_eq!(parsed.exe, Some(PathBuf::from("/games/Gizmo/Gizmo.exe")));
+        assert_eq!(parsed.proton, Some(PathBuf::from("/opt/proton-cachyos")));
+        assert_eq!(parsed.root, Some(PathBuf::from("/data/prefixes")));
+        assert_eq!(parsed.profiles, Some(PathBuf::from("/data/profiles")));
+        assert_eq!(parsed.db, Some(PathBuf::from("/data/pitagames.db")));
+        assert_eq!(parsed.log, Some(PathBuf::from("/data/logs/run.log")));
+        assert!(parsed.session && parsed.run && parsed.json && !parsed.help);
+
+        let error = parse_launch_args(&["--bogus".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected argument"), "{error}");
+
+        let error = parse_launch_args(&["--exe".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires a value"), "{error}");
+    }
+
+    /// A fake native game: a `#!/bin/sh` script, chmod-ed for exec.
+    fn fake_game(dir: &Path, name: &str, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    #[test]
+    fn launch_composes_a_native_game_without_running_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = fake_game(temp.path(), "game", "#!/bin/sh\nexit 0\n");
+        let profiles = temp.path().join("profiles");
+
+        // Printing is the whole point of the command; no game is started.
+        launch(&[
+            "local".to_string(),
+            "demo".to_string(),
+            "--exe".to_string(),
+            exe.display().to_string(),
+            "--title".to_string(),
+            "Demo".to_string(),
+            "--root".to_string(),
+            temp.path().display().to_string(),
+            "--profiles".to_string(),
+            profiles.display().to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn launch_runs_a_native_game_and_reports_the_exit_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let ok = fake_game(temp.path(), "ok", "#!/bin/sh\necho hi\nexit 0\n");
+        let log = temp.path().join("run.log");
+        let root = temp.path().display().to_string();
+        let profiles = temp.path().join("profiles").display().to_string();
+
+        launch(&[
+            "local".to_string(),
+            "ok".to_string(),
+            "--exe".to_string(),
+            ok.display().to_string(),
+            "--root".to_string(),
+            root.clone(),
+            "--profiles".to_string(),
+            profiles.clone(),
+            "--log".to_string(),
+            log.display().to_string(),
+            "--run".to_string(),
+        ])
+        .unwrap();
+        let transcript = std::fs::read_to_string(&log).unwrap();
+        assert!(transcript.contains("hi"), "{transcript:?}");
+
+        let bad = fake_game(temp.path(), "bad", "#!/bin/sh\nexit 3\n");
+        let error = launch(&[
+            "local".to_string(),
+            "bad".to_string(),
+            "--exe".to_string(),
+            bad.display().to_string(),
+            "--root".to_string(),
+            root,
+            "--profiles".to_string(),
+            profiles,
+            "--log".to_string(),
+            temp.path().join("bad.log").display().to_string(),
+            "--run".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("exited 3"), "{error}");
+    }
+
+    #[test]
+    fn launch_refuses_steam_and_a_windows_game_without_proton() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = fake_game(temp.path(), "game", "#!/bin/sh\nexit 0\n");
+        let root = temp.path().display().to_string();
+        let profiles = temp.path().join("profiles").display().to_string();
+
+        let steam = launch(&[
+            "steam".to_string(),
+            "620".to_string(),
+            "--exe".to_string(),
+            exe.display().to_string(),
+            "--root".to_string(),
+            root.clone(),
+            "--profiles".to_string(),
+            profiles.clone(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(steam.contains("Steam launches its own games"), "{steam}");
+
+        let windows = fake_game(temp.path(), "Gizmo.exe", "#!/bin/sh\nexit 0\n");
+        let error = launch(&[
+            "epic".to_string(),
+            "Gizmo".to_string(),
+            "--exe".to_string(),
+            windows.display().to_string(),
+            "--root".to_string(),
+            root,
+            "--profiles".to_string(),
+            profiles,
+        ])
+        .unwrap_err()
+        .to_string();
+        // macOS discovers no Proton; on Linux this depends on the host, so only
+        // require that it is refused before anything runs.
+        assert!(
+            error.contains("no Proton build") || error.contains("not on disk"),
+            "{error}"
         );
     }
 

@@ -56,6 +56,18 @@ pub async fn record_launch(db: &Db, id: &GameId, playtime: Duration) -> Result<(
         .map_err(|error| format!("could not record the launch of {}: {error}", id.store_id))
 }
 
+/// Record a finished session: playtime accumulates, `last_played` moves.
+///
+/// A store that counts playtime itself (Steam, through `localconfig.vdf`) may
+/// overrule this number on the next scan; a non-Steam game has no such counter,
+/// so the sum of its sessions is the only playtime it will ever have.
+pub async fn record_playtime(db: &Db, id: &GameId, playtime: Duration) -> Result<(), String> {
+    db.set_playtime(id, playtime, Some(OffsetDateTime::now_utc()))
+        .await
+        .map(|_| ())
+        .map_err(|error| format!("could not save playtime for {}: {error}", id.store_id))
+}
+
 /// Profiles belonging to one game, ordered case-insensitively by name.
 pub async fn profiles(db: &Db, id: &GameId) -> Result<Vec<StoredProfile>, String> {
     db.profiles(id)

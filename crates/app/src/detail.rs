@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
+use futures_channel::mpsc::UnboundedSender;
 
 use pitagames_core::{AntiCheat, GameId, Profile, ProtonRef};
 use pitagames_db::{Db, StoredProfile};
@@ -21,6 +22,7 @@ use crate::diagnostics::DiagnosticsEditor;
 use crate::format;
 use crate::library::{self, GameEntry};
 use crate::persist;
+use crate::play::{self, Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
 use crate::wrappers::WrapperEditor;
 
@@ -47,6 +49,10 @@ pub struct DetailProps {
     pub steam_root: Option<PathBuf>,
     /// Proton builds discovered on this machine.
     pub proton: Option<DiscoveryReport>,
+    /// The one running non-Steam game, so this page's Play button becomes a
+    /// state label while it runs.
+    pub play: Signal<Play>,
+    pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
 }
 
 /// The detail screen for one game.
@@ -247,11 +253,14 @@ pub fn Detail(props: DetailProps) -> Element {
     let name = new_name.read().clone();
     let error_text = error.read().clone();
     let can_play = entry.can_play();
-    // Steam is the only store whose launch path is wired so far: the CLI stores
-    // need the umu/Proton hand-off, so they show their install state instead.
+    // Steam launches through its own client; the other stores go through the
+    // umu/Proton hand-off, which needs the store listing's executable.
     let play_wired = entry.play_is_wired();
+    let play_blocked = entry.play_blocked();
+    let mut play_signal = props.play;
+    let play_events = props.play_events;
+    let playing = play_signal.read().label(&game_id);
     let is_steam = entry.is_steam();
-    let store_label = entry.store().as_str();
 
     // The selected profile, resolved from the live rows so the Runtime panel
     // edits exactly the profile the "active" badge marks.
@@ -361,11 +370,28 @@ pub fn Detail(props: DetailProps) -> Element {
                         "{status}"
                     }
                 }
-                if play_wired {
+                if let Some(label) = playing {
+                    span {
+                        style: "padding:8px 12px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:#b8dcc4;font-size:12px;",
+                        "{label}"
+                    }
+                } else if play_wired {
                     button {
                         disabled: !can_play,
                         onclick: move |_| {
                             error.set(String::new());
+                            if !is_steam {
+                                let Some(sender) = play_events.read().clone() else {
+                                    error.set("The launcher is still starting; try again in a moment.".to_string());
+                                    return;
+                                };
+                                if let Err(message) = play_signal.write().begin(&play_entry.game) {
+                                    error.set(message);
+                                    return;
+                                }
+                                play::spawn(play_entry.game.clone(), sender);
+                                return;
+                            }
                             let app_id = play_entry.app_id().to_string();
                             if let Err(launch_error) = library::spawn_steam(&app_id) {
                                 error.set(format!("Could not ask Steam to run appid {app_id}: {launch_error}"));
@@ -385,12 +411,12 @@ pub fn Detail(props: DetailProps) -> Element {
                         style: play_style(can_play),
                         "Play"
                     }
-                } else {
+                } else if let Some(reason) = play_blocked {
                     // A button that cannot launch is worse than a sentence that
                     // says so; the grid's Install action is the way forward here.
                     span {
                         style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:#78788a;font-size:12px;",
-                        "Launching {store_label} games is not wired up yet."
+                        "{reason}"
                     }
                 }
             }

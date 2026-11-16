@@ -7,14 +7,15 @@
 //! M1 ships [`proton`] discovery, the runtime subset of [`envc`], the
 //! [`compat`] database loader, [`anticheat`] detection with the injection gate,
 //! and the read-only [`logs`] reader. M2 adds [`disk`] (free space and bounded
-//! directory sizes) and [`prefix`] (the per-game Wine/Proton prefix layout for
-//! the non-Steam stores). GPU detection, the graphics env table and process
-//! supervision arrive in M3.
+//! directory sizes), [`prefix`] (the per-game Wine/Proton prefix layout for the
+//! non-Steam stores) and [`launch`] (the umu/Proton hand-off plus process
+//! supervision). GPU detection and the graphics env table arrive in M3.
 
 pub mod anticheat;
 pub mod compat;
 pub mod disk;
 pub mod envc;
+pub mod launch;
 pub mod logs;
 pub mod prefix;
 pub mod proton;
@@ -30,6 +31,10 @@ pub use compat::{
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
 pub use envc::{CompileRequest, CompiledRuntime, EnvcError, compile_runtime, shim_proton};
+pub use launch::{
+    DEFAULT_GRACE, Handoff, LaunchError, LaunchMode, Outcome, Prepared, RunOptions, Session,
+    UMU_RUN, prepare, start, terminate,
+};
 pub use logs::{LogFile, LogKind, TAIL_BYTES, Tail};
 pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{

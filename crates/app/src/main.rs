@@ -24,6 +24,7 @@ use time::OffsetDateTime;
 
 use downloads::{DownloadEvent, Downloads};
 use library::{Library, OWNED_METADATA_PER_RUN};
+use play::{Play, PlayEvent};
 use steam_account::Account;
 use store_installs::{InstallEvent, Installs};
 
@@ -42,6 +43,7 @@ mod icon;
 mod library;
 mod log_view;
 mod persist;
+mod play;
 mod runtime;
 mod steam_account;
 mod store_installs;
@@ -207,6 +209,10 @@ fn App() -> Element {
     // The CLI stores' install queue and the worker reports feeding it.
     let mut installs = use_signal(Installs::default);
     let mut install_events = use_signal(|| None::<UnboundedSender<InstallEvent>>);
+    // The one game the launcher is running (non-Steam) and its worker reports.
+    // Steam is started by its own client, so it never lands here.
+    let mut play = use_signal(Play::default);
+    let mut play_events = use_signal(|| None::<UnboundedSender<PlayEvent>>);
 
     // Activation: the socket thread forwards "focus" requests here, and this
     // future raises the window on the event-loop thread (tao window calls are
@@ -231,6 +237,10 @@ fn App() -> Element {
     // The CLI-store install queue's channel: one future owns the receiver, and
     // the grid holds a sender once the window is up.
     let install_channel = use_hook(store_installs::InstallChannel::new);
+
+    // The play slot's channel, same shape: the grid and the detail page hold a
+    // sender, one drain future below owns the receiver.
+    let play_channel = use_hook(play::PlayChannel::new);
 
     // Drive the install queue: fold each worker report in, flip the row a
     // finished install turned into a real directory, and hand the next queued
@@ -263,6 +273,60 @@ fn App() -> Element {
         }
     });
 
+    // A finished game writes its session into the row (playtime, last played)
+    // and moves the header strip from "playing" to its verdict. The write is
+    // SQLite, so it happens off the event loop.
+    let play_drain = play_channel.clone();
+    use_future(move || {
+        let channel = play_drain.clone();
+        async move {
+            while let Some(event) = channel.next().await {
+                play.write().apply(&event);
+                let PlayEvent::Finished {
+                    id,
+                    title,
+                    outcome: Ok(outcome),
+                } = event
+                else {
+                    continue;
+                };
+
+                // Playtime accumulates: a non-Steam game's number is the sum of
+                // its sessions, since no store counts it for us.
+                let now = OffsetDateTime::now_utc();
+                let total = {
+                    let mut guard = library_state.write();
+                    match guard.as_mut() {
+                        Some(library) => {
+                            let previous = library
+                                .games
+                                .iter()
+                                .find(|entry| entry.game.id == id)
+                                .map(|entry| entry.playtime())
+                                .unwrap_or_default();
+                            let total = previous + outcome.duration;
+                            let mut row = Game::new(id.clone(), title);
+                            row.playtime = total;
+                            row.last_played = Some(now);
+                            library.apply_stored(&[row]);
+                            total
+                        }
+                        None => outcome.duration,
+                    }
+                };
+
+                if let Some(db) = db_state.read().clone() {
+                    let id = id.clone();
+                    spawn(async move {
+                        if let Err(error) = persist::record_playtime(&db, &id, total).await {
+                            eprintln!("[pitagames] {error}");
+                        }
+                    });
+                }
+            }
+        }
+    });
+
     // The tray icon is optional: a missing status-notifier host costs the icon,
     // never the window. The menu handler is registered unconditionally because
     // hooks must not be conditional; without an icon it simply never fires.
@@ -288,8 +352,10 @@ fn App() -> Element {
     // events for the lifetime of the window. Scans are file IO only, so running
     // them here (once) is cheaper than a worker pool.
     let install_sender_channel = install_channel.clone();
+    let play_sender_channel = play_channel.clone();
     use_future(move || {
         let channel = install_sender_channel.clone();
+        let play_channel = play_sender_channel.clone();
         async move {
             let mut library = Library::load();
             let mut metadata_db = None;
@@ -376,6 +442,7 @@ fn App() -> Element {
             let (sender, mut receiver) = unbounded::<DownloadEvent>();
             events.set(Some(sender.clone()));
             install_events.set(Some(channel.sender()));
+            play_events.set(Some(play_channel.sender()));
 
             // Images for metadata that was already cached need no store request.
             let art_requests = library.art_requests();
@@ -503,6 +570,10 @@ fn App() -> Element {
         .as_ref()
         .map(|library| library.owned.clone())
         .unwrap_or_default();
+    // The one running game and the last verdict, for the strip under the nav.
+    let play_snapshot: Play = (*play.read()).clone();
+    let running_play = play_snapshot.running().cloned();
+    let last_play = play_snapshot.last().cloned();
 
     let subtitle = match snapshot.as_ref() {
         None => "Scanning…".to_string(),
@@ -548,6 +619,8 @@ fn App() -> Element {
             db: db_state,
             installs,
             install_events,
+            play,
+            play_events,
         }
     };
 
@@ -892,6 +965,47 @@ fn App() -> Element {
                 }
             }
 
+            if let Some(running) = running_play.clone() {
+                div {
+                    style: "display:flex;align-items:center;gap:12px;margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#1e2a24;color:#b8dcc4;font-size:12px;",
+                    span {
+                        style: "font-weight:600;",
+                        "Playing {running.title}"
+                    }
+                    if let Some(log) = running.log.clone() {
+                        span {
+                            style: "color:#6f8f7c;font-family:monospace;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                            "{log.display()}"
+                        }
+                    }
+                    button {
+                        onclick: move |_| {
+                            if !play.write().stop() {
+                                notice.set("The game has not started yet; give it a moment.".to_string());
+                            }
+                        },
+                        style: "margin-left:auto;padding:6px 14px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:#d8efe0;font-size:12px;cursor:pointer;",
+                        "Stop"
+                    }
+                }
+            } else if let Some(last) = last_play.clone() {
+                div {
+                    style: "display:flex;align-items:center;gap:12px;margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#1e1e28;color:#a8a8b8;font-size:12px;",
+                    span {
+                        style: "font-weight:600;color:#e8e8ee;",
+                        "{last.title}"
+                    }
+                    span { "{last.summary}" }
+                    button {
+                        onclick: move |_| {
+                            play.write().clear_last();
+                        },
+                        style: "margin-left:auto;padding:4px 10px;border-radius:8px;border:1px solid #2c2c38;background:#14141c;color:#78788a;font-size:11px;cursor:pointer;",
+                        "Dismiss"
+                    }
+                }
+            }
+
             if !notice.read().is_empty() {
                 div {
                     style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#3a1e1e;color:#e8a0a0;font-size:12px;",
@@ -911,6 +1025,8 @@ fn App() -> Element {
                             hero: hero_url,
                             steam_root: steam_root.clone(),
                             proton: proton_report.clone(),
+                            play,
+                            play_events,
                         }
                     }
                 }
@@ -971,6 +1087,10 @@ struct LibraryGridProps {
     /// state here, and its Install button enqueues into it.
     pub installs: Signal<Installs>,
     pub install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    /// The one running non-Steam game: its card shows `starting`/`playing`
+    /// instead of a Play button.
+    pub play: Signal<Play>,
+    pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
 }
 
 /// The windowed library grid.
@@ -996,6 +1116,8 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let db = props.db;
     let mut installs = props.installs;
     let install_events = props.install_events;
+    let mut play = props.play;
+    let play_events = props.play_events;
 
     let mut scroll_top = use_signal(|| 0.0f64);
     let mut viewport_width = use_signal(|| 0.0f64);
@@ -1146,10 +1268,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 let meta = entry.meta_line();
                                 let status = entry.status_label().unwrap_or_default();
                                 let can_play = entry.can_play();
-                                // Only Steam has a launch path so far; a CLI
-                                // store row shows its install state instead of a
-                                // button that would do nothing.
+                                // Steam launches through its own client; every
+                                // other store goes through the umu hand-off,
+                                // which needs the listing's executable.
                                 let show_play = entry.game.installed && entry.play_is_wired();
+                                let playing = play.read().label(&game_id);
                                 let can_install = entry.can_install();
                                 let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
                                     "Update"
@@ -1168,6 +1291,8 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 let play_id = app_id.clone();
                                 let play_db = db_handle.clone();
                                 let play_game_id = game_id.clone();
+                                let steam_play = entry.is_steam();
+                                let play_game = entry.game.clone();
                                 let install_id = app_id.clone();
                                 let install_game = game_id.clone();
                                 let install_title = title.clone();
@@ -1224,7 +1349,12 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                         div {
                                             style: "display:flex;gap:8px;margin-top:auto;padding-top:8px;",
 
-                                            if show_play {
+                                            if let Some(label) = playing {
+                                                span {
+                                                    style: "flex:1;align-self:center;font-size:11px;color:#8fd0a8;",
+                                                    "{label}"
+                                                }
+                                            } else if show_play {
                                                 button {
                                                     disabled: !can_play,
                                                 onclick: move |event| {
@@ -1234,18 +1364,32 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                     // Pointer clicks are M0-only; controller
                                                     // navigation through gilrs arrives in M2.5.
                                                     notice.set(String::new());
-                                                    if let Err(error) = library::spawn_steam(&play_id) {
-                                                        notice.set(format!("Could not ask Steam to run appid {play_id}: {error}"));
+                                                    if steam_play {
+                                                        if let Err(error) = library::spawn_steam(&play_id) {
+                                                            notice.set(format!("Could not ask Steam to run appid {play_id}: {error}"));
+                                                            return;
+                                                        }
+                                                        if let Some(db) = play_db.clone() {
+                                                            let id = play_game_id.clone();
+                                                            spawn(async move {
+                                                                if let Err(error) = persist::record_launch(&db, &id, playtime).await {
+                                                                    notice.set(error);
+                                                                }
+                                                            });
+                                                        }
                                                         return;
                                                     }
-                                                    if let Some(db) = play_db.clone() {
-                                                        let id = play_game_id.clone();
-                                                        spawn(async move {
-                                                            if let Err(error) = persist::record_launch(&db, &id, playtime).await {
-                                                                notice.set(error);
-                                                            }
-                                                        });
+                                                    // The hand-off owns the process: the worker
+                                                    // starts it and the header strip carries Stop.
+                                                    let Some(sender) = play_events.read().clone() else {
+                                                        notice.set("The launcher is still starting; try again in a moment.".to_string());
+                                                        return;
+                                                    };
+                                                    if let Err(error) = play.write().begin(&play_game) {
+                                                        notice.set(error);
+                                                        return;
                                                     }
+                                                    play::spawn(play_game.clone(), sender);
                                                 },
                                                     style: button_style(can_play, "#2e3a56", "#ffffff"),
                                                     "Play"

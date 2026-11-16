@@ -26,3 +26,6 @@ rustc-ice-*.txt
 # PitaGames / PitaLauncher
 /dist
 .DS_Store
+
+# Linux container build tree (mounted repo, CARGO_TARGET_DIR=/work/target-arch)
+/target-arch

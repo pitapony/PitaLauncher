@@ -48,12 +48,27 @@ impl GameEntry {
 
     /// Whether the Play button can actually start this game.
     ///
-    /// Steam goes through its own client (`steam://run/<appid>`). The CLI
-    /// stores install fine but need the umu/Proton hand-off to launch, which is
-    /// the next slice — so a non-Steam row shows its install state instead of a
-    /// button that would do nothing.
+    /// Steam goes through its own client (`steam://rungameid/<appid>`). The
+    /// other stores go through [`pitagames_platform::launch`] — the umu/Proton
+    /// hand-off — which needs the executable the store's listing named, so a
+    /// row no backend can point at (GOG and Amazon report none yet) keeps
+    /// showing its install state instead of a button that would do nothing.
     pub fn play_is_wired(&self) -> bool {
-        self.is_steam()
+        self.is_steam() || self.game.exe.is_some()
+    }
+
+    /// Why Play is unavailable, as the detail page's sentence.
+    ///
+    /// `None` means the row is wired; the button can still be disabled for a
+    /// transient reason (Steam busy, files missing) and says so itself.
+    pub fn play_blocked(&self) -> Option<&'static str> {
+        if !self.game.installed {
+            return Some("Not installed. Play appears once the store's files are on disk.");
+        }
+        if self.play_is_wired() {
+            return None;
+        }
+        Some("This store's backend reports no launch executable yet, so Play cannot start it.")
     }
 
     /// The store description and art URLs, when the cache has them.
