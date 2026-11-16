@@ -252,8 +252,13 @@ API, so it is copy for the store/detail UI (the next M2 item) rather than a
 backend verdict; nothing here guesses.
 
 `launch` is deliberately the plain call: nile picks wine or Bottles itself. The
-umu/Proton handoff, the prefix, `DXVK_HUD`, the shim profile and the wrapper chain
-are the later M2 "prefixes" item and replace this call.
+store status row and the library sync ship next, and the GUI install flow after
+them; the umu/Proton hand-off then learns a **second shape** for exactly this
+reason — a row whose backend names no executable is started by the store's own
+client (`stores::launch::client_spec` → `nile launch <id>`, supervised by
+`platform::launch` the same way a direct launch is). nile still owns the prefix
+and the Wine build, so the per-game prefix, `DXVK_HUD` and the shim profile apply
+only to the environment, not to nile's runtime choice. See `docs/m2-launch.md`.
 
 ## CLI surface
 
@@ -330,7 +335,10 @@ pure-crate test suite are clean on macOS and in `archlinux:latest`.
 - **No update / uninstall.** nile has `update` (an install alias) and
   `uninstall`; neither is exposed yet, and `list-updates --json` is not parsed.
 - **`nile launch` needs its own wine/Bottles setup.** No Proton handoff, no
-  wrapper chain, no `DXVK_HUD` — that is the prefix item.
+  wrapper chain, no `DXVK_HUD` — that is the prefix item. (The umu/Proton
+  hand-off later supervises `nile launch` as its **store-client shape**; nile
+  still picks the runtime, so this remains true of the runtime — see
+  `docs/m2-launch.md`.)
 - **Auth URLs can sit in a transcript** until redaction lands in M4.
 
 ## Deliberately not in this slice

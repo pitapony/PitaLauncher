@@ -199,9 +199,12 @@ Proton is needed. A native Linux GOG build is a later refinement.
 
 `gogdl launch` starts the game itself; without a resolved Wine binary it execs
 the game's exe directly, which only works for native Linux builds. The umu/Proton
-handoff, the prefix, `DXVK_HUD`, the shim profile and the wrapper chain are the
-later M2 "prefixes" item and replace this call — exactly like Epic's and Amazon's
-`launch` today.
+hand-off then learns a **second shape** for exactly this reason: because `gogdl`
+has no install listing and its rows therefore carry no executable, a GOG row is
+started by its own client (`stores::launch::client_spec` → `gogdl launch <dir>
+<id> --platform windows`), supervised by `platform::launch` the same way a direct
+launch is. `gogdl` still owns the Wine build, so the per-game prefix apply only
+to the environment, not to `gogdl`'s runtime choice. See `docs/m2-launch.md`.
 
 ## CLI surface
 
@@ -265,7 +268,9 @@ whole pure-crate test suite are clean on macOS (stores 175, cli 32) and in
   game is installed here". So `verify`/`launch` need `--dir` and installed state
   will come from the scan/DB, not this module.
 - **Windows platform only.** `--platform windows` is baked in; a native Linux
-  GOG build is not offered yet.
+  GOG build is not offered yet. A GOG row is playable now that the umu/Proton
+  hand-off composes `gogdl launch` as its **store-client shape**
+  (`docs/m2-launch.md`); the Play button no longer waits for an executable.
 - **`gogdl` needs Python** (`requests`); it is not a self-contained Arch package
   the way `lgogdownloader` is. The status line names both.
 - **No DLC selection, no update, no uninstall.** `--with-dlcs`/`--dlcs` and

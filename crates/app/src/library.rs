@@ -50,11 +50,13 @@ impl GameEntry {
     ///
     /// Steam goes through its own client (`steam://rungameid/<appid>`). The
     /// other stores go through [`pitagames_platform::launch`] — the umu/Proton
-    /// hand-off — which needs the executable the store's listing named, so a
-    /// row no backend can point at (GOG and Amazon report none yet) keeps
-    /// showing its install state instead of a button that would do nothing.
+    /// hand-off — which either needs the executable the store's listing named,
+    /// or, for a store whose client starts a game by id (GOG's `gogdl`, Amazon's
+    /// `nile`), composes the client's argv instead.
     pub fn play_is_wired(&self) -> bool {
-        self.is_steam() || self.game.exe.is_some()
+        self.is_steam()
+            || self.game.exe.is_some()
+            || (self.game.installed && pitagames_stores::launch::launches_by_id(self.store()))
     }
 
     /// Why Play is unavailable, as the detail page's sentence.
@@ -68,7 +70,7 @@ impl GameEntry {
         if self.play_is_wired() {
             return None;
         }
-        Some("This store's backend reports no launch executable yet, so Play cannot start it.")
+        Some("This row names no launch executable and its store has no client that launches one.")
     }
 
     /// The store description and art URLs, when the cache has them.
@@ -1017,7 +1019,10 @@ mod tests {
             .unwrap();
         assert_eq!(epic.phase, InstallPhase::NotInstalled);
         assert!(epic.can_install(), "a missing store game offers Install");
-        assert!(!epic.play_is_wired(), "the umu hand-off is a later slice");
+        assert!(
+            !epic.play_is_wired(),
+            "Epic launches through umu, which needs an executable"
+        );
         assert!(!epic.is_steam());
 
         let gog = library
@@ -1030,6 +1035,11 @@ mod tests {
             !gog.can_install(),
             "an installed store game has nothing to fetch"
         );
+        assert!(
+            gog.play_is_wired(),
+            "GOG's client launches the game by id, so Play works without an exe"
+        );
+        assert_eq!(gog.play_blocked(), None);
     }
 
     #[test]
@@ -1055,6 +1065,50 @@ mod tests {
         let mut library = Library::default();
         library.apply_store_rows(&[store_row(Store::Gog, "1207658930", "Game", true)]);
         assert_eq!(library.games[0].meta_line(), "gog · 1207658930");
+    }
+
+    #[test]
+    fn play_is_wired_per_store_shape() {
+        let with_exe = |store: Store, installed: bool, exe: Option<&str>| {
+            let mut entry = entry("x", "Game", InstallPhase::NotInstalled, installed);
+            entry.game.id = GameId::new(store, "x");
+            entry.game.exe = exe.map(PathBuf::from);
+            entry
+        };
+
+        assert!(
+            with_exe(Store::Steam, true, None).play_is_wired(),
+            "Steam launches its own games"
+        );
+        assert!(
+            with_exe(Store::Epic, true, Some("/games/epic/Gizmo.exe")).play_is_wired(),
+            "a row with an executable goes through the umu hand-off"
+        );
+        assert!(
+            with_exe(Store::Gog, true, None).play_is_wired(),
+            "GOG's client launches by id"
+        );
+        assert!(
+            with_exe(Store::Amazon, true, None).play_is_wired(),
+            "nile launches by id"
+        );
+
+        assert!(
+            !with_exe(Store::Epic, true, None).play_is_wired(),
+            "Epic needs the listing's executable"
+        );
+        assert!(
+            !with_exe(Store::Epic, false, None).play_is_wired(),
+            "an uninstalled row has nothing to launch"
+        );
+        assert!(
+            !with_exe(Store::Gog, false, None).play_is_wired(),
+            "an uninstalled GOG row has nothing to launch"
+        );
+
+        let blocked = with_exe(Store::Epic, true, None).play_blocked().unwrap();
+        assert!(blocked.contains("no launch executable"), "{blocked}");
+        assert_eq!(with_exe(Store::Gog, true, None).play_blocked(), None);
     }
 
     #[test]

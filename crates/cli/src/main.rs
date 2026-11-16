@@ -1061,7 +1061,8 @@ fn apply_import_flag(parsed: &mut ImportArgs, flag: &str, value: &str) -> Result
 /// Read-only: nothing is created, launched or deleted. Steam games keep their
 /// prefixes inside Steam; this is for Epic/Amazon/GOG and imports, and it is the
 /// diagnostic for the layout `platform::prefix` computes and the umu environment
-/// the launch hand-off will merge.
+/// the launch hand-off merges (only for a store that launches by an executable;
+/// a store client like `gogdl`/`nile` owns its own prefix).
 fn prefix(args: &[String]) -> Result<()> {
     let parsed = parse_prefix_args(args)?;
     if parsed.help {
@@ -2941,6 +2942,9 @@ fn plan_launch(parsed: &LaunchArgs) -> Result<(Game, Prepared)> {
         )?,
     };
     let runtime = read_runtime(&game_id, parsed.profiles.as_deref());
+    // A store whose client starts games by id (gogdl, nile) needs an argv
+    // instead of an executable; `prepare` supervises it exactly the same way.
+    let client = client_launch(&game, parsed)?;
 
     let prepared = handoff::prepare(&handoff::Handoff {
         game: &game,
@@ -2948,9 +2952,33 @@ fn plan_launch(parsed: &LaunchArgs) -> Result<(Game, Prepared)> {
         proton: proton.as_ref(),
         prefix_root: &root,
         session: parsed.session,
+        client: client.as_ref(),
     })?;
 
     Ok((game, prepared))
+}
+
+/// The store client's argv, for a row that names no executable.
+fn client_launch(game: &Game, parsed: &LaunchArgs) -> Result<Option<LaunchSpec>> {
+    if game.exe.is_some() || !pitagames_stores::launch::launches_by_id(game.id.store) {
+        return Ok(None);
+    }
+    let backends = launch_backends(parsed);
+    Ok(Some(pitagames_stores::launch::client_spec(
+        &backends, game,
+    )?))
+}
+
+/// The backends a client launch uses; `--client` replaces the program.
+fn launch_backends(parsed: &LaunchArgs) -> Backends {
+    match &parsed.client {
+        Some(program) => Backends {
+            epic: Epic::new(),
+            amazon: Amazon::with_program(program.clone()),
+            gog: Gog::with_program(program.clone()),
+        },
+        None => Backends::new(),
+    }
 }
 
 /// The game row: the store's own, or a synthetic one made from `--exe`.
@@ -2970,7 +2998,12 @@ fn load_launch_game(id: &GameId, parsed: &LaunchArgs) -> Result<Game> {
             game.installed = true;
             Ok(game)
         }
-        (Some(game), None) => Ok(game),
+        (Some(mut game), None) => {
+            if let Some(dir) = parsed.dir.clone() {
+                game.install_dir = Some(dir);
+            }
+            Ok(game)
+        }
         (None, Some(exe)) => {
             let mut game = Game::new(
                 id.clone(),
@@ -2978,6 +3011,19 @@ fn load_launch_game(id: &GameId, parsed: &LaunchArgs) -> Result<Game> {
             );
             game.installed = true;
             game.exe = Some(exe);
+            Ok(game)
+        }
+        // A store that launches by id names no executable, so `--dir` and
+        // `--title` are enough to describe an install without a cache row.
+        (None, None)
+            if pitagames_stores::launch::launches_by_id(id.store) && parsed.dir.is_some() =>
+        {
+            let mut game = Game::new(
+                id.clone(),
+                parsed.title.clone().unwrap_or_else(|| id.store_id.clone()),
+            );
+            game.installed = true;
+            game.install_dir = parsed.dir.clone();
             Ok(game)
         }
         (None, None) => bail!(
@@ -3047,6 +3093,9 @@ fn print_launch(game: &Game, prepared: &Prepared) {
     );
     match &prepared.prefix {
         Some(prefix) => println!("  prefix   {}", prefix.display()),
+        None if prepared.mode == handoff::LaunchMode::StoreClient => {
+            println!("  prefix   none (the store's client owns its runtime)");
+        }
         None => println!("  prefix   none (native executable)"),
     }
     println!("  command  {}", prepared.render());
@@ -3063,8 +3112,13 @@ fn run_launch(game: &Game, prepared: &Prepared, parsed: &LaunchArgs) -> Result<O
         grace: handoff::DEFAULT_GRACE,
     };
     let mut session = handoff::start(&prepared.spec, &options).with_context(|| {
+        let hint = if prepared.mode == handoff::LaunchMode::StoreClient {
+            "is the store's CLI installed?"
+        } else {
+            "is umu-run installed?"
+        };
         format!(
-            "could not start {} (is umu-run installed?)",
+            "could not start {}; {hint}",
             prepared.spec.program.display()
         )
     })?;
@@ -3089,6 +3143,8 @@ struct LaunchArgs {
     positional: Vec<String>,
     exe: Option<PathBuf>,
     title: Option<String>,
+    dir: Option<PathBuf>,
+    client: Option<String>,
     proton: Option<PathBuf>,
     root: Option<PathBuf>,
     profiles: Option<PathBuf>,
@@ -3111,7 +3167,8 @@ fn parse_launch_args(args: &[String]) -> Result<LaunchArgs> {
             "--run" => parsed.run = true,
             "--json" => parsed.json = true,
             "-h" | "--help" => parsed.help = true,
-            "--exe" | "--title" | "--proton" | "--root" | "--profiles" | "--db" | "--log" => {
+            "--exe" | "--title" | "--dir" | "--client" | "--proton" | "--root" | "--profiles"
+            | "--db" | "--log" => {
                 index += 1;
                 let value = args
                     .get(index)
@@ -3120,6 +3177,8 @@ fn parse_launch_args(args: &[String]) -> Result<LaunchArgs> {
             }
             _ if arg.starts_with("--exe=")
                 || arg.starts_with("--title=")
+                || arg.starts_with("--dir=")
+                || arg.starts_with("--client=")
                 || arg.starts_with("--proton=")
                 || arg.starts_with("--root=")
                 || arg.starts_with("--profiles=")
@@ -3150,6 +3209,8 @@ fn apply_launch_flag(parsed: &mut LaunchArgs, flag: &str, value: &str) -> Result
     match flag {
         "--exe" => parsed.exe = Some(PathBuf::from(value)),
         "--title" => parsed.title = Some(value.to_string()),
+        "--dir" => parsed.dir = Some(PathBuf::from(value)),
+        "--client" => parsed.client = Some(value.to_string()),
         "--proton" => parsed.proton = Some(PathBuf::from(value)),
         "--root" => parsed.root = Some(PathBuf::from(value)),
         "--profiles" => parsed.profiles = Some(PathBuf::from(value)),
@@ -3163,10 +3224,13 @@ fn apply_launch_flag(parsed: &mut LaunchArgs, flag: &str, value: &str) -> Result
 fn launch_usage() -> String {
     "USAGE:\n    pitagames-cli launch <store> <id> [options]\n\n\
      Compose the umu/Proton hand-off for one non-Steam game and print the\n\
-     command it will exec. `--exe` builds a row without the database.\n\n\
+     command it will exec. `--exe` builds a row without the database; a store\n\
+     that launches by id (gog, amazon) uses its own client instead.\n\n\
      OPTIONS:\n    \
      --exe <path>        Use this executable (required when the cache has no row)\n    \
      --title <title>     Title for a game the database does not know\n    \
+     --dir <path>        Install directory (gog's client launch needs one)\n    \
+     --client <program>  Override the store client that launches by id\n    \
      --proton <path>     Proton build to use (default: best discovered build)\n    \
      --root <dir>        Prefix root (default: $PITAGAMES_PREFIX_DIR or XDG)\n    \
      --profiles <dir>    Read <dir>/<store>-<id>.json (default: XDG profiles dir)\n    \
@@ -6203,6 +6267,9 @@ mod tests {
             "Gizmo".to_string(),
             "--exe".to_string(),
             "/games/Gizmo/Gizmo.exe".to_string(),
+            "--dir".to_string(),
+            "/games/Gizmo".to_string(),
+            "--client=gogdl".to_string(),
             "--proton=/opt/proton-cachyos".to_string(),
             "--root".to_string(),
             "/data/prefixes".to_string(),
@@ -6219,6 +6286,8 @@ mod tests {
 
         assert_eq!(parsed.positional, ["epic", "Gizmo"]);
         assert_eq!(parsed.exe, Some(PathBuf::from("/games/Gizmo/Gizmo.exe")));
+        assert_eq!(parsed.dir, Some(PathBuf::from("/games/Gizmo")));
+        assert_eq!(parsed.client, Some("gogdl".to_string()));
         assert_eq!(parsed.proton, Some(PathBuf::from("/opt/proton-cachyos")));
         assert_eq!(parsed.root, Some(PathBuf::from("/data/prefixes")));
         assert_eq!(parsed.profiles, Some(PathBuf::from("/data/profiles")));
@@ -6353,6 +6422,147 @@ mod tests {
             error.contains("no Proton build") || error.contains("not on disk"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn launch_composes_a_gog_client_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let program = fake_game(temp.path(), "gogdl", "#!/bin/sh\nexit 0\n");
+        let game_dir = temp.path().join("GOG Game");
+        std::fs::create_dir_all(&game_dir).unwrap();
+        let profiles = temp.path().join("profiles");
+        let root = temp.path().display().to_string();
+
+        let args = |json: bool| {
+            let mut args = vec![
+                "gog".to_string(),
+                "1207658930".to_string(),
+                "--title".to_string(),
+                "GOG Game".to_string(),
+                "--dir".to_string(),
+                game_dir.display().to_string(),
+                "--client".to_string(),
+                program.display().to_string(),
+                "--root".to_string(),
+                root.clone(),
+                "--profiles".to_string(),
+                profiles.display().to_string(),
+            ];
+            if json {
+                args.push("--json".to_string());
+            }
+            args
+        };
+
+        let parsed = parse_launch_args(&args(false)).unwrap();
+        let (game, prepared) = plan_launch(&parsed).unwrap();
+
+        assert_eq!(game.title, "GOG Game");
+        assert!(game.installed);
+        assert_eq!(prepared.mode, handoff::LaunchMode::StoreClient);
+        assert_eq!(prepared.spec.program, program);
+        assert!(
+            prepared.prefix.is_none(),
+            "the store client owns its own runtime"
+        );
+        let launch_at = prepared
+            .spec
+            .args
+            .iter()
+            .position(|arg| arg == "launch")
+            .expect("gogdl launch");
+        assert_eq!(
+            prepared.spec.args[launch_at + 1],
+            game_dir.to_string_lossy()
+        );
+        assert_eq!(prepared.spec.args[launch_at + 2], "1207658930");
+
+        // The whole command renders without starting anything.
+        launch(&args(true)).unwrap();
+    }
+
+    #[test]
+    fn launch_composes_an_amazon_client_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("Amazon Game");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let parsed = parse_launch_args(&[
+            "amazon".to_string(),
+            "amzn1.example".to_string(),
+            "--dir".to_string(),
+            dir.display().to_string(),
+            "--client=nile".to_string(),
+            "--root".to_string(),
+            temp.path().display().to_string(),
+            "--profiles".to_string(),
+            temp.path().join("profiles").display().to_string(),
+        ])
+        .unwrap();
+        let (game, prepared) = plan_launch(&parsed).unwrap();
+
+        assert!(game.installed);
+        assert_eq!(prepared.mode, handoff::LaunchMode::StoreClient);
+        assert_eq!(
+            prepared.spec.program,
+            PathBuf::from("nile"),
+            "--client replaced the program"
+        );
+        assert_eq!(
+            prepared.spec.args,
+            vec!["launch".to_string(), "amzn1.example".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_gog_row_without_a_directory_has_nothing_to_compose() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = launch(&[
+            "gog".to_string(),
+            "1207658930".to_string(),
+            "--root".to_string(),
+            temp.path().display().to_string(),
+            "--profiles".to_string(),
+            temp.path().join("profiles").display().to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("no gog row"), "{error}");
+    }
+
+    #[test]
+    fn launch_runs_a_store_client_and_reports_the_exit_code() {
+        let temp = tempfile::tempdir().unwrap();
+        let marker = temp.path().join("launched");
+        let program = fake_game(
+            temp.path(),
+            "gogdl",
+            &format!("#!/bin/sh\ntouch '{}'\nexit 7\n", marker.display()),
+        );
+        let dir = temp.path().join("GOG Game");
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = temp.path().join("run.log");
+
+        let error = launch(&[
+            "gog".to_string(),
+            "1207658930".to_string(),
+            "--dir".to_string(),
+            dir.display().to_string(),
+            "--client".to_string(),
+            program.display().to_string(),
+            "--root".to_string(),
+            temp.path().display().to_string(),
+            "--profiles".to_string(),
+            temp.path().join("profiles").display().to_string(),
+            "--log".to_string(),
+            log.display().to_string(),
+            "--run".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+
+        assert!(marker.is_file(), "the store client actually ran: {error}");
+        assert!(error.contains("exited 7"), "{error}");
     }
 
     #[test]

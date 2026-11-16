@@ -592,7 +592,7 @@ pub fn Detail(props: DetailProps) -> Element {
             } else {
                 div {
                     style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;line-height:1.5;",
-                    "Per-game runtime settings (the Proton build, the wrapper chain and the diagnostics toggles) arrive with the umu/Proton hand-off that will launch this store's games."
+                    "Per-game runtime settings (the Proton build, the wrapper chain and the diagnostics toggles) are still Steam-only. This game launches with the profile file the hand-off reads, which only the CLI writes today."
                 }
             }
 

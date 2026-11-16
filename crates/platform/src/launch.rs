@@ -7,9 +7,20 @@
 //! and what argv. That is [`prepare`]:
 //!
 //! ```text
-//! Windows game   umu-run <exe>   GAMEID/PROTONPATH/WINEPREFIX/STORE
-//! native game    <exe>           the diagnostic environment only
+//! Windows game   umu-run <exe>          GAMEID/PROTONPATH/WINEPREFIX/STORE
+//! native game    <exe>                  the diagnostic environment only
+//! store client   gogdl launch …/nile …  the profile env minus umu's keys
 //! ```
+//!
+//! The third shape exists because two backends cannot name an executable at all
+//! — `nile` has none in its listing and `gogdl` has no install listing — so
+//! their clients start the game by id. The argv for that shape is not composed
+//! here: `stores` owns the templates and hands in a plain [`LaunchSpec`] through
+//! [`Handoff::client`], while this module keeps the supervision identical to a
+//! direct launch. A store client owns its own runtime and prefix, which is why
+//! that shape carries no Proton and no `WINEPREFIX`; the wrapper chain and the
+//! profile's environment still apply, because they are the launcher's
+//! transparency promise either way.
 //!
 //! The environment is the compiled [`ShimProfile`] (the file
 //! `pitagames-shim` reads for a Steam game) plus the umu values the per-game
@@ -62,6 +73,9 @@ pub enum LaunchMode {
     Umu,
     /// A native Linux executable, run directly with the wrapper chain.
     Native,
+    /// The store's own client starts the game by id (`gogdl launch`,
+    /// `nile launch`), because its listing names no executable.
+    StoreClient,
 }
 
 impl LaunchMode {
@@ -70,7 +84,14 @@ impl LaunchMode {
         match self {
             Self::Umu => "umu",
             Self::Native => "native",
+            Self::StoreClient => "client",
         }
+    }
+
+    /// Whether the launcher owns the prefix (the store client owns its own).
+    #[must_use]
+    pub const fn uses_prefix(self) -> bool {
+        matches!(self, Self::Umu)
     }
 }
 
@@ -89,6 +110,11 @@ pub struct Handoff<'a> {
     /// `PITAGAMES_SESSION=1`: the console session already owns a compositor, so
     /// a gamescope wrapper in the profile is dropped.
     pub session: bool,
+    /// How the store's own client starts a game whose row names no executable
+    /// (`gogdl launch <dir> <id>`, `nile launch <id>`). Ignored when the row has
+    /// one; [`prepare`] composes no argv of its own here, it only prepends the
+    /// wrapper chain and applies the profile.
+    pub client: Option<&'a LaunchSpec>,
 }
 
 /// One launch, composed and ready to exec.
@@ -97,7 +123,7 @@ pub struct Prepared {
     pub mode: LaunchMode,
     /// The argv-only launch artifact shared with the GUI's transparency panel.
     pub spec: LaunchSpec,
-    /// The per-game Wine prefix; `None` for a native launch.
+    /// The per-game Wine prefix; `None` for a native or store-client launch.
     pub prefix: Option<PathBuf>,
     /// The umu/app key (`<store>-<id>`), which is also the `GAMEID`.
     pub game_key: String,
@@ -150,6 +176,10 @@ pub enum LaunchError {
 /// store's listing named is still there, because a repaired or moved install is
 /// the most common reason a launch fails, and "umu-run: no such file" is a much
 /// worse error than naming the path.
+///
+/// A row with no executable is not necessarily a refusal: when the caller
+/// supplies a [`Handoff::client`] spec, the store's own client starts the game
+/// by id instead. A row with neither is [`LaunchError::NoExecutable`].
 pub fn prepare(handoff: &Handoff<'_>) -> Result<Prepared, LaunchError> {
     let game = handoff.game;
     if game.id.store == Store::Steam {
@@ -160,15 +190,6 @@ pub fn prepare(handoff: &Handoff<'_>) -> Result<Prepared, LaunchError> {
             title: game.title.clone(),
         });
     }
-    let exe = game.exe.as_ref().ok_or_else(|| LaunchError::NoExecutable {
-        title: game.title.clone(),
-    })?;
-    if !exe.is_file() {
-        return Err(LaunchError::MissingExecutable {
-            title: game.title.clone(),
-            path: exe.clone(),
-        });
-    }
 
     let runtime_env: Vec<(String, String)> = handoff
         .runtime
@@ -176,38 +197,75 @@ pub fn prepare(handoff: &Handoff<'_>) -> Result<Prepared, LaunchError> {
         .unwrap_or_default();
     let wrappers = runtime_wrappers(handoff);
 
-    let (mode, program, args, env, prefix_dir) = if is_windows(exe, game) {
-        let proton = handoff.proton.ok_or_else(|| LaunchError::NoProton {
-            title: game.title.clone(),
-        })?;
-        let prefix_dir = prefix::dir_in(handoff.prefix_root, &game.id);
-
-        // The profile's environment goes first and the umu values last: the
-        // prefix and the runtime are the launcher's own, so a stale profile key
-        // cannot point two games at one prefix.
-        let mut env = runtime_env;
-        for (key, value) in prefix::umu_env(&game.id, &proton.path, &prefix_dir) {
-            push_env(&mut env, &key, &value);
+    let (mode, program, args, env, cwd, prefix_dir) = if let Some(exe) = &game.exe {
+        if !exe.is_file() {
+            return Err(LaunchError::MissingExecutable {
+                title: game.title.clone(),
+                path: exe.clone(),
+            });
         }
-        push_env(&mut env, "STORE", store_env(game.id.store));
+        if is_windows(exe, game) {
+            let proton = handoff.proton.ok_or_else(|| LaunchError::NoProton {
+                title: game.title.clone(),
+            })?;
+            let prefix_dir = prefix::dir_in(handoff.prefix_root, &game.id);
 
-        let program = UMU_RUN.to_string();
-        let args = vec![exe.display().to_string()];
-        (LaunchMode::Umu, program, args, env, Some(prefix_dir))
+            // The profile's environment goes first and the umu values last: the
+            // prefix and the runtime are the launcher's own, so a stale profile
+            // key cannot point two games at one prefix.
+            let mut env = runtime_env;
+            for (key, value) in prefix::umu_env(&game.id, &proton.path, &prefix_dir) {
+                push_env(&mut env, &key, &value);
+            }
+            push_env(&mut env, "STORE", store_env(game.id.store));
+
+            let program = UMU_RUN.to_string();
+            let args = vec![exe.display().to_string()];
+            (
+                LaunchMode::Umu,
+                program,
+                args,
+                env,
+                game.install_dir.clone(),
+                Some(prefix_dir),
+            )
+        } else {
+            // A native Linux game needs no Proton and no prefix: the exe runs
+            // as it is, with the wrapper chain in front of it.
+            let program = exe.display().to_string();
+            (
+                LaunchMode::Native,
+                program,
+                Vec::new(),
+                runtime_env,
+                game.install_dir.clone(),
+                None,
+            )
+        }
+    } else if let Some(client) = handoff.client {
+        // The store's client owns the runtime and the prefix (`gogdl` picks
+        // its own Wine, `nile` its own Bottles/wine), so no umu variable is
+        // added here. The profile still applies: it is the launcher's promise
+        // that a preview and a launch cannot disagree.
+        (
+            LaunchMode::StoreClient,
+            client.program.to_string_lossy().into_owned(),
+            client.args.clone(),
+            runtime_env,
+            client.cwd.clone().or_else(|| game.install_dir.clone()),
+            None,
+        )
     } else {
-        // A native Linux game needs no Proton and no prefix: the exe runs as it
-        // is, with the wrapper chain in front of it.
-        let program = exe.display().to_string();
-        (LaunchMode::Native, program, Vec::new(), runtime_env, None)
+        return Err(LaunchError::NoExecutable {
+            title: game.title.clone(),
+        });
     };
 
     let (program, args) = flatten_wrappers(&wrappers, &program, &args);
     let spec = LaunchSpec {
         program: PathBuf::from(program),
         args,
-        // A native game usually resolves its assets relative to its own folder;
-        // umu does not care, so this only helps the direct case.
-        cwd: game.install_dir.clone(),
+        cwd,
         env,
     };
 
@@ -567,6 +625,7 @@ mod tests {
             proton,
             prefix_root: root,
             session: false,
+            client: None,
         }
     }
 
@@ -710,6 +769,93 @@ mod tests {
         for key in ["PROTONPATH", "WINEPREFIX", "STORE"] {
             assert_eq!(env.get(key), None, "{key} is umu-only");
         }
+    }
+
+    #[test]
+    fn a_store_client_starts_a_row_with_no_executable() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("Gog Game");
+        fs::create_dir_all(&install).unwrap();
+        let mut game = game(Store::Gog, "1207658930", None);
+        game.install_dir = Some(install.clone());
+        let profile = runtime(game.id.clone());
+        let client = LaunchSpec {
+            program: PathBuf::from("gogdl"),
+            args: vec![
+                "launch".to_string(),
+                install.display().to_string(),
+                "1207658930".to_string(),
+                "--platform".to_string(),
+                "windows".to_string(),
+            ],
+            cwd: None,
+            env: Vec::new(),
+        };
+        let mut request = handoff(&game, Some(&profile), None, temp.path());
+        request.client = Some(&client);
+
+        let prepared = prepare(&request).unwrap();
+
+        assert_eq!(prepared.mode, LaunchMode::StoreClient);
+        assert_eq!(prepared.spec.program, PathBuf::from("gogdl"));
+        assert_eq!(prepared.spec.args, client.args);
+        assert_eq!(
+            prepared.prefix, None,
+            "the store client owns its own runtime and prefix"
+        );
+        assert_eq!(
+            prepared.spec.cwd.as_deref(),
+            Some(install.as_path()),
+            "the row's install directory is the working directory"
+        );
+        let env = prepared.env_map();
+        assert_eq!(
+            env.get("DXVK_HUD"),
+            Some(&"fps"),
+            "the profile still applies"
+        );
+        for key in ["PROTONPATH", "WINEPREFIX", "STORE", "GAMEID"] {
+            assert_eq!(env.get(key), None, "{key} is umu-only");
+        }
+    }
+
+    #[test]
+    fn the_client_specs_own_cwd_wins_and_wrappers_still_flatten() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("Gog Game");
+        fs::create_dir_all(&install).unwrap();
+        let mut game = game(Store::Gog, "1207658930", None);
+        game.install_dir = Some(install.clone());
+        let client = LaunchSpec {
+            program: PathBuf::from("/usr/bin/gogdl"),
+            args: vec!["launch".to_string(), "1207658930".to_string()],
+            cwd: Some(temp.path().to_path_buf()),
+            env: Vec::new(),
+        };
+        let mut profile = runtime(game.id.clone());
+        profile.wrappers = vec![WrapperStep {
+            program: PathBuf::from("gamescope"),
+            args: vec!["--".to_string()],
+        }];
+        let mut request = handoff(&game, Some(&profile), None, temp.path());
+        request.client = Some(&client);
+
+        let prepared = prepare(&request).unwrap();
+        assert_eq!(prepared.spec.program, PathBuf::from("gamescope"));
+        assert_eq!(
+            prepared.spec.args,
+            vec![
+                "--".to_string(),
+                "/usr/bin/gogdl".to_string(),
+                "launch".to_string(),
+                "1207658930".to_string(),
+            ]
+        );
+        assert_eq!(
+            prepared.spec.cwd.as_deref(),
+            Some(temp.path()),
+            "an explicit client cwd beats the install directory"
+        );
     }
 
     #[test]

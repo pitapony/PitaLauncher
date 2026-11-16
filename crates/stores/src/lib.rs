@@ -13,8 +13,9 @@
 //! serial install queue those backends share, with the disk-space pre-check,
 //! [`sync`] folds the two listings each backend can answer into one round of
 //! `Game` rows and merges them over the cache without deleting anything a failed
-//! listing could not vouch for, and [`installer`] turns a queued job into the
-//! backend run that fills its directory.
+//! listing could not vouch for, [`installer`] turns a queued job into the
+//! backend run that fills its directory, and [`launch`] composes the argv for
+//! the two backends whose client starts a game by id (`gogdl`, `nile`).
 
 use std::path::PathBuf;
 
@@ -27,6 +28,7 @@ pub mod gog;
 pub mod import;
 pub mod install;
 pub mod installer;
+pub mod launch;
 pub mod localconfig;
 pub mod queue;
 pub mod report;
@@ -50,6 +52,7 @@ pub use gog::{Gog, GogAccount, GogError};
 pub use import::{ImportReport, Importer, Origin, SourceReport};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
 pub use installer::{InstallPlan, InstallRun, InstallerError};
+pub use launch::{ClientLaunchError, client_spec, launches_by_id};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use queue::{InstallJob, InstallQueue, JobProgress, JobState, QueueError, StartOutcome};
 pub use report::{LogFormat, LogLine, RunFailure, RunReport};

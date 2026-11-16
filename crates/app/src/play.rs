@@ -23,8 +23,9 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::{Game, GameId, ProtonRef, ShimProfile};
-use pitagames_platform::launch::{self as handoff, DEFAULT_GRACE, Outcome, RunOptions};
+use pitagames_platform::launch::{self as handoff, DEFAULT_GRACE, LaunchMode, Outcome, RunOptions};
 use pitagames_platform::proton::{DiscoveryReport, ProtonInstall, ProtonSource};
+use pitagames_stores::sync::Backends;
 
 use crate::runtime;
 
@@ -242,6 +243,10 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
     };
     let root = pitagames_platform::prefix::default_root()
         .ok_or_else(|| "no data directory (HOME is unset)".to_string())?;
+    // A store whose client starts games by id (gogdl, nile) names no
+    // executable, so its argv is composed here and the hand-off only
+    // supervises it.
+    let client = client_launch(game)?;
 
     let prepared = handoff::prepare(&handoff::Handoff {
         game,
@@ -249,6 +254,7 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
         proton: proton.as_ref(),
         prefix_root: &root,
         session: runtime::session_mode(),
+        client: client.as_ref(),
     })
     .map_err(|error| error.to_string())?;
 
@@ -258,8 +264,15 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
         grace: DEFAULT_GRACE,
     };
     let mut session = handoff::start(&prepared.spec, &options).map_err(|error| {
+        // The two shapes fail on different missing programs: a Windows build
+        // wants `umu-run`, a store client wants its own CLI on PATH.
+        let hint = if prepared.mode == LaunchMode::StoreClient {
+            "is the store's CLI installed?"
+        } else {
+            "is umu-run installed?"
+        };
         format!(
-            "could not start {} ({error}); is umu-run installed?",
+            "could not start {} ({error}); {hint}",
             prepared.spec.program.display()
         )
     })?;
@@ -271,6 +284,22 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
     });
 
     session.wait().map_err(|error| error.to_string())
+}
+
+/// The store client's argv, when this row launches by id instead of by path.
+///
+/// `None` for every other row, which keeps the umu/native hand-off untouched.
+/// A template failure (GOG's `gogdl` needs the install directory) is returned
+/// as the launch's own error, because it is exactly the case a Play button
+/// cannot retry around.
+fn client_launch(game: &Game) -> Result<Option<pitagames_core::LaunchSpec>, String> {
+    if game.exe.is_some() || !pitagames_stores::launch::launches_by_id(game.id.store) {
+        return Ok(None);
+    }
+    let backends = Backends::new();
+    pitagames_stores::launch::client_spec(&backends, game)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// The compiled profile the hand-off should apply, if one was written.
@@ -462,5 +491,46 @@ mod tests {
             Some("starting"),
             "the worker still owns the game"
         );
+    }
+
+    #[test]
+    fn a_store_that_launches_by_id_gets_a_client_spec() {
+        let mut gog = Game::new(GameId::new(Store::Gog, "1207658930"), "GOG Game");
+        gog.installed = true;
+        gog.install_dir = Some(PathBuf::from("/games/gog/GOG Game"));
+
+        let spec = client_launch(&gog).unwrap().expect("gogdl composes a spec");
+        assert_eq!(spec.program, PathBuf::from("gogdl"));
+        assert!(spec.args.contains(&"launch".to_string()), "{:?}", spec.args);
+        assert_eq!(spec.cwd.as_deref(), Some(Path::new("/games/gog/GOG Game")));
+    }
+
+    #[test]
+    fn client_launch_is_only_for_a_store_without_an_executable() {
+        let mut epic = game("Gizmo");
+        epic.exe = Some(PathBuf::from("/games/Gizmo/Gizmo.exe"));
+        assert!(client_launch(&epic).unwrap().is_none());
+
+        assert!(
+            client_launch(&game("Gizmo")).unwrap().is_none(),
+            "Epic launches through umu, not its client"
+        );
+
+        let mut gog = Game::new(GameId::new(Store::Gog, "1234"), "GOG Game");
+        gog.installed = true;
+        gog.exe = Some(PathBuf::from("/games/gog/game.exe"));
+        assert!(
+            client_launch(&gog).unwrap().is_none(),
+            "a row with an executable goes through the hand-off directly"
+        );
+    }
+
+    #[test]
+    fn a_gog_row_without_a_directory_reports_the_template_error() {
+        let mut gog = Game::new(GameId::new(Store::Gog, "1234"), "GOG Game");
+        gog.installed = true;
+
+        let error = client_launch(&gog).unwrap_err();
+        assert!(error.contains("dir"), "{error}");
     }
 }
