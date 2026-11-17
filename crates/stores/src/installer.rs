@@ -27,13 +27,22 @@
 //! exit `0` *and* no `ERROR`/`CRITICAL`/`FATAL` line. legendary and nile both log
 //! an error and exit `0` for some refusals, and gogdl exits non-zero — one rule
 //! covers all three, and the CLI's own summary line is not trusted.
+//!
+//! **A run is cancellable from another thread.** `run` spawns the CLI itself
+//! instead of calling a backend's blocking `stream`, so it can register the
+//! [`CliHandle`] with an [`InstallControl`] the UI holds: Cancel calls
+//! `control.cancel()`, the driver signals the process group and the run ends
+//! with [`InstallRun::cancelled`] set. The handle's two-lock poll is what makes
+//! that call reach a worker blocked on a silent CLI.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use pitagames_core::{GameId, Store};
 
 use crate::amazon;
-use crate::cli::{CliCommand, CliOptions, ProgressEvent};
+use crate::cli::{CliCommand, CliError, CliHandle, CliOptions, CliOutcome, ProgressEvent};
 use crate::epic;
 use crate::gog;
 use crate::queue::{InstallJob, JobProgress};
@@ -79,15 +88,100 @@ pub enum InstallerError {
     NoDataDir,
 }
 
-/// What a successful run did, for the Downloads row.
+/// What a finished run did, for the Downloads row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallRun {
     /// The program that ran.
     pub program: &'static str,
-    /// The directory the store filled.
+    /// The directory the store filled (or would have).
     pub target: PathBuf,
     /// The raw transcript of the run, when logging was on.
     pub transcript: Option<PathBuf>,
+    /// The user stopped the run before it finished.
+    ///
+    /// A cancelled run is not a failure: the CLI was killed on request, so the
+    /// queue row says `cancelled` rather than quoting the driver's exit code.
+    /// Whatever the store had already written to `target` stays.
+    pub cancelled: bool,
+}
+
+/// The other thread's end of a running install.
+///
+/// Created by the UI before the worker starts, cloned into it, and kept so a
+/// Cancel button can reach the [`CliHandle`] the worker owns. Cancelling is
+/// idempotent and safe at any time: before [`run`] spawns anything it only sets
+/// the flag (so no process starts), and once the handle is registered it also
+/// signals the CLI's process group.
+#[derive(Clone, Default)]
+pub struct InstallControl {
+    inner: Arc<ControlInner>,
+}
+
+#[derive(Default)]
+struct ControlInner {
+    cancelled: AtomicBool,
+    /// The running CLI, registered for as long as [`run`] is driving it.
+    handle: Mutex<Option<Arc<CliHandle>>>,
+}
+
+impl InstallControl {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Ask the run to stop. Safe before it starts and after it finished.
+    pub fn cancel(&self) {
+        self.inner.cancelled.store(true, Ordering::SeqCst);
+        let handle = self
+            .inner
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(handle) = handle {
+            // The driver's two-lock poll means this reaches a worker that is
+            // blocked waiting for output.
+            handle.cancel();
+        }
+    }
+
+    /// Whether [`cancel`](Self::cancel) was called.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        self.inner.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// Publish the handle so `cancel` can reach it.
+    ///
+    /// Returns whether a cancel already arrived while the CLI was starting, in
+    /// which case the caller must cancel the handle it just registered.
+    fn attach(&self, handle: &Arc<CliHandle>) -> bool {
+        let mut slot = self
+            .inner
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *slot = Some(handle.clone());
+        self.is_cancelled()
+    }
+
+    /// Forget the handle: the run is over, so a later cancel has nothing to stop.
+    fn detach(&self) {
+        *self
+            .inner
+            .handle
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+impl std::fmt::Debug for InstallControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstallControl")
+            .field("cancelled", &self.is_cancelled())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Plan an install for `id`/`title`.
@@ -111,36 +205,64 @@ pub fn plan(id: &GameId, title: &str) -> Result<InstallPlan, InstallerError> {
     })
 }
 
-/// Run one queued install to completion.
+/// Run one queued install to completion, or until `control` cancels it.
 ///
 /// Blocks while the store CLI works: call this on a worker thread. Every
 /// change in progress is handed to `on_progress` as a [`JobProgress`], which is
 /// the shape [`crate::queue::InstallQueue::progress`] takes, and the returned
 /// error is already display-ready (the CLI's own message, plus the transcript
-/// path when one was written).
+/// path when one was written). A run `control` stopped comes back as an
+/// `Ok` [`InstallRun`] with `cancelled` set — it is a user decision, not a
+/// store failure.
 pub fn run(
     backends: &Backends,
     job: &InstallJob,
     options: &CliOptions,
+    control: &InstallControl,
     mut on_progress: impl FnMut(JobProgress),
 ) -> Result<InstallRun, String> {
-    let command = install_command(&job.id, &job.target);
-    let mut tracker = ProgressTracker::default();
-
-    let report = match job.id.store {
-        Store::Epic => backends.epic.stream(&command, options, |event| {
-            tracker.observe(event, &mut on_progress)
-        }),
-        Store::Amazon => backends.amazon.stream(&command, options, |event| {
-            tracker.observe(event, &mut on_progress)
-        }),
-        Store::Gog => backends.gog.stream(&command, options, |event| {
-            tracker.observe(event, &mut on_progress)
-        }),
-        other => return Err(InstallerError::Unsupported(other).to_string()),
+    if !matches!(job.id.store, Store::Epic | Store::Amazon | Store::Gog) {
+        return Err(InstallerError::Unsupported(job.id.store).to_string());
     }
-    .map_err(|error| format!("could not run the {} install: {error}", job.id.store))?;
 
+    // Cancelled before the CLI started: no process, no directory.
+    if control.is_cancelled() {
+        return Ok(cancelled_run(job));
+    }
+
+    let command = install_command(&job.id, &job.target);
+    let handle = Arc::new(
+        spawn_backend(backends, job.id.store, &command, options)
+            .map_err(|error| format!("could not run the {} install: {error}", job.id.store))?,
+    );
+    if control.attach(&handle) {
+        handle.cancel();
+    }
+
+    let mut tracker = ProgressTracker::default();
+    loop {
+        match handle.next_event() {
+            Ok(Some(event)) => tracker.observe(&event, &mut on_progress),
+            Ok(None) => break,
+            Err(error) => {
+                control.detach();
+                return Err(format!(
+                    "could not read the {} install: {error}",
+                    job.id.store
+                ));
+            }
+        }
+    }
+    let outcome = handle.drain();
+    control.detach();
+
+    let outcome =
+        outcome.map_err(|error| format!("could not read the {} install: {error}", job.id.store))?;
+    let report = report_backend(backends, job.id.store, &command, outcome);
+
+    if report.outcome.cancelled {
+        return Ok(cancelled_run(job));
+    }
     if !report.succeeded() {
         return Err(failure_message(&job.id, &report));
     }
@@ -148,8 +270,53 @@ pub fn run(
     Ok(InstallRun {
         program: program_for(job.id.store),
         target: job.target.clone(),
-        transcript: report.log_path().map(|path| path.to_path_buf()),
+        transcript: report.log_path().map(Path::to_path_buf),
+        cancelled: false,
     })
+}
+
+/// The report for a run that ended before doing any work.
+fn cancelled_run(job: &InstallJob) -> InstallRun {
+    InstallRun {
+        program: program_for(job.id.store),
+        target: job.target.clone(),
+        transcript: None,
+        cancelled: true,
+    }
+}
+
+/// The backend's own `spawn`, so the handle stays with the caller.
+fn spawn_backend(
+    backends: &Backends,
+    store: Store,
+    command: &CliCommand,
+    options: &CliOptions,
+) -> Result<CliHandle, CliError> {
+    match store {
+        Store::Epic => backends.epic.spawn(command, options),
+        Store::Amazon => backends.amazon.spawn(command, options),
+        Store::Gog => backends.gog.spawn(command, options),
+        // `run` refuses the other stores before this point; Epic's layout is
+        // the fallback so the function stays total.
+        _ => Err(CliError::Unsupported {
+            command: command.as_str(),
+        }),
+    }
+}
+
+/// The backend's own finish-line classification (each store reads its layout).
+fn report_backend(
+    backends: &Backends,
+    store: Store,
+    command: &CliCommand,
+    outcome: CliOutcome,
+) -> RunReport {
+    match store {
+        Store::Amazon => backends.amazon.report(command, outcome),
+        Store::Gog => backends.gog.report(command, outcome),
+        // Epic's verdict, and the layout the unsupported case never reaches.
+        _ => backends.epic.report(command, outcome),
+    }
 }
 
 /// The install command for `id` landing in `target`.
@@ -370,10 +537,18 @@ mod tests {
             dir.path().join("Gizmo"),
         );
         let mut seen: Vec<JobProgress> = Vec::new();
-        let run = run(&backends, &job, &options(), |progress| seen.push(progress)).unwrap();
+        let run = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |progress| seen.push(progress),
+        )
+        .unwrap();
 
         assert_eq!(run.program, "legendary");
         assert_eq!(run.target, job.target);
+        assert!(!run.cancelled);
         let last = seen.last().expect("progress was reported");
         assert_eq!(last.percent, Some(100.0));
         let percents: Vec<Option<f32>> = seen.iter().map(|progress| progress.percent).collect();
@@ -397,7 +572,7 @@ mod tests {
             "Gizmo",
             dir.path().join("Gizmo"),
         );
-        let error = run(&backends, &job, &options(), |_| {}).unwrap_err();
+        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
         assert!(error.contains("another launcher"), "{error}");
         assert!(error.starts_with("epic install failed"), "{error}");
     }
@@ -423,7 +598,7 @@ mod tests {
             "Game",
             dir.path().join("Game"),
         );
-        let error = run(&backends, &job, &options(), |_| {}).unwrap_err();
+        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
         assert!(error.contains("gog install failed"), "{error}");
     }
 
@@ -441,7 +616,7 @@ mod tests {
             "Game",
             dir.path().join("Game"),
         );
-        let error = run(&backends, &job, &options(), |_| {}).unwrap_err();
+        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
         assert!(error.contains("amazon"), "{error}");
         assert!(error.contains("nile"), "{error}");
     }
@@ -455,8 +630,101 @@ mod tests {
             "Portal 2",
             dir.path().join("Portal 2"),
         );
-        let error = run(&backends, &job, &options(), |_| {}).unwrap_err();
+        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
         assert!(error.contains("no command-line install backend"), "{error}");
+    }
+
+    #[test]
+    fn cancelling_a_running_install_stops_the_cli() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let program = script(
+            dir.path(),
+            "legendary",
+            &format!(
+                "#!/bin/sh\n\
+                 : > '{}'\n\
+                 while :; do sleep 1; done\n",
+                marker.display()
+            ),
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        );
+        let options = options();
+        let control = InstallControl::new();
+
+        let outcome = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| run(&backends, &job, &options, &control, |_| {}));
+
+            // Wait for the fake CLI to be alive before cancelling: the signal
+            // has to reach a running process, not a flag set before the spawn.
+            for _ in 0..500 {
+                if marker.exists() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(marker.exists(), "the fake CLI never started");
+            assert!(!control.is_cancelled());
+
+            control.cancel();
+            worker.join().unwrap()
+        });
+
+        let run = outcome.unwrap();
+        assert!(run.cancelled, "a cancel is a user decision, not a failure");
+        assert_eq!(run.program, "legendary");
+        assert_eq!(run.target, job.target);
+    }
+
+    #[test]
+    fn cancelling_before_the_run_starts_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("started");
+        let program = script(
+            dir.path(),
+            "legendary",
+            &format!("#!/bin/sh\n: > '{}'\nexit 0\n", marker.display()),
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        );
+
+        let control = InstallControl::new();
+        control.cancel();
+
+        let run = run(&backends, &job, &options(), &control, |_| {}).unwrap();
+        assert!(run.cancelled);
+        assert!(run.transcript.is_none(), "no process means no transcript");
+        assert!(!marker.exists(), "the CLI must not have been started");
+    }
+
+    #[test]
+    fn a_finished_run_forgets_its_handle_and_late_cancels_are_harmless() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "legendary", "#!/bin/sh\nexit 0\n");
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        );
+
+        let control = InstallControl::new();
+        let run = run(&backends, &job, &options(), &control, |_| {}).unwrap();
+        assert!(!run.cancelled);
+
+        // The worker is gone; cancel now only records the flag.
+        control.clone().cancel();
+        assert!(control.is_cancelled());
+        assert!(format!("{control:?}").contains("cancelled: true"));
     }
 
     #[test]

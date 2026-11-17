@@ -10,14 +10,23 @@
 //! ```text
 //!  enqueue(plan.job()) ──► InstallQueue ──start_next──► InstallJob
 //!                               ▲                          │
-//!                               │                    worker thread
+//!                               │                    worker thread + InstallControl
 //!                        InstallEvent ◄─── progress ── installer::run
 //! ```
 //!
 //! The queue is one job at a time by design: the three clients share a login
 //! session and their `~/.config` caches, so two installs at once fight over
-//! both.
+//! both. That is also why a cancelled run keeps its row `Running` until the
+//! worker confirms the CLI is gone: the next job must not start while the
+//! previous process is still being signalled.
+//!
+//! **Reports are keyed by [`GameId`], not by row index.** Removing a finished
+//! row above a running one shifts every index after it, so an index-keyed
+//! report would land on the wrong job — or on none. A game id is stable, and
+//! the queue refuses two active jobs for the same game, so it identifies the
+//! worker's job uniquely.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::thread;
@@ -25,23 +34,33 @@ use std::thread;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
+use pitagames_core::GameId;
 use pitagames_stores::cli::CliOptions;
-use pitagames_stores::installer;
+use pitagames_stores::installer::{self, InstallControl, InstallRun};
 use pitagames_stores::queue::{
     InstallJob, InstallQueue, JobProgress, JobState, QueueError, StartOutcome,
 };
 use pitagames_stores::sync::Backends;
 
+/// How a worker's run ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// The backend's verdict passed.
+    Done,
+    /// The user stopped it; the row says `cancelled` rather than quoting a
+    /// signal death.
+    Cancelled,
+    /// The backend (or the driver) failed; the message is display-ready.
+    Failed(String),
+}
+
 /// One report from a running install worker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstallEvent {
     /// The backend printed something new: a percentage, a stage line, both.
-    Progress { index: usize, progress: JobProgress },
-    /// The run finished; `Ok` means the backend's verdict passed.
-    Finished {
-        index: usize,
-        result: Result<(), String>,
-    },
+    Progress { id: GameId, progress: JobProgress },
+    /// The run finished; the queue row moves to its final state.
+    Finished { id: GameId, outcome: InstallOutcome },
 }
 
 /// The window's end of the install event channel.
@@ -89,6 +108,11 @@ impl Default for InstallChannel {
 #[derive(Debug, Default, Clone)]
 pub struct Installs {
     queue: InstallQueue,
+    /// One control per started job. Keyed by game because an index can shift
+    /// when a finished row above a running one is removed.
+    controls: BTreeMap<GameId, InstallControl>,
+    /// Jobs whose CLI has been told to stop but has not confirmed yet.
+    cancelling: BTreeSet<GameId>,
 }
 
 impl Installs {
@@ -108,18 +132,52 @@ impl Installs {
         self.queue.jobs().get(index)
     }
 
+    /// The job for a game, for a report that names its id.
+    pub fn job_by_id(&self, id: &GameId) -> Option<&InstallJob> {
+        self.queue.jobs().iter().find(|job| &job.id == id)
+    }
+
+    /// The control the job's worker will report to, created on first call.
+    ///
+    /// The token is registered before the thread starts, so a Cancel click that
+    /// arrives during the CLI's startup still reaches it.
+    pub fn control(&mut self, index: usize) -> Option<InstallControl> {
+        let id = self.queue.jobs().get(index)?.id.clone();
+        let control = InstallControl::new();
+        self.controls.insert(id, control.clone());
+        Some(control)
+    }
+
     /// Fold a worker event into the queue.
     ///
     /// A late report for a job that was cancelled or already finished is
     /// ignored by the queue itself, which is why this cannot resurrect a row.
     pub fn apply(&mut self, event: &InstallEvent) {
         match event {
-            InstallEvent::Progress { index, progress } => {
-                self.queue
-                    .progress(*index, progress.percent, progress.stage.clone());
+            InstallEvent::Progress { id, progress } => {
+                if let Some(index) = self.index_of(id) {
+                    self.queue
+                        .progress(index, progress.percent, progress.stage.clone());
+                }
             }
-            InstallEvent::Finished { index, result } => {
-                self.queue.finish(*index, result.clone());
+            InstallEvent::Finished { id, outcome } => {
+                self.cancelling.remove(id);
+                self.controls.remove(id);
+                let Some(index) = self.index_of(id) else {
+                    // The row is gone (removed by the user); nothing to update.
+                    return;
+                };
+                match outcome {
+                    InstallOutcome::Done => {
+                        self.queue.finish(index, Ok(()));
+                    }
+                    InstallOutcome::Cancelled => {
+                        self.queue.cancel(index);
+                    }
+                    InstallOutcome::Failed(message) => {
+                        self.queue.finish(index, Err(message.clone()));
+                    }
+                }
             }
         }
     }
@@ -154,11 +212,19 @@ impl Installs {
         self.queue.active_count()
     }
 
-    /// The label a grid card shows while this game's install is queued or
-    /// running; `None` once it finished (the row is installed by then).
-    pub fn active_label(&self, id: &pitagames_core::GameId) -> Option<&'static str> {
+    /// The label a grid card shows while this game's install is queued, running
+    /// or being stopped; `None` once it finished (the row is installed by then).
+    pub fn active_label(&self, id: &GameId) -> Option<&'static str> {
+        if self.cancelling.contains(id) {
+            return Some("cancelling");
+        }
         let job = self.queue.get(id)?;
         job.state.is_active().then(|| job.state.label())
+    }
+
+    /// Whether the job's CLI has been asked to stop but has not said so yet.
+    pub fn is_cancelling(&self, id: &GameId) -> bool {
+        self.cancelling.contains(id)
     }
 
     /// Drop every finished job.
@@ -171,19 +237,38 @@ impl Installs {
         self.queue.retry(index)
     }
 
-    /// Stop a queued job. A running one is left to its worker: the store CLI
-    /// owns the process once it started, and the driver has no cancel channel
-    /// from the UI thread yet.
+    /// Cancel the job at `index`.
+    ///
+    /// A queued job is cancelled outright. A running one keeps its `Running`
+    /// state — and therefore its slot in the serial queue — until its worker
+    /// reports back, because the CLI is still shutting down: starting the next
+    /// install now would let two clients fight over the same session.
     pub fn cancel(&mut self, index: usize) -> bool {
-        match self.job(index).map(|job| job.state.clone()) {
-            Some(JobState::Queued) => self.queue.cancel(index),
-            _ => false,
+        let Some(job) = self.queue.jobs().get(index) else {
+            return false;
+        };
+        let id = job.id.clone();
+        match job.state {
+            JobState::Queued => self.queue.cancel(index),
+            JobState::Running => {
+                let Some(control) = self.controls.get(&id) else {
+                    return false;
+                };
+                control.cancel();
+                self.cancelling.insert(id);
+                true
+            }
+            JobState::Done | JobState::Failed { .. } | JobState::Cancelled => false,
         }
     }
 
     /// Drop a finished job.
     pub fn remove(&mut self, index: usize) -> bool {
         self.queue.remove(index)
+    }
+
+    fn index_of(&self, id: &GameId) -> Option<usize> {
+        self.queue.jobs().iter().position(|job| &job.id == id)
     }
 }
 
@@ -199,9 +284,12 @@ fn free_space(path: &Path) -> Option<u64> {
 
 /// Run one job on its own thread, reporting progress to `sender`.
 ///
-/// The thread owns nothing but the job: the queue stays on the UI side, so a
-/// window that closes mid-install cannot corrupt it.
-pub fn spawn(job: InstallJob, index: usize, sender: UnboundedSender<InstallEvent>) {
+/// The thread owns nothing but the job and the control: the queue stays on the
+/// UI side, so a window that closes mid-install cannot corrupt it. Cancelling
+/// the control reaches the CLI through the handle `installer::run` registers,
+/// and the thread always ends with a `Finished` event so the row cannot stick.
+pub fn spawn(job: InstallJob, sender: UnboundedSender<InstallEvent>, control: InstallControl) {
+    let id = job.id.clone();
     let thread_name = format!("pitagames-install-{}", job.id.store_id);
     let spawned = thread::Builder::new().name(thread_name).spawn(move || {
         let options = CliOptions {
@@ -210,12 +298,22 @@ pub fn spawn(job: InstallJob, index: usize, sender: UnboundedSender<InstallEvent
         };
         let backends = Backends::new();
 
-        let result = installer::run(&backends, &job, &options, |progress| {
-            let _ = sender.unbounded_send(InstallEvent::Progress { index, progress });
-        })
-        .map(|_| ());
+        let report_id = id.clone();
+        let result = installer::run(&backends, &job, &options, &control, |progress| {
+            let _ = sender.unbounded_send(InstallEvent::Progress {
+                id: report_id.clone(),
+                progress,
+            });
+        });
 
-        let _ = sender.unbounded_send(InstallEvent::Finished { index, result });
+        let outcome = match result {
+            Ok(InstallRun {
+                cancelled: true, ..
+            }) => InstallOutcome::Cancelled,
+            Ok(_) => InstallOutcome::Done,
+            Err(message) => InstallOutcome::Failed(message),
+        };
+        let _ = sender.unbounded_send(InstallEvent::Finished { id, outcome });
     });
 
     if let Err(error) = spawned {
@@ -226,7 +324,7 @@ pub fn spawn(job: InstallJob, index: usize, sender: UnboundedSender<InstallEvent
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pitagames_core::{GameId, Store};
+    use pitagames_core::Store;
 
     fn job(id: &str) -> InstallJob {
         InstallJob::new(
@@ -234,6 +332,10 @@ mod tests {
             id,
             std::path::PathBuf::from("/games/epic").join(id),
         )
+    }
+
+    fn game(id: &str) -> GameId {
+        GameId::new(Store::Epic, id)
     }
 
     #[test]
@@ -245,8 +347,8 @@ mod tests {
         assert_eq!(installs.active_count(), 1, "running still counts as active");
 
         installs.apply(&InstallEvent::Finished {
-            index: 0,
-            result: Ok(()),
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Done,
         });
         assert_eq!(installs.active_count(), 0);
         assert_eq!(installs.finished().len(), 1);
@@ -262,8 +364,8 @@ mod tests {
         // Once it finishes the id can be queued again.
         installs.start_next();
         installs.apply(&InstallEvent::Finished {
-            index: 0,
-            result: Ok(()),
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Done,
         });
         assert_eq!(installs.enqueue(job("Gizmo")).unwrap(), 1);
     }
@@ -275,7 +377,7 @@ mod tests {
         installs.start_next();
 
         installs.apply(&InstallEvent::Progress {
-            index: 0,
+            id: game("Gizmo"),
             progress: JobProgress {
                 percent: Some(45.0),
                 stage: Some("downloading".into()),
@@ -286,8 +388,8 @@ mod tests {
         assert_eq!(progress.stage.as_deref(), Some("downloading"));
 
         installs.apply(&InstallEvent::Finished {
-            index: 0,
-            result: Err("legendary exited 1".into()),
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Failed("legendary exited 1".into()),
         });
         assert_eq!(
             installs.job(0).unwrap().state,
@@ -303,7 +405,7 @@ mod tests {
 
         // A late progress report from the worker is ignored.
         installs.apply(&InstallEvent::Progress {
-            index: 0,
+            id: game("Gizmo"),
             progress: JobProgress {
                 percent: Some(99.0),
                 stage: None,
@@ -318,8 +420,8 @@ mod tests {
         installs.enqueue(job("Gizmo")).unwrap();
         installs.start_next();
         installs.apply(&InstallEvent::Finished {
-            index: 0,
-            result: Err("boom".into()),
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Failed("boom".into()),
         });
 
         assert!(installs.retry(0));
@@ -350,8 +452,8 @@ mod tests {
         let index = installs.enqueue(job("Gizmo")).unwrap();
         installs.start_next();
         installs.apply(&InstallEvent::Finished {
-            index,
-            result: Err("boom".into()),
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Failed("boom".into()),
         });
 
         assert!(installs.retry(index));
@@ -375,8 +477,8 @@ mod tests {
         assert_eq!(installs.active_label(&id), Some("installing"));
 
         installs.apply(&InstallEvent::Finished {
-            index: 0,
-            result: Ok(()),
+            id: id.clone(),
+            outcome: InstallOutcome::Done,
         });
         assert_eq!(
             installs.active_label(&id),
@@ -384,5 +486,88 @@ mod tests {
             "a finished job leaves the card to the installed row"
         );
         assert_eq!(installs.active_label(&GameId::new(Store::Gog, "1")), None);
+    }
+
+    #[test]
+    fn cancelling_a_running_job_keeps_the_slot_until_the_worker_confirms() {
+        let mut installs = Installs::default();
+        installs.enqueue(job("Gizmo")).unwrap();
+        installs.enqueue(job("Other")).unwrap();
+        installs.start_next();
+        let control = installs.control(0).expect("a started job has a control");
+
+        assert!(installs.cancel(0));
+        assert!(
+            control.is_cancelled(),
+            "the worker's token was told to stop"
+        );
+        assert!(installs.is_cancelling(&game("Gizmo")));
+        assert_eq!(installs.active_label(&game("Gizmo")), Some("cancelling"));
+        assert_eq!(
+            installs.job(0).unwrap().state,
+            JobState::Running,
+            "the row stays running so the serial queue cannot start another job"
+        );
+        assert_eq!(
+            installs.start_next(),
+            StartOutcome::Busy,
+            "a running slot blocks the next install while the CLI shuts down"
+        );
+
+        installs.apply(&InstallEvent::Finished {
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Cancelled,
+        });
+        assert_eq!(installs.job(0).unwrap().state, JobState::Cancelled);
+        assert!(!installs.is_cancelling(&game("Gizmo")));
+        assert_eq!(installs.start_next(), StartOutcome::Started { index: 1 });
+    }
+
+    #[test]
+    fn a_running_job_without_a_control_is_not_cancellable() {
+        let mut installs = Installs::default();
+        installs.enqueue(job("Gizmo")).unwrap();
+        installs.start_next();
+
+        // No worker token was registered (the thread never started).
+        assert!(!installs.cancel(0));
+        assert_eq!(installs.job(0).unwrap().state, JobState::Running);
+    }
+
+    #[test]
+    fn reports_are_keyed_by_game_not_by_row() {
+        let mut installs = Installs::default();
+        installs.enqueue(job("Gizmo")).unwrap();
+        installs.start_next();
+        installs.enqueue(job("Other")).unwrap();
+
+        // A finished/cancelled row above the running one disappears: every
+        // index after it shifts. An id-keyed report still lands.
+        installs.apply(&InstallEvent::Finished {
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Failed("boom".into()),
+        });
+        installs.remove(0);
+        assert_eq!(installs.job(0).unwrap().id, game("Other"));
+        assert_eq!(installs.start_next(), StartOutcome::Started { index: 0 });
+
+        installs.apply(&InstallEvent::Progress {
+            id: game("Other"),
+            progress: JobProgress {
+                percent: Some(50.0),
+                stage: None,
+            },
+        });
+        assert_eq!(installs.job(0).unwrap().progress.percent, Some(50.0));
+
+        // A report for a row the user removed is ignored, not misapplied.
+        installs.apply(&InstallEvent::Progress {
+            id: game("Gizmo"),
+            progress: JobProgress {
+                percent: Some(99.0),
+                stage: None,
+            },
+        });
+        assert_eq!(installs.job(0).unwrap().progress.percent, Some(50.0));
     }
 }

@@ -39,8 +39,9 @@ argv. `installer` is the seam.
 | `InstallPlan::job()` | the queue entry (`InstallJob`), carrying the target |
 | `InstallPlan::command()` | the `CliCommand::Install { id, install_dir }` a backend needs |
 | `installer::plan(id, title)` | the pure half: resolve the directory, no I/O |
-| `installer::run(backends, job, options, on_progress)` | the blocking half: drive the CLI, report progress, return the verdict |
-| `installer::InstallRun` | `{ program, target, transcript }` on success |
+| `installer::run(backends, job, options, control, on_progress)` | the blocking half: drive the CLI, report progress, return the verdict; `control` is the Cancel handle (`docs/m2-cancel-install.md`) |
+| `installer::InstallRun` | `{ program, target, transcript, cancelled }` when the run ends |
+| `installer::InstallControl` | `cancel()`/`is_cancelled()` — safe before, during and after a run |
 | `installer::InstallerError` | `Unsupported(store)`, `NoDataDir` |
 
 **The target is the store's own directory.** `plan` calls `epic::install_dir`,
@@ -77,12 +78,13 @@ without Dioxus.
 
 | Item | Role |
 |---|---|
-| `InstallEvent` | `Progress { index, progress }`, `Finished { index, result }` — one report from a worker |
+| `InstallEvent` | `Progress { id, progress }`, `Finished { id, outcome }` — one report from a worker, keyed by game so a removed row cannot shift it |
 | `Installs` | the `InstallQueue` plus the accessors the two views need |
-| `Installs::active_label(id)` | `"queued"`/`"installing"` for a card, `None` once finished |
+| `Installs::active_label(id)` | `"queued"`/`"installing"`/`"cancelling"` for a card, `None` once finished |
 | `Installs::apply(event)` | fold a worker report in (a late report for a cancelled job is refused by the queue) |
-| `Installs::cancel/retry/remove/clear_finished` | the Downloads row buttons |
-| `store_installs::spawn(job, index, sender)` | one worker thread per running job |
+| `Installs::control(index)` | the token the job's worker reports to, created before the thread starts |
+| `Installs::cancel/retry/remove/clear_finished` | the Downloads row buttons; Cancel stops a running CLI |
+| `store_installs::spawn(job, sender, control)` | one worker thread per running job |
 | `InstallChannel` | the app's `sender()` + `async next()` pair |
 
 The worker thread owns **only the job**: the queue stays on the UI side, so a
@@ -126,8 +128,11 @@ start.
 
 **The Downloads board** gained a "Store installs" section next to the Steam
 rows: title, store and id, state word, percent bar, the CLI's last stage line
-and the target directory — plus Cancel (queued only), Retry, Remove and "Clear
-finished". The nav count adds the store queue's active jobs to Steam's.
+and the target directory — plus Cancel (queued or running), Retry, Remove and
+"Clear finished". The nav count adds the store queue's active jobs to Steam's.
+A running job was not cancellable when this slice shipped; that arrived with
+`docs/m2-cancel-install.md`, which also keys the worker reports by game instead
+of row index.
 
 **The Stores screen** gained **Sync libraries**: the three CLIs run on a worker
 thread (`store_sync::fetch`), the answer comes back over a channel, and a drain
@@ -192,10 +197,10 @@ cargo clippy -p pitagames --all-targets
 - **Not run against a real store CLI.** The argv and the log shapes come from
   the fixtures the backends already use; the first machine with a real account
   is the closing check.
-- **A running install cannot be cancelled from the UI.** `Installs::cancel` only
-  cancels `Queued` jobs: the driver supports cancellation, but the UI has no
-  channel into the worker that owns the handle yet. The row says what happened;
-  the process finishes on its own.
+- **A running install was cancelled only at the process, not in the UI.** The
+  driver supported cancellation from the start; this slice's board had no channel
+  into the worker that owns the handle, so a running row stayed running until the
+  CLI finished. `docs/m2-cancel-install.md` closed that.
 - **No size on a job, so no real disk pre-check.** No store reports a download
   size in its listing, so `InstallJob::size` is `None` and `start_next` skips the
   check (an unknown answer is not a refusal). The plumbing is there for the store

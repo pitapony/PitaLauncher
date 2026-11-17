@@ -54,7 +54,7 @@ pub use epic::{Epic, EpicAccount, EpicError};
 pub use gog::{Gog, GogAccount, GogError};
 pub use import::{ImportReport, Importer, Origin, SourceReport};
 pub use install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallProgress, InstallSample};
-pub use installer::{InstallPlan, InstallRun, InstallerError};
+pub use installer::{InstallControl, InstallPlan, InstallRun, InstallerError};
 pub use launch::{ClientLaunchError, client_spec, launches_by_id};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use queue::{InstallJob, InstallQueue, JobProgress, JobState, QueueError, StartOutcome};

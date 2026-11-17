@@ -26,7 +26,7 @@ use downloads::{DownloadEvent, Downloads};
 use library::{Library, OWNED_METADATA_PER_RUN};
 use play::{Play, PlayEvent};
 use steam_account::Account;
-use store_installs::{InstallEvent, Installs};
+use store_installs::{InstallEvent, InstallOutcome, Installs};
 
 mod account;
 mod activation;
@@ -253,20 +253,22 @@ fn App() -> Element {
         async move {
             while let Some(event) = channel.next().await {
                 let finished = match &event {
-                    InstallEvent::Finished { index, result } => Some((*index, result.clone())),
+                    InstallEvent::Finished { id, outcome } => Some((id.clone(), outcome.clone())),
                     InstallEvent::Progress { .. } => None,
                 };
 
                 installs.write().apply(&event);
 
-                if let Some((index, result)) = finished {
-                    let job = installs.read().job(index).cloned();
-                    match (result, job) {
-                        (Ok(()), Some(job)) => {
+                if let Some((id, outcome)) = finished {
+                    let job = installs.read().job_by_id(&id).cloned();
+                    match (outcome, job) {
+                        (InstallOutcome::Done, Some(job)) => {
                             record_store_install(job, library_state, db_state, notice)
                         }
-                        (Err(message), _) => notice.set(message),
-                        (Ok(()), None) => {}
+                        (InstallOutcome::Failed(message), _) => notice.set(message),
+                        // A cancelled run leaves the row `cancelled`; nothing to
+                        // record and nothing to complain about.
+                        (InstallOutcome::Done | InstallOutcome::Cancelled, _) => {}
                     }
                     pump_installs(installs, install_events, notice);
                 }
@@ -659,7 +661,12 @@ fn App() -> Element {
                         let title = job.title.clone();
                         let store = job.id.store.as_str();
                         let store_id = job.id.store_id.clone();
-                        let state = job.state.label();
+                        let cancelling = install_snapshot.is_cancelling(&job.id);
+                        let state = if cancelling {
+                            "cancelling"
+                        } else {
+                            job.state.label()
+                        };
                         let percent = job.progress.percent;
                         let width = percent.unwrap_or(0.0);
                         let percent_label = percent
@@ -667,7 +674,10 @@ fn App() -> Element {
                             .unwrap_or_default();
                         let stage = job.progress.stage.clone().unwrap_or_default();
                         let target = job.target.display().to_string();
-                        let queued = job.state == JobState::Queued;
+                        // A queued job has no process yet; a running one is
+                        // stopped through the token its worker registered.
+                        let cancellable = job.state == JobState::Queued
+                            || (job.state == JobState::Running && !cancelling);
 
                         rsx! {
                             div {
@@ -706,7 +716,7 @@ fn App() -> Element {
                                             "{stage}"
                                         }
                                     }
-                                    if queued {
+                                    if cancellable {
                                         button {
                                             onclick: move |_| {
                                                 installs.write().cancel(index);
@@ -1533,8 +1543,11 @@ fn pump_installs(
         match outcome {
             StartOutcome::Started { index } => {
                 let job = installs.read().job(index).cloned();
-                if let Some(job) = job {
-                    store_installs::spawn(job, index, sender.clone());
+                // The token is registered before the thread starts, so a Cancel
+                // click during the CLI's startup still reaches it.
+                let control = installs.write().control(index);
+                if let (Some(job), Some(control)) = (job, control) {
+                    store_installs::spawn(job, sender.clone(), control);
                 }
                 return;
             }
