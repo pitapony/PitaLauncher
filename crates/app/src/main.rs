@@ -32,6 +32,7 @@ mod account;
 mod activation;
 mod anticheat;
 mod art;
+mod auth;
 mod copy;
 mod desktop_entry;
 mod detail;

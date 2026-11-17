@@ -14,13 +14,15 @@
 //! [`sync`] folds the two listings each backend can answer into one round of
 //! `Game` rows and merges them over the cache without deleting anything a failed
 //! listing could not vouch for, [`installer`] turns a queued job into the
-//! backend run that fills its directory, and [`launch`] composes the argv for
-//! the two backends whose client starts a game by id (`gogdl`, `nile`).
+//! backend run that fills its directory, [`launch`] composes the argv for the
+//! two backends whose client starts a game by id (`gogdl`, `nile`), and [`auth`]
+//! is the sign-in relay the CLI and the GUI both drive.
 
 use std::path::PathBuf;
 
 pub mod acf;
 pub mod amazon;
+pub mod auth;
 pub mod cli;
 pub mod compat_tool;
 pub mod epic;
@@ -42,6 +44,7 @@ pub mod watch;
 
 pub use acf::{AppManifest, DownloadProgress, InstallPhase, ManifestError, flags};
 pub use amazon::{Amazon, AmazonAccount, AmazonError, VerifyReport as AmazonVerifyReport};
+pub use auth::{AuthError, AuthOutcome, AuthRun, AuthStep, has_sign_in};
 pub use cli::{
     CliCommand, CliError, CliHandle, CliOptions, CliOutcome, CliSpec, ProgressEvent,
     ProgressParser, StoreStatus, TimeoutKind, resolve_program,

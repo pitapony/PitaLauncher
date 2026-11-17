@@ -214,8 +214,11 @@ and:
    `openid.oa2.authorization_code` out of the pasted URL, registers the device
    and syncs the library.
 
-The CLI relays the first prompt with a bare newline (and prints that it is
-opening the page), then reads one line of stdin for the second. That pasted URL
+The relay (`stores::auth::AuthRun`, `docs/m2-auth-terminal.md`) answers the
+first prompt with a bare newline — the step is invisible in the in-app terminal,
+which only shows the notice — then hands the second to whoever is driving:
+`pitagames-cli amazon auth` reads a line of stdin, the GUI's terminal takes one
+from its input row. That pasted URL
 is long — thousands of characters is normal — and the driver's line buffer has no
 practical limit, so it arrives as one event.
 

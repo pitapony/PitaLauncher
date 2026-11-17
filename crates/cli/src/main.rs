@@ -32,6 +32,7 @@ use pitagames_platform::prefix::{self, Prefix};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::amazon::{self, Amazon};
+use pitagames_stores::auth::{AuthRun, AuthStep};
 use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::epic::{self, Epic};
 use pitagames_stores::gog::{self, Gog};
@@ -1956,64 +1957,65 @@ fn epic_installed(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
     Ok(())
 }
 
-/// The code-paste sign-in.
+/// The Epic code-paste sign-in.
 ///
 /// legendary opens the Epic login page and asks for the `authorizationCode` from
-/// its JSON response. That is an `input()` prompt with no trailing newline, which
-/// is exactly what the driver's partial-line flush exists for. A prompt line ends
-/// with `:`, so each one gets one line of stdin. A PTY echoes the answer, so the
-/// transcript on disk can contain the code; it is never printed or stored.
+/// its JSON response. The prompt policy — which line asks for a pasted value,
+/// which one only wants ENTER — lives in `pitagames_stores::auth`, shared with
+/// the GUI's sign-in terminal; this is just the `stdin` side of it.
 fn epic_auth(backend: &Epic, parsed: &StoreArgs) -> Result<()> {
-    use std::io::{BufRead as _, Write as _};
-
     expect_positionals(parsed, 1)?;
     let options = store_options(parsed, true);
     let handle = backend.spawn(&CliCommand::Auth, &options)?;
-    let mut stdin = std::io::stdin().lock();
-    let mut cancelled = false;
+    relay_auth(AuthRun::attach(Store::Epic, handle), "legendary")
+}
 
-    while let Some(event) = handle.next_event()? {
-        match event {
-            ProgressEvent::Line(text)
-            | ProgressEvent::Stage(text)
-            | ProgressEvent::Percent(_, text) => {
+/// The one sign-in loop: print the CLI's lines, answer its prompts from `stdin`.
+///
+/// A PTY echoes the answer, so a transcript can contain the pasted code or URL:
+/// local diagnostics only, never parsed back or stored.
+fn relay_auth(run: AuthRun, program: &str) -> Result<()> {
+    use std::io::{BufRead as _, Write as _};
+
+    let mut stdin = std::io::stdin().lock();
+    while let Some(step) = run.next()? {
+        match step {
+            AuthStep::Line(text) => println!("{text}"),
+            AuthStep::Continued(text) => {
+                // The CLI is about to open the page itself; nothing to type.
                 println!("{text}");
-                if text.trim_end().ends_with(':') {
-                    print!("> ");
-                    std::io::stdout().flush().ok();
-                    let mut line = String::new();
-                    if stdin.read_line(&mut line)? == 0 {
-                        handle.cancel();
-                        cancelled = true;
-                        break;
-                    }
-                    handle.write_stdin(line.as_bytes())?;
-                }
             }
-            // The verdict is the report below; a `Done` here only means
-            // legendary exited 0, which it also does for a refusal.
-            ProgressEvent::Done => {}
-            ProgressEvent::Failed { code, message } => {
-                eprintln!("legendary auth failed ({code}): {message}");
+            AuthStep::Prompt { text, hint } => {
+                println!("{text}");
+                println!("{hint}");
+                print!("> ");
+                std::io::stdout().flush().ok();
+                let mut line = String::new();
+                if stdin.read_line(&mut line)? == 0 {
+                    run.cancel();
+                    break;
+                }
+                run.answer(&line)?;
             }
         }
     }
 
-    let outcome = handle.wait()?;
-    if cancelled {
+    let outcome = run.finish()?;
+    if outcome.cancelled() {
         bail!("authentication cancelled: stdin closed");
     }
-    // legendary can log an error and still exit 0, so the log lines count too.
-    let report = backend.report(&CliCommand::Auth, outcome);
-    if !report.succeeded() {
+    // Every one of these CLIs can log an error and still exit 0, so the verdict
+    // is the report's, not the exit status.
+    if !outcome.succeeded() {
+        if let Some(log) = outcome.log_path() {
+            eprintln!("Transcript: {}", log.display());
+        }
         bail!(
-            "legendary auth did not finish: {}",
-            report
-                .failure_message()
-                .unwrap_or_else(|| "no session was stored".to_string())
+            "{program} auth did not finish: {}",
+            outcome.failure_message()
         );
     }
-    println!("Authenticated.");
+    println!("Signed in.");
     Ok(())
 }
 
@@ -2311,69 +2313,12 @@ fn amazon_sync(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
 /// nile prints a login URL, waits for ENTER (which is where it opens the
 /// browser), and then asks for the **final `amazon.com` address** it redirected
 /// to — that URL carries the `openid.oa2.authorization_code`. Amazon's 2FA/TOTP
-/// happens in the browser, so there is no code prompt of our own; the pasted URL
-/// is the long line the driver relays. A PTY echoes it, so the transcript can
-/// contain the authorization code: local diagnostics only, never printed or
-/// stored.
+/// happens in the browser, so there is no code prompt of our own. Both of those
+/// steps are the relay's, in `pitagames_stores::auth`.
 fn amazon_auth(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
-    use std::io::{BufRead as _, Write as _};
-
     expect_positionals(parsed, 1)?;
     let handle = backend.spawn(&CliCommand::Auth, &store_options(parsed, true))?;
-    let mut stdin = std::io::stdin().lock();
-    let mut cancelled = false;
-
-    while let Some(event) = handle.next_event()? {
-        match event {
-            ProgressEvent::Line(text)
-            | ProgressEvent::Stage(text)
-            | ProgressEvent::Percent(_, text) => {
-                println!("{text}");
-                if text.contains("Press ENTER") {
-                    // Nothing to type; nile opens the login page here.
-                    println!("(opening the login page in your browser)");
-                    handle.write_stdin(b"\n")?;
-                } else if text.trim_end().ends_with(':') {
-                    println!(
-                        "Sign in, then paste the amazon.com address you were redirected to, \
-                         and press Enter."
-                    );
-                    print!("> ");
-                    std::io::stdout().flush().ok();
-                    let mut line = String::new();
-                    if stdin.read_line(&mut line)? == 0 {
-                        handle.cancel();
-                        cancelled = true;
-                        break;
-                    }
-                    handle.write_stdin(line.as_bytes())?;
-                }
-            }
-            // The verdict is the report below; nile exits 0 for a refusal too.
-            ProgressEvent::Done => {}
-            ProgressEvent::Failed { code, message } => {
-                eprintln!("nile auth failed ({code}): {message}");
-            }
-        }
-    }
-
-    let outcome = handle.wait()?;
-    if cancelled {
-        bail!("authentication cancelled: stdin closed");
-    }
-    // nile logs an ERROR and exits 0 when the pasted URL carried no code, so
-    // the exit status alone would report a failed sign-in as a success.
-    let report = backend.report(&CliCommand::Auth, outcome);
-    if !report.succeeded() {
-        bail!(
-            "nile auth did not finish: {}",
-            report
-                .failure_message()
-                .unwrap_or_else(|| "no session was stored".to_string())
-        );
-    }
-    println!("Signed in.");
-    Ok(())
+    relay_auth(AuthRun::attach(Store::Amazon, handle), "nile")
 }
 
 fn amazon_logout(backend: &Amazon, parsed: &StoreArgs) -> Result<()> {
@@ -2655,64 +2600,13 @@ fn gog_owned(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
 /// The GOG sign-in.
 ///
 /// `lgogdownloader --browser-login` prints the GOG login URL, an instruction
-/// line, and a `URL: ` prompt, then reads the **full redirect URL** from stdin
-/// and pulls the OAuth code out of it. That is the same code-paste shape as
-/// Epic's and Amazon's flows, so it answers one stdin line per prompt. A PTY
-/// echoes it, so the transcript can contain the code: local diagnostics only.
+/// line, and a prompt, then reads the **full redirect URL** from stdin and pulls
+/// the OAuth code out of it. That is the same code-paste shape as Epic's and
+/// Amazon's flows, so all three share `pitagames_stores::auth`.
 fn gog_auth(backend: &Gog, parsed: &StoreArgs) -> Result<()> {
-    use std::io::{BufRead as _, Write as _};
-
     expect_positionals(parsed, 1)?;
     let handle = backend.spawn(&CliCommand::Auth, &store_options(parsed, true))?;
-    let mut stdin = std::io::stdin().lock();
-    let mut cancelled = false;
-
-    while let Some(event) = handle.next_event()? {
-        match event {
-            ProgressEvent::Line(text)
-            | ProgressEvent::Stage(text)
-            | ProgressEvent::Percent(_, text) => {
-                println!("{text}");
-                if text.trim_end().ends_with(':') {
-                    println!(
-                        "Sign in in the browser, then paste the full URL you were \
-                         redirected to and press Enter."
-                    );
-                    print!("> ");
-                    std::io::stdout().flush().ok();
-                    let mut line = String::new();
-                    if stdin.read_line(&mut line)? == 0 {
-                        handle.cancel();
-                        cancelled = true;
-                        break;
-                    }
-                    handle.write_stdin(line.as_bytes())?;
-                }
-            }
-            // The verdict is the report below; a `Done` only means exit 0, which
-            // is not the same as a stored session.
-            ProgressEvent::Done => {}
-            ProgressEvent::Failed { code, message } => {
-                eprintln!("lgogdownloader auth failed ({code}): {message}");
-            }
-        }
-    }
-
-    let outcome = handle.wait()?;
-    if cancelled {
-        bail!("authentication cancelled: stdin closed");
-    }
-    let report = backend.report(&CliCommand::Auth, outcome);
-    if !report.succeeded() {
-        bail!(
-            "lgogdownloader auth did not finish: {}",
-            report
-                .failure_message()
-                .unwrap_or_else(|| "no session was stored".to_string())
-        );
-    }
-    println!("Signed in.");
-    Ok(())
+    relay_auth(AuthRun::attach(Store::Gog, handle), "lgogdownloader")
 }
 
 fn gog_install(backend: &Gog, parsed: &StoreArgs) -> Result<()> {

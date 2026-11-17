@@ -26,8 +26,8 @@ This slice is the model both the CLI and the GUI render, plus the one function
 that folds those shapes into a single list. It is read-only and
 hardware-independent, so it ships while the M0 hardware closer waits on machine
 access, and it is the foundation the store status wiring builds on — the library
-sync writes now ship (`docs/m2-store-sync.md`), the install queue driver and the
-in-app re-auth terminal are still open.
+sync writes now ship (`docs/m2-store-sync.md`), then the install queue driver and
+the in-app sign-in terminal (`docs/m2-auth-terminal.md`).
 
 ## `stores::status` — the row model
 
@@ -125,10 +125,11 @@ The GUI's Stores view (`crates/app/src/stores_view.rs`) renders the same model:
 one card per store with the state badge, the programs, the session and (on
 request) the counts. The probe runs on a worker thread and lands over a channel,
 because the CLI runs take seconds; a `use_future` drains the channel and
-re-renders. Sign-in is **not** offered in-app — the auth flows are interactive
-PTY sessions and the embedded terminal is M2.5 — so a signed-out store shows the
-exact CLI command (`pitagames-cli <store> auth`) with a copy button. Two buttons
-re-probe: **Refresh**, and **Show/Hide game counts** (the `list` flag).
+re-renders. A store whose sign-in CLI is present also offers **Sign in**, which
+runs the CLI in the in-app terminal (`docs/m2-auth-terminal.md`); a signed-out
+row still shows the exact CLI command (`pitagames-cli <store> auth`) with a copy
+button as the headless fallback. Two buttons re-probe: **Refresh**, and
+**Show/Hide game counts** (the `list` flag).
 
 ## Verification
 
@@ -185,8 +186,9 @@ noted that GOG exposes no signal.
 - **The update list is only as wide as the stores allow.** Amazon and GOG
   contribute nothing until their CLIs expose a latest version (or a flag), and
   GOG cannot even list installed games through this path.
-- **In-app re-auth is M2.5.** The screen names the CLI command; it does not run
-  the interactive login.
+- **The sign-in runs the real CLI.** The in-app terminal shipped after this slice
+  (`docs/m2-auth-terminal.md`), so a signed-out store is no longer a dead end;
+  it is still the store's CLI that holds the token, never this code.
 - **Nothing writes to the database from this screen.** The counts are live CLI
   answers, not cached rows. The library sync now writes those rows
   (`docs/m2-store-sync.md`); the GUI's install flow and the queue consumer are
@@ -198,6 +200,6 @@ noted that GOG exposes no signal.
 
 - The install queue's GUI consumer (the library sync, `docs/m2-store-sync.md`, is
   the first half of the wiring).
-- The in-app PTY terminal for auth (M2.5).
+- The in-app PTY terminal for auth — shipped in `docs/m2-auth-terminal.md`.
 - Per-store update *application* (running the store's update command).
 - SteamGridDB or artwork for imported games.

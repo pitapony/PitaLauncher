@@ -178,8 +178,10 @@ That log is a local diagnostic: it is never printed, never stored in SQLite and
 never shown in the UI. Redaction is an M4 hardening item. Ctrl-D on the prompt
 cancels the run (the driver sends `SIGHUP`, then `SIGKILL` to the group).
 
-The flow drives the handle itself (`spawn` → `write_stdin` → `wait`), so it gets
-its verdict from `Epic::report(&CliCommand::Auth, outcome)` — the same
+The prompt handling is the shared relay (`stores::auth::AuthRun`,
+`docs/m2-auth-terminal.md`): `pitagames-cli epic auth` and the Stores screen's
+in-app terminal drive the same code, so the two cannot answer different prompts.
+The verdict is `RunReport::succeeded()` with legendary's log format — the same
 exit-`0`-with-an-error check as the other commands. Without it, a legendary
 refusal after the prompt would have printed "Authenticated."
 

@@ -37,7 +37,7 @@ DB-unaware and argv-only: a spec of program + argument templates goes in,
 | `ProgressParser` | `Plain`, `Percent(Regex)`, `JsonLines` |
 | `ProgressEvent` | `Line`, `Percent(f32, String)`, `Stage(String)`, `Done`, `Failed { code, message }` |
 | `CliOptions` | `log_dir`, `env`, `cwd`, `idle_timeout`, `hard_timeout`; `CliOptions::interactive()` |
-| `CliHandle` | `spawn`, `next_event`, `write_stdin`, `cancel`, `log_path`, `wait` |
+| `CliHandle` | `spawn`, `next_event`, `write_stdin`, `cancel`, `log_path`, `wait`, `drain` |
 | `CliOutcome` | `success`, `code`, `cancelled`, `timed_out`, `log_path`, `events`, `raw_tail` |
 | `CliError` | `NotFound`, `Unsupported`, `Template`, `Log`, `Spawn`, `Io` — only *before/while* a run starts |
 | `StoreStatus` | `Ready { program }` / `CliMissing { program }` — `probe`d from `PATH` without running anything; shared by every backend |
@@ -142,9 +142,16 @@ child survives a 2 s grace period (it ignores `SIGHUP`, or a worker holds the
 PTY open), the whole process group is `SIGKILL`ed with `kill(-pid, SIGKILL)`, so
 a cancelled install cannot leave workers downloading in the background.
 
-`cancel()` is idempotent and takes `&self` through a mutex, so the GUI's worker
-thread can cancel a run the UI thread is reading. `Drop` is a best-effort
-`SIGHUP` for the case where a caller forgets to `wait()`.
+`cancel()` is idempotent and takes `&self`, so one thread can cancel a run
+another one is reading, and `write_stdin` works the same way — which is what an
+interactive flow (a prompt a person answers) needs. The handle carries **two
+locks** for that: the state, and the reader's channel. The poll waits on the
+channel *outside* the state lock, because a waiter that only ever arrives
+between two polls is starved in practice; in the container the old
+single-lock shape delayed a `cancel()` by ~12 s. `drain(&self)` is `wait`
+without giving up the handle, for a caller that is not the only owner.
+`Drop` is a best-effort `SIGHUP` for the case where a caller forgets to
+`wait()`.
 
 A run that starts and then fails is **not** a `CliError`: it ends with a
 `Failed` event plus the flags on `CliOutcome`, so the partial output, the log
@@ -226,7 +233,7 @@ cargo clippy -p pitagames-stores --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-- **`cli::tests` (29)** — template substitution (install placeholders, unknown
+- **`cli::tests` (31)** — template substitution (install placeholders, unknown
   and malformed placeholders, no re-scan of substituted values), the three
   parsers (including an out-of-range JSON percentage), line splitting on
   `\n`/`\r`, a partial line kept until flushed, ANSI stripping (CSI, OSC,
@@ -236,8 +243,10 @@ cargo fmt --all -- --check
   `write_stdin`, an expired session, disk-full and network errors naming the
   CLI's line, CR redraws, a trailing line without a newline, `NotFound`, the
   idle and hard timeouts, a child that ignores `SIGHUP` (only the process-group
-  `SIGKILL` ends it), `cancel()`, the empty-template `Unsupported` guard and the
-  `StoreStatus` probe.
+  `SIGKILL` ends it), `cancel()`, a second thread answering a prompt the reader
+  is blocked on, a second thread reaching the state lock while the reader waits
+  on a silent child (the starvation regression), the empty-template
+  `Unsupported` guard and the `StoreStatus` probe.
 - **Deterministic by construction.** The two timeout tests originally raced a
   slow `fork`+`exec` against a short idle window and flaked under the parallel
   test harness. The idle test now uses a script that never prints (so startup

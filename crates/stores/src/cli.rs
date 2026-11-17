@@ -489,10 +489,19 @@ pub struct CliOutcome {
 /// A running CLI.
 ///
 /// `CliHandle` is `Send` and its methods take `&self`, so the reader side can
-/// live on a worker thread while another thread cancels it. The handle must be
-/// dropped (or [`wait`](Self::wait)ed) for the child to be reaped.
+/// live on a worker thread while another thread cancels it or answers a prompt.
+/// The handle must be dropped (or [`wait`](Self::wait)ed) for the child to be
+/// reaped.
 pub struct CliHandle {
     inner: Mutex<CliInner>,
+    /// The reader thread's output, behind its own lock.
+    ///
+    /// The poll loop blocks on this channel for a poll interval at a time, and
+    /// holding the state lock across that wait would starve [`cancel`](Self::cancel)
+    /// and [`write_stdin`](Self::write_stdin): a thread that waits for the state
+    /// only ever arrives between two polls, which is a window far too small to
+    /// be fair. Two locks make the blocking wait and the state independent.
+    inbox: Mutex<Receiver<Option<Vec<u8>>>>,
 }
 
 struct CliInner {
@@ -500,7 +509,6 @@ struct CliInner {
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
     writer: Box<dyn Write + Send>,
-    rx: Receiver<Option<Vec<u8>>>,
     assembler: LineAssembler,
     log_path: Option<PathBuf>,
     idle_timeout: Option<Duration>,
@@ -592,6 +600,26 @@ enum Step {
     Eof,
 }
 
+/// What the reader thread handed over this poll.
+enum Incoming {
+    /// Output bytes from the PTY.
+    Data(Vec<u8>),
+    /// The terminal closed: the child is gone and nothing more will arrive.
+    Eof,
+    /// Nothing arrived within the poll interval.
+    Idle,
+}
+
+/// The result of one [`CliHandle::pump`].
+enum Poll {
+    /// An event for the caller.
+    Event(ProgressEvent),
+    /// Nothing yet; poll again.
+    Idle,
+    /// The stream is over.
+    End,
+}
+
 impl CliHandle {
     /// Resolves the program, allocates the PTY and starts the child.
     pub fn spawn(
@@ -653,7 +681,6 @@ impl CliHandle {
                 killer,
                 pid,
                 writer,
-                rx,
                 assembler: LineAssembler::new(spec.progress.clone()),
                 log_path,
                 idle_timeout: options.idle_timeout,
@@ -669,24 +696,18 @@ impl CliHandle {
                 timed_out: None,
                 eof: false,
             }),
+            inbox: Mutex::new(rx),
         })
     }
 
     /// Blocks until the next event. `Ok(None)` means the stream is over (the
     /// terminal event was the last one returned).
     pub fn next_event(&self) -> Result<Option<ProgressEvent>, CliError> {
-        let mut inner = self.lock();
         loop {
-            if inner.cursor < inner.assembler.events.len() {
-                let event = inner.assembler.events[inner.cursor].clone();
-                inner.cursor += 1;
-                return Ok(Some(event));
-            }
-            match inner.step()? {
-                // The final step appends the terminal event; loop once more to
-                // yield it before reporting the end of the stream.
-                Step::Eof if inner.cursor >= inner.assembler.events.len() => return Ok(None),
-                Step::Eof | Step::Data | Step::NoData => {}
+            match self.pump(POLL_INTERVAL)? {
+                Poll::Event(event) => return Ok(Some(event)),
+                Poll::Idle => continue,
+                Poll::End => return Ok(None),
             }
         }
     }
@@ -728,13 +749,61 @@ impl CliHandle {
     /// Safe to call after the event stream already ended: the outcome is built
     /// from what the run recorded.
     pub fn wait(self) -> Result<CliOutcome, CliError> {
-        let mut inner = self.lock();
+        self.drain()
+    }
+
+    /// The same drain, without giving up the handle.
+    ///
+    /// An interactive flow keeps the handle alive across threads (one reads the
+    /// output, another one types), so it cannot consume it to learn the verdict.
+    pub fn drain(&self) -> Result<CliOutcome, CliError> {
         loop {
-            if inner.step()? == Step::Eof {
+            if let Poll::End = self.pump(POLL_INTERVAL)? {
                 break;
             }
         }
-        Ok(inner.outcome())
+        Ok(self.lock().outcome())
+    }
+
+    /// One pass: yield a buffered event, or wait for output and advance the
+    /// state machine.
+    ///
+    /// The state lock is never held across the wait, which is what keeps
+    /// [`cancel`](Self::cancel) and [`write_stdin`](Self::write_stdin) usable
+    /// from another thread while this one blocks on a silent CLI.
+    fn pump(&self, timeout: Duration) -> Result<Poll, CliError> {
+        {
+            let mut inner = self.lock();
+            if let Some(event) = inner.take_buffered() {
+                return Ok(Poll::Event(event));
+            }
+        }
+
+        let incoming = self.receive(timeout)?;
+
+        let mut inner = self.lock();
+        inner.step(incoming)?;
+        match inner.take_buffered() {
+            // The final step appends the terminal event; it is yielded before
+            // the end of the stream is reported.
+            Some(event) => Ok(Poll::Event(event)),
+            None if inner.eof => Ok(Poll::End),
+            None => Ok(Poll::Idle),
+        }
+    }
+
+    /// Waits up to `timeout` for the reader thread, outside the state lock.
+    fn receive(&self, timeout: Duration) -> Result<Incoming, CliError> {
+        let inbox = self
+            .inbox
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(match inbox.recv_timeout(timeout) {
+            Ok(Some(bytes)) => Incoming::Data(bytes),
+            // The reader thread ends after closing the channel: the PTY is done.
+            Ok(None) | Err(RecvTimeoutError::Disconnected) => Incoming::Eof,
+            Err(RecvTimeoutError::Timeout) => Incoming::Idle,
+        })
     }
 
     fn lock(&self) -> MutexGuard<'_, CliInner> {
@@ -786,21 +855,31 @@ fn pump_output(
 }
 
 impl CliInner {
-    /// Polls the output channel once and maintains the timeout/escalation
-    /// state machine.
-    fn step(&mut self) -> Result<Step, CliError> {
+    /// The next event the assembler already produced, if any.
+    fn take_buffered(&mut self) -> Option<ProgressEvent> {
+        if self.cursor >= self.assembler.events.len() {
+            return None;
+        }
+        let event = self.assembler.events[self.cursor].clone();
+        self.cursor += 1;
+        Some(event)
+    }
+
+    /// Folds one poll's input into the state and maintains the
+    /// timeout/escalation machine.
+    fn step(&mut self, incoming: Incoming) -> Result<Step, CliError> {
         if self.eof {
             return Ok(Step::Eof);
         }
-        match self.rx.recv_timeout(POLL_INTERVAL) {
-            Ok(Some(bytes)) => {
+        match incoming {
+            Incoming::Data(bytes) => {
                 self.last_activity = Instant::now();
                 self.assembler.ingest(&bytes);
                 self.supervise();
                 Ok(Step::Data)
             }
-            Ok(None) | Err(RecvTimeoutError::Disconnected) => self.finish(),
-            Err(RecvTimeoutError::Timeout) => {
+            Incoming::Eof => self.finish(),
+            Incoming::Idle => {
                 if !self.assembler.line_buf.is_empty()
                     && self.last_activity.elapsed() >= PARTIAL_FLUSH_QUIET
                 {
@@ -1852,6 +1931,109 @@ mod tests {
                 .contains(&ProgressEvent::Line("alive".into())),
             "{:?}",
             outcome.events
+        );
+    }
+
+    #[test]
+    fn another_thread_can_answer_a_prompt_while_the_reader_waits() {
+        let dir = tempfile::tempdir().unwrap();
+        script(
+            dir.path(),
+            "fake-interactive",
+            "#!/bin/sh\nprintf 'code: '\nread code\necho \"got:$code\"\nexit 0\n",
+        );
+        let spec = spec("fake-interactive", ProgressParser::Plain);
+        let options = CliOptions {
+            idle_timeout: None,
+            ..options(dir.path())
+        };
+        let handle =
+            std::sync::Arc::new(CliHandle::spawn(&spec, &CliCommand::Auth, &options).unwrap());
+
+        // The writer types while the reader is blocked on the child, which is
+        // the whole reason `next_event` releases the lock between polls: a
+        // caller that held it across the wait would deadlock here.
+        let writer = std::sync::Arc::clone(&handle);
+        let answer = std::thread::spawn(move || writer.write_stdin(b"123456\n"));
+
+        let mut seen = Vec::new();
+        while let Some(event) = handle.next_event().unwrap() {
+            seen.push(event);
+        }
+        answer.join().unwrap().unwrap();
+
+        assert!(
+            seen.iter().any(
+                |event| matches!(event, ProgressEvent::Line(text) if text.contains("got:123456"))
+            ),
+            "{seen:?}"
+        );
+        assert_eq!(seen.last(), Some(&ProgressEvent::Done));
+    }
+
+    #[test]
+    fn a_second_thread_is_not_starved_by_the_poll_loop() {
+        let dir = tempfile::tempdir().unwrap();
+        // Prints one line, then goes quiet: the reader spends the whole test
+        // blocked on a CLI that says nothing.
+        script(
+            dir.path(),
+            "fake-quiet",
+            "#!/bin/sh\n: > \"$1\"\necho ready\nsleep 30\n",
+        );
+        let marker = dir.path().join("up");
+        let mut spec = spec("fake-quiet", ProgressParser::Plain);
+        spec.launch = vec!["{id}".into()];
+        let options = CliOptions {
+            idle_timeout: None,
+            // Bounds the test: a starved lock would only be released here.
+            hard_timeout: Some(Duration::from_secs(30)),
+            ..options(dir.path())
+        };
+        let handle = std::sync::Arc::new(
+            CliHandle::spawn(
+                &spec,
+                &CliCommand::Launch {
+                    id: marker.to_string_lossy().into_owned(),
+                    install_dir: None,
+                },
+                &options,
+            )
+            .unwrap(),
+        );
+        wait_for_file(&marker);
+
+        let reader = {
+            let handle = std::sync::Arc::clone(&handle);
+            std::thread::spawn(move || {
+                let mut lines = Vec::new();
+                while let Some(event) = handle.next_event().unwrap() {
+                    lines.push(event);
+                }
+                lines
+            })
+        };
+        std::thread::sleep(Duration::from_millis(300));
+
+        // A cancel or a typed answer takes this lock from another thread; it
+        // must not wait for the poll loop to finish a slice, let alone for the
+        // CLI to say something.
+        let started = Instant::now();
+        let probe = std::sync::Arc::clone(&handle);
+        let reached = std::thread::spawn(move || probe.log_path()).join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "a second thread waited {:?} for the state lock",
+            started.elapsed()
+        );
+        assert!(reached.is_some());
+
+        handle.cancel();
+        let seen = reader.join().unwrap();
+        assert!(
+            seen.iter()
+                .any(|event| matches!(event, ProgressEvent::Line(text) if text == "ready")),
+            "{seen:?}"
         );
     }
 

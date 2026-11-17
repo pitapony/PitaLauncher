@@ -178,12 +178,15 @@ URL:
 ```
 
 The last line is a `std::getline(std::cin, …)` prompt with no trailing newline,
-which is exactly what the driver's partial-line flush exists for. The CLI relays
-one stdin line for the prompt ending in `:`; the pasted URL carries the OAuth
-`code=`, which `lgogdownloader` extracts. It is the same code-paste shape as
-Epic's and Amazon's flows, so a PTY echoes it: the transcript is a local
-diagnostic, never printed back or stored. A failed login prints
-`Failed to get auth code` and exits non-zero, so the exit code is the verdict.
+which is exactly what the driver's partial-line flush exists for. The prompt is
+handled by the shared relay (`stores::auth::AuthRun`,
+`docs/m2-auth-terminal.md`), the same code `pitagames-cli gog auth` and the
+Stores screen's in-app terminal drive: it hands one line to whoever is driving,
+and the pasted URL carries the OAuth `code=` that `lgogdownloader` extracts. It
+is the same code-paste shape as Epic's and Amazon's flows, so a PTY echoes it:
+the transcript is a local diagnostic, never printed back or stored. A failed
+login prints `Failed to get auth code` and exits non-zero, so the exit code is
+the verdict.
 
 **No logout.** Neither CLI can forget a session (`lgogdownloader` would need its
 cookie file deleted, `gogdl` its token file), and file deletion is not a CLI
