@@ -112,7 +112,9 @@ The editor UI has:
 - a live **Preview** line, or an amber validation message instead.
 
 Wrappers are saved with the rest of the profile by **Save & write profile**,
-which writes both SQLite and `profiles/steam-<appid>.json`. Selecting another
+which writes both SQLite and `profiles/<store>-<id>.json` (`steam-<appid>.json`
+for a Steam game; the editor is available for every store since
+`docs/m2-runtime-editor.md`). Selecting another
 profile ("Use") reloads the draft from that profile; deleting/creating a profile
 reloads the list and the draft.
 

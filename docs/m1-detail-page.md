@@ -62,6 +62,9 @@ Rules:
   to `~/.local/share/pitagames/profiles/steam-<appid>.json` belongs to the shim
   JSON writer task; the shim read side is still deferred.
 
+> The Profiles panel and the Runtime panel now render for **every** store, not
+> just Steam; see `docs/m1-profile.md` and `docs/m2-runtime-editor.md`.
+
 ## Verification
 
 Pure crates (macOS host):

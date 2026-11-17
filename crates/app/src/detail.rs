@@ -286,31 +286,43 @@ pub fn Detail(props: DetailProps) -> Element {
     };
     let steam_root = props.steam_root.clone();
 
-    // The resolved command mirrors `pitagames-shim --explain`: the environment,
-    // the shim, the wrapper chain and %command%. It recomputes on every render
-    // from the selected profile plus the live drafts, so toggling a diagnostic
-    // or a wrapper shows up immediately.
+    // The resolved command mirrors what will actually run: `pitagames-shim` for
+    // a Steam game, the umu/Proton (or store-client) hand-off for every other
+    // store. Both recompute on every render from the selected profile plus the
+    // live drafts, so toggling a diagnostic or a wrapper shows up immediately.
     let preview_app = entry.app_id().to_string();
-    let command_preview: Result<String, String> =
-        match (selected_profile.as_ref(), props.proton.as_ref()) {
-            (Some(profile), Some(report)) => {
-                let mut preview = profile.clone();
-                preview.proton = current_choice.clone();
-                // Apply the two drafts in order; a refused wrapper draft stops
-                // before the diagnostics are touched.
-                let applied = wrapper_draft().apply_to(&mut preview);
-                let applied = match applied {
-                    Ok(()) => diagnostics_draft().apply_to(&mut preview),
-                    Err(message) => Err(message),
-                };
-                match applied {
-                    Ok(()) => runtime::resolved_preview(&preview_app, &preview, report),
-                    Err(message) => Err(message),
-                }
+    let draft_preview: Result<Profile, String> = match selected_profile.as_ref() {
+        Some(profile) => {
+            let mut preview = profile.clone();
+            preview.proton = current_choice.clone();
+            // Apply the two drafts in order; a refused wrapper draft stops
+            // before the diagnostics are touched.
+            let applied = wrapper_draft().apply_to(&mut preview);
+            match applied {
+                Ok(()) => diagnostics_draft().apply_to(&mut preview).map(|()| preview),
+                Err(message) => Err(message),
             }
-            (None, _) => Err("Create and select a profile to see the launch command.".to_string()),
-            (_, None) => Err("Proton discovery is not ready yet.".to_string()),
-        };
+        }
+        None => Err("Create and select a profile to see the launch command.".to_string()),
+    };
+
+    let mut handoff_note: Option<String> = None;
+    let command_preview: Result<String, String> = match (draft_preview, props.proton.as_ref()) {
+        (Ok(preview), Some(report)) if is_steam => {
+            runtime::resolved_preview(&preview_app, &preview, report)
+        }
+        (Ok(preview), Some(report)) => {
+            runtime::handoff_preview(&entry.game, &preview, report).map(|handoff| {
+                handoff_note = Some(match &handoff.prefix {
+                    Some(prefix) => format!("{} · prefix {prefix}", handoff.mode),
+                    None => format!("{} · no per-game prefix", handoff.mode),
+                });
+                handoff.command
+            })
+        }
+        (Ok(_), None) => Err("Proton discovery is not ready yet.".to_string()),
+        (Err(message), _) => Err(message),
+    };
     let (command_text, command_error) = match command_preview {
         Ok(command) => (command, None),
         Err(message) => (String::new(), Some(message)),
@@ -473,13 +485,12 @@ pub fn Detail(props: DetailProps) -> Element {
                 {about_body}
             }
 
-            if is_steam {
-                div {
-                    style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
-                    h3 {
-                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
-                        "Profiles"
-                    }
+            div {
+                style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
+                h3 {
+                    style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                    "Profiles"
+                }
                     p {
                         style: "margin:0;font-size:12px;color:#78788a;",
                         "A profile picks the Proton build and graphics settings this game launches with. New profiles start from the safe defaults."
@@ -589,24 +600,21 @@ pub fn Detail(props: DetailProps) -> Element {
                         }
                     }
                 }
-            } else {
-                div {
-                    style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;line-height:1.5;",
-                    "Per-game runtime settings (the Proton build, the wrapper chain and the diagnostics toggles) are still Steam-only. This game launches with the profile file the hand-off reads, which only the CLI writes today."
-                }
-            }
 
-            if is_steam {
-                div {
-                    style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
-                    h3 {
-                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
-                        "Runtime"
-                    }
-                    p {
-                        style: "margin:0;font-size:12px;color:#78788a;",
+            div {
+                style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
+                h3 {
+                    style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                    "Runtime"
+                }
+                p {
+                    style: "margin:0;font-size:12px;color:#78788a;",
+                    if is_steam {
                         "PitaGames launches this game through pitagames-shim. Pick the Proton build and wrapper chain for the active profile, then route the game through the shim in Steam's launch options."
+                    } else {
+                        "Pick the Proton build and wrapper chain for the active profile. PitaGames starts this game itself — through umu with a per-game Wine prefix, or through the store's own client when it launches a game by id."
                     }
+                }
 
                     if let Some(profile) = selected_profile.clone() {
                         div {
@@ -708,7 +716,7 @@ pub fn Detail(props: DetailProps) -> Element {
                             "Save & write profile"
                         }
 
-                        if let Some(root) = route_root.clone() {
+                        if let Some(root) = route_root.clone().filter(|_| is_steam) {
                             button {
                                 onclick: {
                                     let root = root.clone();
@@ -852,7 +860,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         }
                     }
 
-                    if let Some(status) = routing_status.clone() {
+                    if let Some(status) = routing_status.clone().filter(|_| is_steam) {
                         div {
                             style: "display:flex;flex-direction:column;gap:2px;font-size:11px;color:#78788a;",
                             span { "Steam: {status.steam.describe()}" }
@@ -882,7 +890,11 @@ pub fn Detail(props: DetailProps) -> Element {
                             CopyButton { text: command_text.clone() }
                             span {
                                 style: "font-size:11px;color:#78788a;",
-                                "what pitagames-shim will run (the same line as --explain)"
+                                if is_steam {
+                                    "what pitagames-shim will run (the same line as --explain)"
+                                } else {
+                                    "what the launch hand-off will run"
+                                }
                             }
                         }
                         if let Some(message) = command_error.clone() {
@@ -896,6 +908,12 @@ pub fn Detail(props: DetailProps) -> Element {
                                 "{command_text}"
                             }
                         }
+                        if let Some(note) = handoff_note.clone() {
+                            span {
+                                style: "font-size:11px;color:#78788a;",
+                                "launch shape: {note}"
+                            }
+                        }
                     }
 
                     if !runtime_note.is_empty() {
@@ -905,7 +923,6 @@ pub fn Detail(props: DetailProps) -> Element {
                         }
                     }
                 }
-            }
         }
     }
 }

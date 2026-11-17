@@ -197,7 +197,7 @@ Framework-free (no Dioxus types), like `store_installs` and `downloads`:
 | `PlayChannel` | the `sender()` + `async next()` pair, same shape as `InstallChannel` |
 | `play::spawn(game, sender)` | one worker thread, named `pitagames-play-<store>` |
 | `play::start_game` | profile → Proton → `prepare` → `start` → `wait` |
-| `play::client_launch` | the client spec for a row that names no executable (`None` otherwise) |
+| `runtime::client_launch` | the client spec for a row that names no executable (`None` otherwise); `runtime::compose_handoff` is the composition shared with the detail page (`docs/m2-runtime-editor.md`) |
 
 **One game at a time** is a design rule, not a limitation of the code: two
 Proton trees on one prefix is exactly what the per-game prefix layout exists to
@@ -297,7 +297,7 @@ cargo clippy -p pitagames --all-targets
 - A second smoke run for the **store-client shape**, seeded through
   `pitagames-cli stores sync --store=amazon` against a fake `nile` (so the grid
   held two `installed` Amazon rows). The cards showed **Play** where they showed
-  `installed` before this slice, and the detail page too (its non-Steam note now
+  `installed` before this slice, and the detail page too (its non-Steam note then
   reads "Per-game runtime settings … are still Steam-only"). Clicking Play ran
   `nile launch amzn1.adg.product.ab888f57` — the child's own transcript read
   `INFO [LAUNCHER]: Launching amzn1.adg.product.ab888f57` and the fake's marker
@@ -324,10 +324,11 @@ cargo clippy -p pitagames --all-targets
   install records the row without one. For an exe-based store
   `pitagames-cli launch <store> <id> --exe <path>` works around it today; the
   installer should learn to carry the executable.
-- **A non-Steam game has no profile editor.** The Runtime panel (Proton picker,
-  wrapper chain, diagnostics) is still Steam-only even though the file shape and
-  the compiler are shared. Such a row launches with whatever a
-  `profiles/<store>-<id>.json` holds, which only the CLI can write today.
+- **A non-Steam game's profile editor** arrived in the next slice
+  (`docs/m2-runtime-editor.md`): the Profiles and Runtime panels now render for
+  every store and the Command panel previews this hand-off's composition. Before
+  that, such a row launched with whatever a `profiles/<store>-<id>.json` held,
+  which only the CLI could write.
 - **No Proton resolved means a Windows game cannot start**, even when Steam
   would pick a build. `PROTONPATH` comes from `platform::proton`; an umu-managed
   `GE-Proton` download is not implemented.
@@ -343,7 +344,6 @@ cargo clippy -p pitagames --all-targets
 
 ## Deliberately not in this slice
 
-- The per-game runtime editor for non-Steam games.
 - The gamescope console session (M2.5) — `--session`/`PITAGAMES_SESSION` already
   suppress a nested gamescope, which is the part this slice owns.
 - Resuming a running game after a launcher restart, and a launch history.

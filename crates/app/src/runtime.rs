@@ -15,17 +15,19 @@ use std::path::{Path, PathBuf};
 
 use pitagames_core::profile::{Diagnostics, GamescopeOptions, WrapperChain, WrapperStep};
 use pitagames_core::{
-    Profile, SHIM_PROGRAM, ShimProfile, flatten_wrappers, render_shell_command, save_shim_profile,
-    shell_quote, shim_launch_options, tokenize_command,
+    Game, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, flatten_wrappers,
+    render_shell_command, save_shim_profile, shell_quote, shim_launch_options, tokenize_command,
 };
 use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime};
-use pitagames_platform::proton::{self, DiscoveryReport};
+use pitagames_platform::launch::{self as handoff, Prepared};
+use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonSource};
 use pitagames_stores::compat_tool::CompatTool;
 use pitagames_stores::steam::user_configs;
 use pitagames_stores::steam_config::{
     self, CompatRestoreReport, CompatWriteReport, RestoreReport, SteamProcessState, WriteOptions,
     WriteReport,
 };
+use pitagames_stores::sync::Backends;
 
 /// Every Proton build discovery found, best first.
 pub fn discover_proton() -> DiscoveryReport {
@@ -439,6 +441,143 @@ fn write_shim_profile_in(
 
     let path = save_shim_profile(dir, &shim).map_err(|error| error.to_string())?;
     Ok((path, compiled))
+}
+
+/// A non-Steam launch composed from a profile, for the Runtime panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandoffPreview {
+    /// The launch shape: `umu`, `native` or `client`.
+    pub mode: &'static str,
+    /// The per-game Wine prefix, when the launcher owns one (a store client
+    /// owns its own runtime and carries none).
+    pub prefix: Option<String>,
+    /// The POSIX-quoted command the hand-off will run.
+    pub command: String,
+}
+
+/// Compose a non-Steam row's hand-off from a profile, for the preview.
+///
+/// The GUI's mirror of `pitagames-cli launch`: it compiles the profile with the
+/// same [`envc`] compiler the shim path uses, then runs the same
+/// [`compose_handoff`] the Play button runs — so the line the panel shows and
+/// the process a launch starts cannot drift. It writes nothing, so unsaved
+/// draft edits can be previewed.
+pub fn handoff_preview(
+    game: &Game,
+    profile: &Profile,
+    report: &DiscoveryReport,
+) -> Result<HandoffPreview, String> {
+    let log_dir = logs_dir();
+    let compiled = envc::compile_runtime(CompileRequest {
+        profile,
+        // Proton is resolved once, inside `compose_handoff`, so a preview and a
+        // real launch take the same path.
+        proton: None,
+        log_dir: log_dir.as_deref(),
+        session: session_mode(),
+    })
+    .map_err(|error| error.to_string())?;
+
+    let mut shim = ShimProfile::new(profile.game.clone(), &profile.name);
+    shim.proton = Some(envc::shim_proton(&profile.proton, None));
+    shim.env = compiled.env;
+    shim.wrappers = compiled.wrappers;
+
+    let prepared = compose_handoff(game, Some(&shim), report)?;
+    Ok(HandoffPreview {
+        mode: prepared.mode.label(),
+        prefix: prepared
+            .prefix
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        command: prepared.render(),
+    })
+}
+
+/// Compose the umu/Proton hand-off for a non-Steam row.
+///
+/// Shared by the Runtime panel's preview and [`crate::play`]'s worker, so the
+/// line the panel shows and the process a Play starts cannot drift. `runtime` is
+/// the compiled profile to apply — the saved shim file for a launch, the live
+/// draft for a preview.
+pub fn compose_handoff(
+    game: &Game,
+    runtime: Option<&ShimProfile>,
+    report: &DiscoveryReport,
+) -> Result<Prepared, String> {
+    // A native executable runs without Proton, so discovery failing on a machine
+    // that has none must not stop the launch: only a Windows build needs the
+    // answer, and `prepare` names that failure itself.
+    let proton = match resolve_handoff_proton(runtime, report) {
+        Ok(install) => install,
+        Err(error) if needs_proton(game) => return Err(error),
+        Err(_) => None,
+    };
+
+    let root = pitagames_platform::prefix::default_root()
+        .ok_or_else(|| "no data directory (HOME is unset)".to_string())?;
+    // A store whose client starts games by id (gogdl, nile) names no
+    // executable, so its argv is composed here and the hand-off only supervises
+    // it.
+    let client = client_launch(game)?;
+
+    handoff::prepare(&handoff::Handoff {
+        game,
+        runtime,
+        proton: proton.as_ref(),
+        prefix_root: &root,
+        session: session_mode(),
+        client: client.as_ref(),
+    })
+    .map_err(|error| error.to_string())
+}
+
+/// The Proton a hand-off uses: the one the profile recorded, else discovery.
+fn resolve_handoff_proton(
+    runtime: Option<&ShimProfile>,
+    report: &DiscoveryReport,
+) -> Result<Option<ProtonInstall>, String> {
+    let recorded = runtime
+        .and_then(|runtime| runtime.proton.as_ref())
+        .and_then(|proton| proton.install.as_ref());
+
+    if let Some(recorded) = recorded
+        && let Ok(install) = ProtonInstall::from_dir(&recorded.path, ProtonSource::Explicit)
+    {
+        return Ok(Some(install));
+    }
+
+    let reference = runtime
+        .and_then(|runtime| runtime.proton.as_ref())
+        .map(|proton| proton.reference.clone())
+        .unwrap_or(ProtonRef::Auto);
+
+    report
+        .resolve(&reference)
+        .map_err(|error| error.to_string())
+}
+
+/// Whether this row's launch needs a Proton build at all.
+fn needs_proton(game: &Game) -> bool {
+    game.exe
+        .as_deref()
+        .is_some_and(|exe| handoff::is_windows(exe, game))
+}
+
+/// The store client's argv, when this row launches by id instead of by path.
+///
+/// `None` for every other row, which keeps the umu/native hand-off untouched. A
+/// template failure (GOG's `gogdl` needs the install directory) is returned as
+/// the launch's own error, because it is exactly the case Play cannot retry
+/// around.
+pub fn client_launch(game: &Game) -> Result<Option<LaunchSpec>, String> {
+    if game.exe.is_some() || !pitagames_stores::launch::launches_by_id(game.id.store) {
+        return Ok(None);
+    }
+    let backends = Backends::new();
+    pitagames_stores::launch::client_spec(&backends, game)
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// The Steam user whose `localconfig.vdf` the launch options live in.
@@ -988,6 +1127,193 @@ mod tests {
             ..DiscoveryReport::default()
         };
         let error = resolved_preview("620", &profile, &report).unwrap_err();
+        assert!(error.contains("upscaler"), "{error}");
+    }
+
+    /// An installed non-Steam row with an optional executable.
+    fn epic_game(id: &str, exe: Option<&str>) -> Game {
+        let mut game = Game::new(GameId::new(Store::Epic, id), id);
+        game.installed = true;
+        game.exe = exe.map(PathBuf::from);
+        game
+    }
+
+    /// A report with one discovered build; enough for a Windows hand-off.
+    fn report() -> DiscoveryReport {
+        DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        }
+    }
+
+    #[test]
+    fn only_a_windows_build_needs_proton() {
+        let native = epic_game("Native", Some("/games/Native/native.sh"));
+        assert!(!needs_proton(&native));
+
+        let windows = epic_game("Windows", Some("/games/Windows/Game.exe"));
+        assert!(needs_proton(&windows));
+
+        let mut tagged = epic_game("Tagged", Some("/games/Tagged/Game"));
+        tagged
+            .tags
+            .push(pitagames_platform::launch::WINDOWS_TAG.to_string());
+        assert!(needs_proton(&tagged));
+
+        assert!(
+            !needs_proton(&epic_game("NoExe", None)),
+            "prepare names that failure"
+        );
+    }
+
+    #[test]
+    fn a_store_that_launches_by_id_gets_a_client_spec() {
+        let mut gog = Game::new(GameId::new(Store::Gog, "1207658930"), "GOG Game");
+        gog.installed = true;
+        gog.install_dir = Some(PathBuf::from("/games/gog/GOG Game"));
+
+        let spec = client_launch(&gog).unwrap().expect("gogdl composes a spec");
+        assert_eq!(spec.program, PathBuf::from("gogdl"));
+        assert!(spec.args.contains(&"launch".to_string()), "{:?}", spec.args);
+        assert_eq!(spec.cwd.as_deref(), Some(Path::new("/games/gog/GOG Game")));
+    }
+
+    #[test]
+    fn client_launch_is_only_for_a_store_without_an_executable() {
+        let epic = epic_game("Gizmo", Some("/games/Gizmo/Gizmo.exe"));
+        assert!(client_launch(&epic).unwrap().is_none());
+
+        assert!(
+            client_launch(&epic_game("Gizmo", None)).unwrap().is_none(),
+            "Epic launches through umu, not its client"
+        );
+
+        let mut gog = Game::new(GameId::new(Store::Gog, "1234"), "GOG Game");
+        gog.installed = true;
+        gog.exe = Some(PathBuf::from("/games/gog/game.exe"));
+        assert!(
+            client_launch(&gog).unwrap().is_none(),
+            "a row with an executable goes through the hand-off directly"
+        );
+    }
+
+    #[test]
+    fn a_gog_row_without_a_directory_reports_the_template_error() {
+        let mut gog = Game::new(GameId::new(Store::Gog, "1234"), "GOG Game");
+        gog.installed = true;
+
+        let error = client_launch(&gog).unwrap_err();
+        assert!(error.contains("dir"), "{error}");
+    }
+
+    #[test]
+    fn a_windows_row_previews_the_umu_hand_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("Gizmo");
+        std::fs::create_dir_all(&install).unwrap();
+        let exe = install.join("Gizmo.exe");
+        std::fs::write(&exe, "").unwrap();
+        let mut game = epic_game("Gizmo", Some(exe.to_str().unwrap()));
+        game.install_dir = Some(install);
+
+        let mut profile = Profile::new(game.id.clone(), "Default");
+        profile.diagnostics.dxvk_hud = true;
+
+        let preview = handoff_preview(&game, &profile, &report()).unwrap();
+
+        assert_eq!(preview.mode, "umu");
+        assert!(
+            preview.prefix.as_deref().unwrap().ends_with("epic-Gizmo"),
+            "{:?}",
+            preview.prefix
+        );
+        assert!(
+            preview.command.contains("DXVK_HUD=fps"),
+            "{}",
+            preview.command
+        );
+        assert!(preview.command.contains("umu-run"), "{}", preview.command);
+        assert!(
+            preview.command.contains("GAMEID=epic-Gizmo"),
+            "{}",
+            preview.command
+        );
+        assert!(
+            preview.command.contains("STORE=epic"),
+            "{}",
+            preview.command
+        );
+    }
+
+    #[test]
+    fn a_native_row_previews_a_direct_launch_without_proton() {
+        let temp = tempfile::tempdir().unwrap();
+        let exe = temp.path().join("native");
+        std::fs::write(&exe, "").unwrap();
+        let mut game = Game::new(GameId::new(Store::Local, "native"), "Native");
+        game.installed = true;
+        game.exe = Some(exe.clone());
+
+        let profile = Profile::new(game.id.clone(), "Default");
+        // A machine with no Proton must still preview a native launch.
+        let preview = handoff_preview(&game, &profile, &DiscoveryReport::default()).unwrap();
+
+        assert_eq!(preview.mode, "native");
+        assert_eq!(preview.prefix, None);
+        assert!(
+            preview.command.contains(&exe.display().to_string()),
+            "{}",
+            preview.command
+        );
+        assert!(!preview.command.contains("umu-run"), "{}", preview.command);
+    }
+
+    #[test]
+    fn a_store_client_row_previews_its_client_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("GOG Game");
+        std::fs::create_dir_all(&install).unwrap();
+        let mut game = Game::new(GameId::new(Store::Gog, "1207658930"), "GOG Game");
+        game.installed = true;
+        game.install_dir = Some(install);
+
+        let profile = Profile::new(game.id.clone(), "Default");
+        let preview = handoff_preview(&game, &profile, &DiscoveryReport::default()).unwrap();
+
+        assert_eq!(preview.mode, "client");
+        assert_eq!(preview.prefix, None, "a store client owns its own runtime");
+        assert!(preview.command.contains("gogdl"), "{}", preview.command);
+        assert!(
+            preview.command.contains("1207658930"),
+            "{}",
+            preview.command
+        );
+    }
+
+    #[test]
+    fn a_not_installed_row_reports_the_hand_off_refusal() {
+        let mut game = Game::new(GameId::new(Store::Epic, "Gizmo"), "Gizmo");
+        game.installed = false;
+        let profile = Profile::new(game.id.clone(), "Default");
+
+        let error = handoff_preview(&game, &profile, &report()).unwrap_err();
+        assert!(error.contains("not installed"), "{error}");
+    }
+
+    #[test]
+    fn a_graphics_profile_cannot_be_previewed_by_the_hand_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("Gizmo");
+        std::fs::create_dir_all(&install).unwrap();
+        let exe = install.join("Gizmo.exe");
+        std::fs::write(&exe, "").unwrap();
+        let mut game = epic_game("Gizmo", Some(exe.to_str().unwrap()));
+        game.install_dir = Some(install);
+
+        let mut profile = Profile::new(game.id.clone(), "FSR 4");
+        profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
+
+        let error = handoff_preview(&game, &profile, &report()).unwrap_err();
         assert!(error.contains("upscaler"), "{error}");
     }
 }

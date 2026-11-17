@@ -62,6 +62,11 @@ first. It is display-only — the launch path stays argv-only — and the panel
 shows a compilation refusal (e.g. a deferred M3 graphics setting) instead of a
 command.
 
+> For a **non-Steam** row the same panel shows the umu/Proton (or store-client)
+> hand-off instead: `runtime::handoff_preview` compiles the draft and runs
+> `runtime::compose_handoff`, the composition `app::play` uses, so the line and a
+> real launch agree (`docs/m2-runtime-editor.md`).
+
 The panel and the logs screen have a **Copy** button
 (`crates/app/src/copy.rs`). Dioxus desktop has no Rust clipboard API without an
 extra crate, so it uses `document::eval`: `navigator.clipboard.writeText` when

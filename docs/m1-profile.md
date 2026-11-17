@@ -152,6 +152,13 @@ panel:
 The profile list already persisted `ProtonRef`; the Runtime panel is where it is
 now set and applied.
 
+> **Non-Steam rows caught up in M2** (`docs/m2-runtime-editor.md`). The Profiles
+> panel and the Proton/wrapper/diagnostics half of the Runtime panel render for
+> every store, not just Steam: a non-Steam game writes the same
+> `profiles/<store>-<id>.json` and the Command panel previews the umu/Proton (or
+> store-client) hand-off instead of the shim line. Only the Steam routing and
+> `config.vdf` compatibility-tool buttons stay Steam-only.
+
 ## CLI diagnostic
 
 ```bash

@@ -211,7 +211,9 @@ cargo clippy -p pitagames --all-targets
   keyed by appid, and `metadata_candidates` skips non-numeric ids, so these cards
   show a letter placeholder until a later slice decides where store art comes
   from.
-- **Play is still Steam-only**, and so are Profiles/Runtime.
+- **Play was still Steam-only**, and so were Profiles/Runtime. Play arrived with
+  the umu/Proton hand-off (`docs/m2-launch.md`) and the Profiles/Runtime panels
+  with the per-game runtime editor (`docs/m2-runtime-editor.md`).
 
 ## Deliberately not in this slice
 
