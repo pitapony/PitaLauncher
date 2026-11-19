@@ -153,6 +153,16 @@ pub fn steam_backup_dir() -> Option<PathBuf> {
     data_dir().map(|base| base.join("backups").join("steam"))
 }
 
+/// `<XDG_CONFIG_HOME>/pitagames/input.toml`: per-device controller/keyboard maps.
+///
+/// The maps are their own file rather than a section of a future `config.toml`
+/// because a device GUID is an awkward table key and because the file is owned
+/// entirely by `platform`-free input code. Nothing reads it unless the GUI wires
+/// it up; see `pitagames-input`.
+pub fn input_maps_file() -> Option<PathBuf> {
+    config_dir().map(|base| base.join("input.toml"))
+}
+
 /// `<XDG_CONFIG_HOME>/pitagames/compat`: user overrides of the shipped compat DB.
 ///
 /// A file here with the same game id as a shipped entry overrides it field by
@@ -317,6 +327,21 @@ mod tests {
 
         assert_eq!(home, Some(PathBuf::from("/tmp/xdg-config")));
         assert_eq!(app, Some(PathBuf::from("/tmp/xdg-config/pitagames")));
+    }
+
+    #[test]
+    fn the_input_maps_file_sits_next_to_the_config_dir() {
+        let guard = ENV_LOCK.lock().unwrap();
+
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-input") };
+        let maps = input_maps_file();
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        drop(guard);
+
+        assert_eq!(
+            maps,
+            Some(PathBuf::from("/tmp/xdg-input/pitagames/input.toml"))
+        );
     }
 
     #[test]

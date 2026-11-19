@@ -10,7 +10,7 @@ Linux.
 ## Status
 
 **M0 vertical slice shipped and container-verified. M1 shipped; M2 (the other
-stores) in progress.**
+stores) feature-complete pending hardware; M2.5 (the console shell) started.**
 
 The last M0 check — launching one real Steam game with `DXVK_HUD=fps` on the
 target hardware — is still blocked on machine access. Everything below the
@@ -172,6 +172,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 | `crates/platform` | Proton discovery, the non-Steam prefix layout, disk-space checks, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
 | `crates/secrets` | Steam Web API key storage (keyring + `0600` fallback) |
+| `crates/input` | Controller/keyboard action model, `gilrs` and replay sources, per-device maps (M2.5) |
 | `crates/shim` | `pitagames-shim` launch shim |
 | `crates/cli` | Headless developer CLI |
 | `crates/app` | Dioxus desktop GUI (the only crate allowed to use RSX) |
