@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 
 use pitagames_core::{AntiCheat, GameId, Profile, ProtonRef};
-use pitagames_db::{Db, StoredProfile};
+use pitagames_db::{Db, HistoryRepository, StoredLaunch, StoredProfile};
 use pitagames_platform::proton::{DiscoveryReport, ProtonInstall};
 use pitagames_stores::compat_tool::CompatTool;
 
@@ -25,6 +25,9 @@ use crate::persist;
 use crate::play::{self, Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
 use crate::wrappers::WrapperEditor;
+
+/// Sessions the detail page's history card shows.
+const HISTORY_ROWS: usize = 5;
 
 /// `Db` wraps a SQLite pool and is not `PartialEq`; props only need to know
 /// whether a handle exists, which is what this wrapper compares.
@@ -53,6 +56,8 @@ pub struct DetailProps {
     /// state label while it runs.
     pub play: Signal<Play>,
     pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
+    /// Bumped when a supervised session ends, so the history card reloads.
+    pub history_revision: Signal<u64>,
 }
 
 /// The detail screen for one game.
@@ -132,6 +137,22 @@ pub fn Detail(props: DetailProps) -> Element {
                 .map(|entry| entry.anticheat)
                 .unwrap_or(AntiCheat::Unknown);
             anticheat.set(crate::anticheat::summarize(dir.as_deref(), curated));
+        }
+    });
+
+    // The sessions PitaGames started for this game. Reloaded on mount, and
+    // whenever a session ends: reading the revision subscribes this future to
+    // it, so a game played from this page fills its card in without a reload.
+    let history_rows = use_signal(Vec::<StoredLaunch>::new);
+    let history_revision = props.history_revision;
+    let history_db = db.clone();
+    let history_game = game_id.clone();
+    use_future(move || {
+        let db = history_db.clone();
+        let id = history_game.clone();
+        async move {
+            let _ = history_revision();
+            load_history(db, id, history_rows).await;
         }
     });
 
@@ -261,6 +282,33 @@ pub fn Detail(props: DetailProps) -> Element {
     let play_events = props.play_events;
     let playing = play_signal.read().label(&game_id);
     let is_steam = entry.is_steam();
+
+    // The history card's rows: one line per session, newest first, with the
+    // transcript path so a failure can be read without leaving the page.
+    let sessions: Vec<LaunchRow> = history_rows
+        .read()
+        .iter()
+        .map(|stored| {
+            let record = &stored.record;
+            LaunchRow {
+                key: stored.id,
+                when: format::log_time(record.started_at, now),
+                mode: record
+                    .mode
+                    .clone()
+                    .unwrap_or_else(|| "not started".to_string()),
+                verdict: record
+                    .detail
+                    .clone()
+                    .unwrap_or_else(|| "no verdict recorded".to_string()),
+                ok: record.succeeded,
+                log: record
+                    .log_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            }
+        })
+        .collect();
 
     // The selected profile, resolved from the live rows so the Runtime panel
     // edits exactly the profile the "active" badge marks.
@@ -483,6 +531,62 @@ pub fn Detail(props: DetailProps) -> Element {
                     }
                 }
                 {about_body}
+            }
+
+            div {
+                style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
+                div {
+                    style: "display:flex;align-items:baseline;gap:12px;",
+                    h3 {
+                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                        "Recent launches"
+                    }
+                    span {
+                        style: "font-size:11px;color:#78788a;",
+                        "the sessions PitaGames started"
+                    }
+                }
+                if is_steam {
+                    p {
+                        style: "margin:0;font-size:12px;color:#78788a;",
+                        "Steam starts this game itself, so its sessions belong to Steam. PitaGames records only the launches it supervises: the games it starts through umu, a native executable or a store client."
+                    }
+                } else if sessions.is_empty() {
+                    p {
+                        style: "margin:0;font-size:12px;color:#78788a;",
+                        "No sessions yet. Press Play and the outcome lands here — including a launch that could not start, with the reason."
+                    }
+                } else {
+                    for row in sessions {
+                        div {
+                            key: "{row.key}",
+                            style: "display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;",
+                            span {
+                                style: "font-size:12px;color:#a8a8b8;min-width:88px;",
+                                "{row.when}"
+                            }
+                            span {
+                                style: "font-family:monospace;font-size:11px;color:#7a9ad6;min-width:76px;",
+                                "{row.mode}"
+                            }
+                            span {
+                                style: if row.ok {
+                                    "font-size:12px;color:#b8dcc4;flex:1;"
+                                } else {
+                                    "font-size:12px;color:#e8c890;flex:1;"
+                                },
+                                "{row.verdict}"
+                            }
+                            if let Some(log) = row.log.clone() {
+                                span {
+                                    style: "font-family:monospace;font-size:10px;color:#5a5a68;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                    "{log}"
+                                }
+                                CopyButton { text: log, label: "Copy log path".to_string() }
+                            }
+                        }
+                    }
+                }
             }
 
             div {
@@ -923,6 +1027,35 @@ pub fn Detail(props: DetailProps) -> Element {
                         }
                     }
                 }
+        }
+    }
+}
+
+/// One row of the detail page's history card.
+struct LaunchRow {
+    /// The database row id, used as the rsx key.
+    key: i64,
+    when: String,
+    mode: String,
+    verdict: String,
+    ok: bool,
+    log: Option<String>,
+}
+
+/// Load the newest sessions for one game into the card.
+///
+/// A missing database or a read failure is a warning, not an error: the page
+/// must render even when persistence is unavailable.
+async fn load_history(db: Option<Db>, id: GameId, mut rows: Signal<Vec<StoredLaunch>>) {
+    let Some(db) = db else {
+        rows.set(Vec::new());
+        return;
+    };
+    match db.launches_for(&id, HISTORY_ROWS).await {
+        Ok(stored) => rows.set(stored),
+        Err(error) => {
+            eprintln!("[pitagames] could not read the launch history: {error}");
+            rows.set(Vec::new());
         }
     }
 }

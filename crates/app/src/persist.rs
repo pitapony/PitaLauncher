@@ -8,8 +8,8 @@ use std::time::Duration;
 
 use pitagames_core::{Game, GameId, OwnedGame, Profile, Store};
 use pitagames_db::{
-    Db, GameRepository, MetadataRepository, OwnedRepository, ProfileRepository, StoredMetadata,
-    StoredProfile,
+    Db, GameRepository, HistoryRepository, LaunchRecord, MetadataRepository, OwnedRepository,
+    ProfileRepository, StoredLaunch, StoredMetadata, StoredProfile,
 };
 use time::OffsetDateTime;
 
@@ -165,4 +165,26 @@ pub async fn record_install(db: &Db, game: &Game) -> Result<(), String> {
             game.id.store_id
         )
     })
+}
+
+/// Append one finished session to the launch history.
+///
+/// The row is written whether the game ran or never started: a failed launch is
+/// the row a user opens the history for. The write is best-effort like every
+/// other persistence call — a full disk costs the row, never the verdict the
+/// header strip already shows.
+pub async fn record_launch_session(db: &Db, record: &LaunchRecord) -> Result<(), String> {
+    db.add_launch(record).await.map(|_| ()).map_err(|error| {
+        format!(
+            "could not record the launch of {}: {error}",
+            record.game.store_id
+        )
+    })
+}
+
+/// The newest sessions across every game, for the History screen.
+pub async fn recent_launches(db: &Db, limit: usize) -> Result<Vec<StoredLaunch>, String> {
+    db.launches(limit)
+        .await
+        .map_err(|error| format!("could not read the launch history: {error}"))
 }

@@ -19,7 +19,7 @@ use pitagames_core::{
     AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, ProtonRef, ShimProfile, Store,
     read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
 };
-use pitagames_db::{Db, GameRepository};
+use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
 use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
@@ -51,6 +51,9 @@ use pitagames_stores::{
 /// Give up on an install after an hour unless told otherwise.
 const DEFAULT_INSTALL_TIMEOUT: Duration = Duration::from_secs(3600);
 
+/// Sessions `history` shows unless told otherwise.
+const DEFAULT_HISTORY_LIMIT: usize = 20;
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -80,6 +83,7 @@ fn run() -> Result<()> {
         "import" => import(&args.collect::<Vec<_>>()),
         "prefix" => prefix(&args.collect::<Vec<_>>()),
         "disk" => disk(&args.collect::<Vec<_>>()),
+        "history" => history(&args.collect::<Vec<_>>()),
         "launch" => launch(&args.collect::<Vec<_>>()),
         "stores" => stores(&args.collect::<Vec<_>>()),
         "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
@@ -1348,6 +1352,234 @@ fn parse_size_bytes(value: &str) -> Result<u64> {
             .with_context(|| format!("`{number}` is not a whole number"))?;
         Ok(amount.saturating_mul(multiplier))
     }
+}
+
+/// List (or clear) the sessions the launcher recorded.
+///
+/// The rows are written by the GUI's play worker; `pitagames-cli launch --run`
+/// does not write history yet, because it is a diagnostic that prints a verdict
+/// instead of owning a session. Reading is safe while the GUI runs (WAL), and
+/// `--clear` only touches `launch_history` — never the library or a profile.
+fn history(args: &[String]) -> Result<()> {
+    let parsed = parse_history_args(args)?;
+    if parsed.help {
+        println!("{}", history_usage());
+        return Ok(());
+    }
+
+    let game = match parsed.positional.as_slice() {
+        [] => None,
+        [store, id] => Some(GameId::new(
+            Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+            id.clone(),
+        )),
+        _ => bail!(
+            "expected `<store> <id>` or no arguments\n\n{}",
+            history_usage()
+        ),
+    };
+
+    let db_path = match parsed.db.clone() {
+        Some(path) => path,
+        None => paths::data_dir()
+            .context("cannot determine the data directory; pass --db <path>")?
+            .join("pitagames.db"),
+    };
+    if !db_path.is_file() {
+        // A machine that never played a game has no database yet; that is not
+        // an error, it is an empty history.
+        if parsed.json {
+            println!("[]");
+        } else {
+            println!(
+                "no launch history yet (no database at {})",
+                db_path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("could not start the async runtime")?;
+    runtime.block_on(async {
+        let db = Db::open(&db_path)
+            .await
+            .with_context(|| format!("could not read {}", db_path.display()))?;
+
+        if parsed.clear {
+            let removed = db
+                .clear_launches(game.as_ref())
+                .await
+                .context("could not clear the launch history")?;
+            if parsed.json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({ "removed": removed }))?
+                );
+            } else {
+                match &game {
+                    Some(id) => {
+                        println!("{removed} session(s) removed for {}", history_game_key(id))
+                    }
+                    None => println!("{removed} session(s) removed"),
+                }
+            }
+            return Ok::<_, anyhow::Error>(());
+        }
+
+        let rows = match &game {
+            Some(id) => db.launches_for(id, parsed.limit).await,
+            None => db.launches(parsed.limit).await,
+        }
+        .context("could not read the launch history")?;
+
+        if parsed.json {
+            let payload: Vec<_> = rows.iter().map(history_json).collect();
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            print_history(&rows);
+        }
+        Ok(())
+    })
+}
+
+/// Parsed `history` arguments.
+#[derive(Debug, PartialEq, Eq)]
+struct HistoryArgs {
+    positional: Vec<String>,
+    limit: usize,
+    db: Option<PathBuf>,
+    json: bool,
+    clear: bool,
+    help: bool,
+}
+
+impl Default for HistoryArgs {
+    fn default() -> Self {
+        Self {
+            positional: Vec::new(),
+            limit: DEFAULT_HISTORY_LIMIT,
+            db: None,
+            json: false,
+            clear: false,
+            help: false,
+        }
+    }
+}
+
+fn parse_history_args(args: &[String]) -> Result<HistoryArgs> {
+    let mut parsed = HistoryArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--clear" => parsed.clear = true,
+            "-h" | "--help" => parsed.help = true,
+            "--limit" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--limit requires a number")?;
+                parsed.limit = value
+                    .parse::<usize>()
+                    .with_context(|| format!("--limit must be a whole number, got `{value}`"))?;
+            }
+            "--db" => {
+                index += 1;
+                let value = args.get(index).with_context(|| "--db requires a path")?;
+                parsed.db = Some(PathBuf::from(value));
+            }
+            _ if arg.starts_with("--limit=") => {
+                let value = &arg["--limit=".len()..];
+                parsed.limit = value
+                    .parse::<usize>()
+                    .with_context(|| format!("--limit must be a whole number, got `{value}`"))?;
+            }
+            _ if arg.starts_with("--db=") => parsed.db = Some(PathBuf::from(&arg["--db=".len()..])),
+            other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
+            other => bail!("unknown option `{other}`\n\n{}", history_usage()),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+/// The `store/id` label both the table and the JSON use.
+fn history_game_key(id: &GameId) -> String {
+    format!("{}/{}", id.store, id.store_id)
+}
+
+/// `2026-11-17 14:32` — a history row's start, in UTC.
+///
+/// The GUI renders this relative to the viewer ("today 14:32"); a log-style
+/// line is what a terminal reader can scan, and it needs no locale support.
+fn history_time(at: time::OffsetDateTime) -> String {
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}",
+        at.year(),
+        u8::from(at.month()),
+        at.day(),
+        at.hour(),
+        at.minute()
+    )
+}
+
+fn print_history(rows: &[StoredLaunch]) {
+    if rows.is_empty() {
+        println!("no sessions recorded yet");
+        return;
+    }
+
+    println!("{:<16} {:<30} {:<8} result", "when", "game", "mode");
+    for row in rows {
+        let record = &row.record;
+        let game = format!("{}/{}", record.game.store, record.game.store_id);
+        println!(
+            "{:<16} {:<30} {:<8} {}",
+            history_time(record.started_at),
+            truncate_column(&game, 30),
+            record.mode.as_deref().unwrap_or("-"),
+            record.detail.as_deref().unwrap_or("-"),
+        );
+        if let Some(log) = &record.log_path {
+            println!("{:<16} {:<30} {:<8} log {}", "", "", "", log.display());
+        }
+    }
+}
+
+/// One history row as JSON, with epoch seconds so a script need not parse text.
+fn history_json(row: &StoredLaunch) -> serde_json::Value {
+    let record = &row.record;
+    serde_json::json!({
+        "id": row.id,
+        "store": record.game.store.as_str(),
+        "store_id": record.game.store_id,
+        "title": record.title,
+        "started_at": record.started_at.unix_timestamp(),
+        "ended_at": record.ended_at.unix_timestamp(),
+        "duration_secs": record.duration.as_secs(),
+        "mode": record.mode,
+        "exit_code": record.exit_code,
+        "signal": record.signal,
+        "succeeded": record.succeeded,
+        "log_path": record.log_path.as_ref().map(|path| path.display().to_string()),
+        "detail": record.detail,
+    })
+}
+
+/// Cut a column to `width` characters, ending it with an ellipsis.
+fn truncate_column(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    cut.push('…');
+    cut
 }
 
 ///
@@ -5368,7 +5600,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -5414,6 +5646,23 @@ fn logs_usage() -> String {
      records one launch line per game; PROTON_LOG writes steam-<appid>.log; DXVK\n\
      logging writes <exe>_d3d11.log and friends. Read-only: nothing is edited or\n\
      deleted."
+        .to_string()
+}
+
+fn history_usage() -> String {
+    "USAGE:\n    pitagames-cli history [<store> <id>] [--limit <n>] [--db <path>] [--json] [--clear]\n\n\
+     ARGS:\n    \
+     <store> <id>           Only this game's sessions (e.g. `epic Gizmo`)\n\n\
+     OPTIONS:\n    \
+     --limit <n>            Sessions to show (default: 20)\n    \
+     --db <path>            Database (default: $XDG_DATA_HOME/pitagames/pitagames.db)\n    \
+     --clear                Delete the rows instead of listing them (this game's, or all)\n    \
+     --json                 Print the rows as JSON\n    \
+     -h, --help             Show this help\n\n\
+     The GUI records one row per supervised session — including a launch that\n\
+     never started, with the reason — when the game ends. Steam starts its own\n\
+     games, so Steam sessions are not here. A transcript path points into\n\
+     $XDG_DATA_HOME/pitagames/logs; nothing is copied into the database."
         .to_string()
 }
 
@@ -5720,6 +5969,7 @@ fn scan_usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pitagames_db::LaunchRecord;
     use pitagames_stores::{InstallPhase, install::InstallProgress};
 
     #[test]
@@ -6227,6 +6477,8 @@ mod tests {
             temp.path().display().to_string(),
             "--profiles".to_string(),
             profiles.display().to_string(),
+            "--db".to_string(),
+            temp.path().join("absent.db").display().to_string(),
             "--json".to_string(),
         ])
         .unwrap();
@@ -6239,6 +6491,7 @@ mod tests {
         let log = temp.path().join("run.log");
         let root = temp.path().display().to_string();
         let profiles = temp.path().join("profiles").display().to_string();
+        let db = temp.path().join("absent.db").display().to_string();
 
         launch(&[
             "local".to_string(),
@@ -6249,6 +6502,8 @@ mod tests {
             root.clone(),
             "--profiles".to_string(),
             profiles.clone(),
+            "--db".to_string(),
+            db.clone(),
             "--log".to_string(),
             log.display().to_string(),
             "--run".to_string(),
@@ -6267,6 +6522,8 @@ mod tests {
             root,
             "--profiles".to_string(),
             profiles,
+            "--db".to_string(),
+            db,
             "--log".to_string(),
             temp.path().join("bad.log").display().to_string(),
             "--run".to_string(),
@@ -6282,6 +6539,7 @@ mod tests {
         let exe = fake_game(temp.path(), "game", "#!/bin/sh\nexit 0\n");
         let root = temp.path().display().to_string();
         let profiles = temp.path().join("profiles").display().to_string();
+        let db = temp.path().join("absent.db").display().to_string();
 
         let steam = launch(&[
             "steam".to_string(),
@@ -6292,6 +6550,8 @@ mod tests {
             root.clone(),
             "--profiles".to_string(),
             profiles.clone(),
+            "--db".to_string(),
+            db.clone(),
         ])
         .unwrap_err()
         .to_string();
@@ -6307,6 +6567,8 @@ mod tests {
             root,
             "--profiles".to_string(),
             profiles,
+            "--db".to_string(),
+            db,
         ])
         .unwrap_err()
         .to_string();
@@ -6341,6 +6603,8 @@ mod tests {
                 root.clone(),
                 "--profiles".to_string(),
                 profiles.display().to_string(),
+                "--db".to_string(),
+                temp.path().join("absent.db").display().to_string(),
             ];
             if json {
                 args.push("--json".to_string());
@@ -6418,6 +6682,8 @@ mod tests {
             temp.path().display().to_string(),
             "--profiles".to_string(),
             temp.path().join("profiles").display().to_string(),
+            "--db".to_string(),
+            temp.path().join("absent.db").display().to_string(),
         ])
         .unwrap_err()
         .to_string();
@@ -6448,6 +6714,8 @@ mod tests {
             temp.path().display().to_string(),
             "--profiles".to_string(),
             temp.path().join("profiles").display().to_string(),
+            "--db".to_string(),
+            temp.path().join("absent.db").display().to_string(),
             "--log".to_string(),
             log.display().to_string(),
             "--run".to_string(),
@@ -6498,6 +6766,182 @@ mod tests {
         ])
         .unwrap();
         disk(&[path]).unwrap();
+    }
+
+    #[test]
+    fn parses_history_arguments() {
+        let parsed = parse_history_args(&[
+            "epic".to_string(),
+            "Gizmo".to_string(),
+            "--limit=5".to_string(),
+            "--db".to_string(),
+            "/tmp/pitagames.db".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.positional, ["epic", "Gizmo"]);
+        assert_eq!(parsed.limit, 5);
+        assert_eq!(parsed.db.as_deref(), Some(Path::new("/tmp/pitagames.db")));
+        assert!(parsed.json && !parsed.clear && !parsed.help);
+
+        let defaults = parse_history_args(&[]).unwrap();
+        assert_eq!(defaults.limit, DEFAULT_HISTORY_LIMIT);
+        assert!(defaults.positional.is_empty());
+
+        let cleared = parse_history_args(&["--clear".to_string()]).unwrap();
+        assert!(cleared.clear);
+
+        let error = parse_history_args(&["--bogus".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unknown option"), "{error}");
+    }
+
+    fn history_session(id: &str, at: i64, succeeded: bool) -> LaunchRecord {
+        LaunchRecord {
+            game: GameId::new(Store::Epic, id),
+            title: format!("Game {id}"),
+            started_at: time::OffsetDateTime::from_unix_timestamp(at).unwrap(),
+            ended_at: time::OffsetDateTime::from_unix_timestamp(at + 60).unwrap(),
+            duration: Duration::from_secs(60),
+            mode: Some("umu".to_string()),
+            exit_code: succeeded.then_some(0),
+            signal: None,
+            succeeded,
+            log_path: Some(PathBuf::from(format!("/logs/epic-{id}.log"))),
+            detail: Some(if succeeded {
+                "exited 0 after 1m 00s".to_string()
+            } else {
+                "no Proton build was found".to_string()
+            }),
+        }
+    }
+
+    fn seed_history(path: &Path) -> Vec<(String, bool)> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(async {
+                let db = Db::open(path).await.unwrap();
+                for record in [
+                    history_session("Gizmo", 1_760_000_000, true),
+                    history_session("Sugar", 1_760_000_500, false),
+                ] {
+                    db.add_launch(&record).await.unwrap();
+                }
+                let rows = db.launches(10).await.unwrap();
+                Ok::<_, anyhow::Error>(rows)
+            })
+            .unwrap()
+            .into_iter()
+            .map(|row| {
+                (
+                    format!("{}/{}", row.record.game.store, row.record.game.store_id),
+                    row.record.succeeded,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn history_reads_and_clears_a_database() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pitagames.db");
+        let seeded = seed_history(&path);
+        assert_eq!(seeded.len(), 2, "the fixture wrote both sessions");
+
+        let db_arg = path.display().to_string();
+        // Listing prints to stdout; the assertions are that neither form fails
+        // and that --clear really deletes what it says it does.
+        history(&["--db".to_string(), db_arg.clone(), "--json".to_string()]).unwrap();
+        history(&["--db".to_string(), db_arg.clone(), "--limit=1".to_string()]).unwrap();
+
+        history(&[
+            "--db".to_string(),
+            db_arg.clone(),
+            "epic".to_string(),
+            "Sugar".to_string(),
+            "--clear".to_string(),
+        ])
+        .unwrap();
+        let remaining = seed_history_count(&path);
+        assert_eq!(remaining, 1, "only Sugar's session was cleared");
+
+        history(&["--db".to_string(), db_arg.clone(), "--clear".to_string()]).unwrap();
+        assert_eq!(seed_history_count(&path), 0);
+
+        // Clearing an empty history is not an error.
+        history(&["--db".to_string(), db_arg, "--clear".to_string()]).unwrap();
+    }
+
+    fn seed_history_count(path: &Path) -> usize {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let db = Db::open(path).await.unwrap();
+            db.launches(10).await.unwrap().len()
+        })
+    }
+
+    #[test]
+    fn history_without_a_database_is_an_empty_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let missing = temp.path().join("absent.db");
+        history(&[
+            "--db".to_string(),
+            missing.display().to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        history(&["--db".to_string(), missing.display().to_string()]).unwrap();
+    }
+
+    #[test]
+    fn history_refuses_a_bad_identity() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("pitagames.db");
+        seed_history(&path);
+
+        let error = history(&[
+            "--db".to_string(),
+            path.display().to_string(),
+            "nintendo".to_string(),
+            "Mario".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("unknown store"), "{error}");
+
+        let error = history(&[
+            "--db".to_string(),
+            path.display().to_string(),
+            "epic".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("expected `<store> <id>`"), "{error}");
+    }
+
+    #[test]
+    fn a_history_row_serializes_with_epoch_seconds() {
+        let row = StoredLaunch {
+            id: 3,
+            record: history_session("Gizmo", 1_760_000_000, true),
+        };
+        let json = history_json(&row);
+        assert_eq!(json["id"], 3);
+        assert_eq!(json["store"], "epic");
+        assert_eq!(json["store_id"], "Gizmo");
+        assert_eq!(json["started_at"], 1_760_000_000);
+        assert_eq!(json["duration_secs"], 60);
+        assert_eq!(json["mode"], "umu");
+        assert_eq!(json["succeeded"], true);
+        assert_eq!(json["log_path"], "/logs/epic-Gizmo.log");
+        assert_eq!(json["detail"], "exited 0 after 1m 00s");
     }
 
     #[test]

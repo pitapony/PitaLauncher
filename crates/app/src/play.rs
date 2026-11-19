@@ -23,18 +23,22 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::{Game, GameId, ShimProfile};
+use pitagames_db::LaunchRecord;
 use pitagames_platform::launch::{self as handoff, DEFAULT_GRACE, LaunchMode, Outcome, RunOptions};
+use time::OffsetDateTime;
 
 use crate::runtime;
 
 /// One report from the thread running a game.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlayEvent {
-    /// The process is up: its pid is what Stop signals.
+    /// The process is up: its pid is what Stop signals, and the mode is which
+    /// shape the hand-off chose (`umu`, `native`, `client`).
     Started {
         id: GameId,
         pid: u32,
         log: Option<PathBuf>,
+        mode: LaunchMode,
     },
     /// The game ended; `Err` means it could not be started at all.
     Finished {
@@ -97,6 +101,58 @@ pub struct Running {
     /// `None` between the click and [`PlayEvent::Started`].
     pub pid: Option<u32>,
     pub log: Option<PathBuf>,
+    /// Set by [`PlayEvent::Started`]; `None` while the launch is being composed.
+    pub mode: Option<LaunchMode>,
+    /// When the Play button was clicked; the history row's start time.
+    pub started_at: OffsetDateTime,
+}
+
+impl Running {
+    /// The launch-history row this session produces.
+    ///
+    /// A session that never started has no mode, no log, no exit code and no
+    /// duration, but it is still history: "no Proton build was found" is the
+    /// row a user needs to see. A signal death keeps its code/signal pair so the
+    /// CLI and the GUI can say *how* it ended, not just that it failed.
+    #[must_use]
+    pub fn record(
+        &self,
+        outcome: &Result<Outcome, String>,
+        ended_at: OffsetDateTime,
+    ) -> LaunchRecord {
+        let (duration, exit_code, signal, succeeded, log, detail) = match outcome {
+            Ok(outcome) => (
+                outcome.duration,
+                outcome.code,
+                outcome.signal,
+                outcome.success(),
+                outcome.log.clone().or_else(|| self.log.clone()),
+                Some(outcome.summary()),
+            ),
+            Err(message) => (
+                std::time::Duration::ZERO,
+                None,
+                None,
+                false,
+                self.log.clone(),
+                Some(message.clone()),
+            ),
+        };
+
+        LaunchRecord {
+            game: self.id.clone(),
+            title: self.title.clone(),
+            started_at: self.started_at,
+            ended_at,
+            duration,
+            mode: self.mode.map(|mode| mode.label().to_string()),
+            exit_code,
+            signal,
+            succeeded,
+            log_path: log,
+            detail,
+        }
+    }
 }
 
 /// The last game that ended, for the header strip.
@@ -124,6 +180,8 @@ impl Play {
             title: game.title.clone(),
             pid: None,
             log: None,
+            mode: None,
+            started_at: OffsetDateTime::now_utc(),
         });
         self.last = None;
         Ok(())
@@ -132,12 +190,13 @@ impl Play {
     /// Fold a worker report in.
     pub fn apply(&mut self, event: &PlayEvent) {
         match event {
-            PlayEvent::Started { id, pid, log } => {
+            PlayEvent::Started { id, pid, log, mode } => {
                 if let Some(running) = self.running.as_mut()
                     && running.id == *id
                 {
                     running.pid = Some(*pid);
                     running.log = log.clone();
+                    running.mode = Some(*mode);
                 }
             }
             PlayEvent::Finished { id, title, outcome } => {
@@ -259,6 +318,7 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
         id: game.id.clone(),
         pid: session.pid(),
         log: session.log_path().map(Path::to_path_buf),
+        mode: prepared.mode,
     });
 
     session.wait().map_err(|error| error.to_string())
@@ -328,6 +388,7 @@ mod tests {
             id: id.clone(),
             pid: 4242,
             log: Some(PathBuf::from("/logs/epic-Gizmo-1.log")),
+            mode: LaunchMode::Umu,
         });
         assert_eq!(play.label(&id), Some("playing"));
         assert_eq!(play.running().and_then(|running| running.pid), Some(4242));
@@ -400,6 +461,83 @@ mod tests {
             play.label(&GameId::new(Store::Epic, "Gizmo")),
             Some("starting"),
             "the worker still owns the game"
+        );
+    }
+
+    fn running() -> Running {
+        let mut play = Play::default();
+        play.begin(&game("Gizmo")).unwrap();
+        play.apply(&PlayEvent::Started {
+            id: GameId::new(Store::Epic, "Gizmo"),
+            pid: 4242,
+            log: Some(PathBuf::from("/logs/epic-Gizmo-1.log")),
+            mode: LaunchMode::Umu,
+        });
+        play.running().cloned().unwrap()
+    }
+
+    #[test]
+    fn a_finished_session_becomes_a_history_row() {
+        let running = running();
+        let ended = OffsetDateTime::now_utc();
+        let record = running.record(&Ok(outcome(0, 3725)), ended);
+
+        assert_eq!(record.game, GameId::new(Store::Epic, "Gizmo"));
+        assert_eq!(record.title, "Game Gizmo");
+        assert_eq!(record.mode.as_deref(), Some("umu"));
+        assert_eq!(record.duration, Duration::from_secs(3725));
+        assert_eq!(record.exit_code, Some(0));
+        assert_eq!(record.signal, None);
+        assert!(record.succeeded);
+        assert_eq!(
+            record.log_path,
+            Some(PathBuf::from("/logs/epic-Gizmo-1.log"))
+        );
+        assert_eq!(record.detail.as_deref(), Some("exited 0 after 1h 02m"));
+        assert_eq!(record.ended_at, ended);
+    }
+
+    #[test]
+    fn a_launch_that_never_started_is_recorded_with_its_reason() {
+        let mut play = Play::default();
+        play.begin(&game("Gizmo")).unwrap();
+        let running = play.running().cloned().unwrap();
+        let ended = OffsetDateTime::now_utc();
+
+        let record = running.record(&Err("no Proton build".to_string()), ended);
+        assert_eq!(record.mode, None, "the shape was never chosen");
+        assert_eq!(record.duration, Duration::ZERO);
+        assert_eq!(record.exit_code, None);
+        assert!(!record.succeeded);
+        assert_eq!(record.detail.as_deref(), Some("no Proton build"));
+        assert_eq!(record.ended_at, ended);
+    }
+
+    #[test]
+    fn a_stopped_session_keeps_the_signal_and_is_not_a_success() {
+        let running = running();
+        let ended = OffsetDateTime::now_utc();
+        let record = running.record(
+            &Ok(Outcome {
+                code: None,
+                signal: Some(15),
+                duration: Duration::from_secs(4),
+                log: None,
+            }),
+            ended,
+        );
+
+        assert_eq!(record.signal, Some(15));
+        assert_eq!(record.exit_code, None);
+        assert!(!record.succeeded);
+        assert_eq!(
+            record.detail.as_deref(),
+            Some("stopped by signal 15 after 4s")
+        );
+        assert_eq!(
+            record.log_path,
+            Some(PathBuf::from("/logs/epic-Gizmo-1.log")),
+            "the Started log is kept when the outcome has none"
         );
     }
 }

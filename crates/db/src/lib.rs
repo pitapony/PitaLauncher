@@ -86,8 +86,23 @@ impl Db {
 
     /// Apply pending migrations. Calling it twice is a no-op.
     pub async fn migrate(&self) -> Result<()> {
-        MIGRATOR.run(&self.pool).await?;
-        Ok(())
+        match MIGRATOR.run(&self.pool).await {
+            Ok(()) => Ok(()),
+            // Two processes can open a database whose new migration is still
+            // pending — the GUI and `pitagames-cli`, usually after an upgrade.
+            // SQLite has no advisory lock, so both read the same pending
+            // version list; one wins the DDL and the other's `CREATE TABLE`
+            // fails with "already exists". Re-reading the applied versions
+            // makes the loser a no-op instead of a failed startup.
+            Err(sqlx::migrate::MigrateError::Execute(source))
+            | Err(sqlx::migrate::MigrateError::ExecuteMigration(source, _))
+                if is_duplicate_schema(&source) =>
+            {
+                MIGRATOR.run(&self.pool).await?;
+                Ok(())
+            }
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Escape hatch for components that need SQL the repositories do not cover.
@@ -114,6 +129,40 @@ pub struct StoredMetadata {
     pub game: GameId,
     pub metadata: Option<GameMetadata>,
     pub fetched_at: OffsetDateTime,
+}
+
+/// One supervised game session, as the history table stores it.
+///
+/// Steam launches its own games, so only the hand-off's sessions land here. A
+/// session is recorded when it ends *and* when it could not be started: a
+/// refusal ("no Proton build") is the most useful row in the list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaunchRecord {
+    pub game: GameId,
+    /// Copied from the row at launch time: a history entry outlives the store's
+    /// listing, so it must render after the game is uninstalled.
+    pub title: String,
+    pub started_at: OffsetDateTime,
+    pub ended_at: OffsetDateTime,
+    /// Wall clock measured by the hand-off; zero when nothing was spawned.
+    pub duration: Duration,
+    /// `"umu"`, `"native"` or `"client"` — the hand-off's label for the launch
+    /// shape; `None` when the launch failed before a shape was chosen.
+    pub mode: Option<String>,
+    pub exit_code: Option<i32>,
+    pub signal: Option<i32>,
+    pub succeeded: bool,
+    /// The run's transcript under `<data>/pitagames/logs/`, if one was written.
+    pub log_path: Option<PathBuf>,
+    /// A one-line verdict: the success summary or the failure message.
+    pub detail: Option<String>,
+}
+
+/// One history row with its database identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredLaunch {
+    pub id: i64,
+    pub record: LaunchRecord,
 }
 
 /// What one store's row replacement did, for a sync report.
@@ -226,6 +275,29 @@ pub trait OwnedRepository {
 
     /// Drop the cached list. Returns how many rows were removed.
     async fn remove_owned(&self, store: Store) -> Result<usize>;
+}
+
+/// The launch history: one row per supervised session, newest first when read.
+#[async_trait]
+pub trait HistoryRepository {
+    /// Append one finished session, returning its row id.
+    ///
+    /// Records are append-only: a session is a fact, so nothing here updates or
+    /// rewrites an existing row.
+    async fn add_launch(&self, record: &LaunchRecord) -> Result<i64>;
+
+    /// The newest sessions across every game, at most `limit`.
+    async fn launches(&self, limit: usize) -> Result<Vec<StoredLaunch>>;
+
+    /// The newest sessions for one game, at most `limit`.
+    async fn launches_for(&self, game: &GameId, limit: usize) -> Result<Vec<StoredLaunch>>;
+
+    /// Delete the history, all of it or one game's.
+    ///
+    /// Returns how many rows were removed. The GUI never calls this; it is the
+    /// CLI's `history --clear`, so a user can forget a session without deleting
+    /// the database the library lives in.
+    async fn clear_launches(&self, game: Option<&GameId>) -> Result<usize>;
 }
 
 const UPSERT_GAME: &str = r#"
@@ -608,6 +680,135 @@ impl OwnedRepository for Db {
     }
 }
 
+const LAUNCH_COLUMNS: &str = "id, store, store_id, title, started_at, ended_at,
+     duration_secs, mode, exit_code, signal, succeeded, log_path, detail";
+
+#[async_trait]
+impl HistoryRepository for Db {
+    async fn add_launch(&self, record: &LaunchRecord) -> Result<i64> {
+        let id = sqlx::query_scalar::<_, i64>(
+            "INSERT INTO launch_history (
+                 store, store_id, title, started_at, ended_at, duration_secs,
+                 mode, exit_code, signal, succeeded, log_path, detail
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             RETURNING id",
+        )
+        .bind(record.game.store.as_str())
+        .bind(&record.game.store_id)
+        .bind(&record.title)
+        .bind(record.started_at.unix_timestamp())
+        .bind(record.ended_at.unix_timestamp())
+        .bind(record.duration.as_secs() as i64)
+        .bind(record.mode.as_deref())
+        .bind(record.exit_code)
+        .bind(record.signal)
+        .bind(record.succeeded)
+        .bind(record.log_path.as_deref().map(path_text))
+        .bind(record.detail.as_deref())
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(id)
+    }
+
+    async fn launches(&self, limit: usize) -> Result<Vec<StoredLaunch>> {
+        let sql = format!(
+            "SELECT {LAUNCH_COLUMNS} FROM launch_history
+             ORDER BY started_at DESC, id DESC LIMIT ?"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(limit_to_i64(limit))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(launch_from_row).collect()
+    }
+
+    async fn launches_for(&self, game: &GameId, limit: usize) -> Result<Vec<StoredLaunch>> {
+        let sql = format!(
+            "SELECT {LAUNCH_COLUMNS} FROM launch_history
+             WHERE store = ? AND store_id = ?
+             ORDER BY started_at DESC, id DESC LIMIT ?"
+        );
+        let rows = sqlx::query(&sql)
+            .bind(game.store.as_str())
+            .bind(&game.store_id)
+            .bind(limit_to_i64(limit))
+            .fetch_all(&self.pool)
+            .await?;
+        rows.iter().map(launch_from_row).collect()
+    }
+
+    async fn clear_launches(&self, game: Option<&GameId>) -> Result<usize> {
+        let result = match game {
+            Some(game) => {
+                sqlx::query("DELETE FROM launch_history WHERE store = ? AND store_id = ?")
+                    .bind(game.store.as_str())
+                    .bind(&game.store_id)
+                    .execute(&self.pool)
+                    .await?
+            }
+            None => {
+                sqlx::query("DELETE FROM launch_history")
+                    .execute(&self.pool)
+                    .await?
+            }
+        };
+        Ok(result.rows_affected() as usize)
+    }
+}
+
+/// `LIMIT` takes a signed integer; saturating is right for a display cap.
+fn limit_to_i64(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+fn launch_from_row(row: &SqliteRow) -> Result<StoredLaunch> {
+    let store: String = row.try_get("store")?;
+    let store_id: String = row.try_get("store_id")?;
+    let duration_secs: i64 = row.try_get("duration_secs")?;
+    let succeeded: i64 = row.try_get("succeeded")?;
+    let exit_code: Option<i64> = row.try_get("exit_code")?;
+    let signal: Option<i64> = row.try_get("signal")?;
+
+    Ok(StoredLaunch {
+        id: row.try_get("id")?,
+        record: LaunchRecord {
+            game: GameId::new(Store::from_str(&store)?, store_id),
+            title: row.try_get("title")?,
+            started_at: required_timestamp(row.try_get("started_at")?, "started_at")?,
+            ended_at: required_timestamp(row.try_get("ended_at")?, "ended_at")?,
+            duration: Duration::from_secs(u64::try_from(duration_secs).map_err(|_| {
+                Error::Data {
+                    column: "launch_history.duration_secs",
+                    message: format!("negative value {duration_secs}"),
+                }
+            })?),
+            mode: row.try_get("mode")?,
+            exit_code: exit_code
+                .map(|code| {
+                    i32::try_from(code).map_err(|_| Error::Data {
+                        column: "launch_history.exit_code",
+                        message: format!("out of range: {code}"),
+                    })
+                })
+                .transpose()?,
+            signal: signal
+                .map(|value| {
+                    i32::try_from(value).map_err(|_| Error::Data {
+                        column: "launch_history.signal",
+                        message: format!("out of range: {value}"),
+                    })
+                })
+                .transpose()?,
+            succeeded: succeeded != 0,
+            log_path: row
+                .try_get::<Option<String>, _>("log_path")?
+                .map(PathBuf::from),
+            detail: row.try_get("detail")?,
+        },
+    })
+}
+
 fn owned_from_row(row: &SqliteRow) -> Result<OwnedGame> {
     let store: String = row.try_get("store")?;
     let store_id: String = row.try_get("store_id")?;
@@ -752,6 +953,17 @@ fn path_text(path: &Path) -> String {
 
 fn now_seconds() -> i64 {
     OffsetDateTime::now_utc().unix_timestamp()
+}
+
+/// Whether a migration failed because another connection already applied it.
+///
+/// The message is SQLite's own; the alternative is a retry on every failure,
+/// which would hide a genuinely broken migration.
+fn is_duplicate_schema(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(inner) if inner.message().contains("already exists")
+    )
 }
 
 /// Database failures.
@@ -1492,6 +1704,146 @@ mod tests {
         let error = db.owned_games(Store::Steam).await.unwrap_err();
         assert!(
             matches!(error, Error::Data { column, .. } if column == "owned_games.playtime_secs"),
+            "{error}"
+        );
+    }
+
+    fn session(id: &str, at: i64, seconds: u64) -> LaunchRecord {
+        LaunchRecord {
+            game: GameId::new(Store::Epic, id),
+            title: format!("Game {id}"),
+            started_at: OffsetDateTime::from_unix_timestamp(at).unwrap(),
+            ended_at: OffsetDateTime::from_unix_timestamp(at + seconds as i64).unwrap(),
+            duration: Duration::from_secs(seconds),
+            mode: Some("umu".to_string()),
+            exit_code: Some(0),
+            signal: None,
+            succeeded: true,
+            log_path: Some(PathBuf::from(format!("/logs/epic-{id}.log"))),
+            detail: Some(format!("exited 0 after {seconds}s")),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_launch_record_round_trips() {
+        let db = Db::open_in_memory().await.unwrap();
+        let record = session("Gizmo", 1_760_000_000, 3_725);
+        let id = db.add_launch(&record).await.unwrap();
+        assert!(id > 0);
+
+        let stored = db.launches(10).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].id, id);
+        assert_eq!(stored[0].record, record);
+    }
+
+    #[tokio::test]
+    async fn a_failed_launch_keeps_its_unknowns_null() {
+        let db = Db::open_in_memory().await.unwrap();
+        let record = LaunchRecord {
+            game: GameId::new(Store::Gog, "1234"),
+            title: "GOG Game".to_string(),
+            started_at: OffsetDateTime::UNIX_EPOCH,
+            ended_at: OffsetDateTime::UNIX_EPOCH,
+            duration: Duration::ZERO,
+            mode: None,
+            exit_code: None,
+            signal: None,
+            succeeded: false,
+            log_path: None,
+            detail: Some("no Proton build was found".to_string()),
+        };
+        db.add_launch(&record).await.unwrap();
+
+        let stored = db.launches(10).await.unwrap();
+        assert_eq!(stored[0].record, record);
+    }
+
+    #[tokio::test]
+    async fn history_is_newest_first_and_scoped_per_game() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.add_launch(&session("Gizmo", 1_760_000_000, 60))
+            .await
+            .unwrap();
+        db.add_launch(&session("Sugar", 1_760_000_500, 30))
+            .await
+            .unwrap();
+        db.add_launch(&session("Gizmo", 1_760_001_000, 90))
+            .await
+            .unwrap();
+
+        let all: Vec<u64> = db
+            .launches(10)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.record.duration.as_secs())
+            .collect();
+        assert_eq!(all, [90, 30, 60], "newest session first");
+
+        let gizmo = db
+            .launches_for(&GameId::new(Store::Epic, "Gizmo"), 10)
+            .await
+            .unwrap();
+        assert_eq!(gizmo.len(), 2);
+        assert_eq!(gizmo[0].record.duration, Duration::from_secs(90));
+
+        // The cap is applied by the query, not by the caller.
+        assert_eq!(db.launches(1).await.unwrap().len(), 1);
+        assert_eq!(
+            db.launches_for(&GameId::new(Store::Epic, "Gizmo"), 1)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn history_survives_the_game_row_and_can_be_cleared() {
+        let db = Db::open_in_memory().await.unwrap();
+        let game = epic_game("Gizmo", "Gizmo");
+        db.upsert_game(&game).await.unwrap();
+        db.add_launch(&session("Gizmo", 1_760_000_000, 60))
+            .await
+            .unwrap();
+        db.add_launch(&session("Sugar", 1_760_000_500, 30))
+            .await
+            .unwrap();
+
+        // A replaced/uninstalled game keeps its past sessions: this is user
+        // data, not cache.
+        db.replace_store_games(Store::Epic, &[]).await.unwrap();
+        assert_eq!(db.launches(10).await.unwrap().len(), 2);
+
+        assert_eq!(
+            db.clear_launches(Some(&GameId::new(Store::Epic, "Gizmo")))
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(db.launches(10).await.unwrap().len(), 1);
+
+        assert_eq!(db.clear_launches(None).await.unwrap(), 1);
+        assert!(db.launches(10).await.unwrap().is_empty());
+        assert_eq!(db.clear_launches(None).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_launch_row_is_reported() {
+        let db = Db::open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO launch_history (
+                 store, store_id, title, started_at, ended_at, duration_secs, succeeded
+             ) VALUES ('epic', 'Gizmo', 'Gizmo', 0, 0, -5, 1)",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let error = db.launches(10).await.unwrap_err();
+        assert!(
+            matches!(error, Error::Data { column, .. } if column == "launch_history.duration_secs"),
             "{error}"
         );
     }

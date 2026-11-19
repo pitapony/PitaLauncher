@@ -40,6 +40,7 @@ mod diagnostics;
 mod downloads;
 mod format;
 mod grid;
+mod history_view;
 mod icon;
 mod library;
 mod log_view;
@@ -135,6 +136,7 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
 pub(crate) enum View {
     Library,
     Downloads,
+    History,
     Stores,
     Detail,
     Account,
@@ -214,6 +216,9 @@ fn App() -> Element {
     // Steam is started by its own client, so it never lands here.
     let mut play = use_signal(Play::default);
     let mut play_events = use_signal(|| None::<UnboundedSender<PlayEvent>>);
+    // Bumped whenever a session is written to the launch history, so the detail
+    // page's card and the History screen reload without a restart.
+    let mut history_revision = use_signal(|| 0u64);
 
     // Activation: the socket thread forwards "focus" requests here, and this
     // future raises the window on the event-loop thread (tao window calls are
@@ -276,21 +281,43 @@ fn App() -> Element {
         }
     });
 
-    // A finished game writes its session into the row (playtime, last played)
-    // and moves the header strip from "playing" to its verdict. The write is
-    // SQLite, so it happens off the event loop.
+    // A finished game writes its session into the row (playtime, last played),
+    // appends it to the launch history, and moves the header strip from
+    // "playing" to its verdict. The writes are SQLite, so they happen off the
+    // event loop.
     let play_drain = play_channel.clone();
     use_future(move || {
         let channel = play_drain.clone();
         async move {
             while let Some(event) = channel.next().await {
+                // The session has to be read before `apply` frees the slot: it
+                // carries the start time and the launch shape the history row
+                // needs, and `Finished` deliberately repeats neither.
+                let session = play.read().running().cloned();
                 play.write().apply(&event);
-                let PlayEvent::Finished {
-                    id,
-                    title,
-                    outcome: Ok(outcome),
-                } = event
-                else {
+
+                let PlayEvent::Finished { id, title, outcome } = event else {
+                    continue;
+                };
+                // A report for a game that no longer holds the slot is stale;
+                // another launch has already begun, so the slot is not ours.
+                let Some(session) = session.filter(|running| running.id == id) else {
+                    continue;
+                };
+
+                // History covers failures too: a launch that never started has
+                // no outcome, and "no Proton build" is the row worth keeping.
+                if let Some(db) = db_state.read().clone() {
+                    let record = session.record(&outcome, OffsetDateTime::now_utc());
+                    history_revision.set(history_revision() + 1);
+                    spawn(async move {
+                        if let Err(error) = persist::record_launch_session(&db, &record).await {
+                            eprintln!("[pitagames] {error}");
+                        }
+                    });
+                }
+
+                let Ok(outcome) = outcome else {
                     continue;
                 };
 
@@ -953,6 +980,14 @@ fn App() -> Element {
                 button {
                     onclick: move |_| {
                         selected_game.set(None);
+                        view.set(View::History);
+                    },
+                    style: nav_style(current_view == View::History),
+                    "History"
+                }
+                button {
+                    onclick: move |_| {
+                        selected_game.set(None);
                         view.set(View::Stores);
                     },
                     style: nav_style(current_view == View::Stores),
@@ -1038,6 +1073,7 @@ fn App() -> Element {
                             proton: proton_report.clone(),
                             play,
                             play_events,
+                            history_revision,
                         }
                     }
                 }
@@ -1052,6 +1088,14 @@ fn App() -> Element {
                     stores_view::StoresView {
                         library: library_state,
                         db: db_state,
+                    }
+                }
+            } else if current_view == View::History {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    history_view::HistoryView {
+                        db: detail::DbHandle(db_handle.clone()),
+                        revision: history_revision,
                     }
                 }
             } else if current_view == View::Account {
