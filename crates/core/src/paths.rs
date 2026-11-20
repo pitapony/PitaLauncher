@@ -163,6 +163,14 @@ pub fn input_maps_file() -> Option<PathBuf> {
     config_dir().map(|base| base.join("input.toml"))
 }
 
+/// `<XDG_CONFIG_HOME>/pitagames/config.toml`: the launcher's own preferences.
+///
+/// The two shells, the start mode and the display numbers. A missing file means
+/// the shipped defaults; the app writes it when the player changes a preference.
+pub fn config_file() -> Option<PathBuf> {
+    config_dir().map(|base| base.join("config.toml"))
+}
+
 /// `<XDG_CONFIG_HOME>/pitagames/compat`: user overrides of the shipped compat DB.
 ///
 /// A file here with the same game id as a shipped entry overrides it field by

@@ -130,6 +130,9 @@ pub enum Key {
     Q,
     E,
     F,
+    /// The keyboard's shell toggle. There is no `F11` gamepad equivalent; the
+    /// pad's `Guide` button drives the same action.
+    F11,
 }
 
 /// One physical control a binding can read.

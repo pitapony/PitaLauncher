@@ -9,10 +9,16 @@
 //! Downloads view. Controller navigation, the console shell and graphics
 //! profiles arrive in later milestones.
 
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
+use dioxus::desktop::{tao::event::ElementState, use_wry_event_handler};
+use dioxus::html::geometry::PixelsVector2D;
+use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::stream::{self, StreamExt};
@@ -38,7 +44,9 @@ mod desktop_entry;
 mod detail;
 mod diagnostics;
 mod downloads;
+mod focus;
 mod format;
+mod gamepad;
 mod grid;
 mod history_view;
 mod icon;
@@ -47,6 +55,7 @@ mod log_view;
 mod persist;
 mod play;
 mod runtime;
+mod shell;
 mod steam_account;
 mod store_installs;
 mod store_sync;
@@ -55,15 +64,26 @@ mod tray;
 mod wrappers;
 
 fn main() {
+    let args = shell::parse_args(std::env::args().skip(1));
     // `--version` and `-V` are for the package: a bug report or a support
     // question can name the build without opening a webview.
-    if std::env::args()
-        .skip(1)
-        .any(|arg| arg == "-V" || arg == "--version")
-    {
+    if args.version {
         println!("pitagames {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+    for unknown in &args.unknown {
+        eprintln!("[pitagames] ignoring unknown argument {unknown}");
+    }
+
+    // The persisted preference: which shell opens and how each shell looks. A
+    // broken config is a warning and the shipped defaults, never a failure to
+    // start.
+    let (preferences, warnings) = pitagames_core::ui::AppConfig::load_default();
+    for warning in &warnings {
+        eprintln!("[pitagames] config: {warning}");
+    }
+    let shell = preferences.ui.resolve_start(args.shell);
+    let display = preferences.ui.display;
 
     // One launcher at a time. Two instances would scan the same libraries and
     // race over Steam's config files; the lock is held for the whole run and
@@ -76,10 +96,9 @@ fn main() {
     // A checkout has no packaged menu entry; write one that points here.
     desktop_entry::ensure();
 
-    // A desktop window, not fullscreen: the 10-foot console shell is M2.5.
-    let window = dioxus::desktop::WindowBuilder::new()
-        .with_title("PitaGames")
-        .with_inner_size(dioxus::desktop::LogicalSize::new(1280.0, 800.0));
+    // The window is built for the resolved shell: decorated and windowed for the
+    // desktop, undecorated and fullscreen for the console.
+    let window = shell::window_builder(&shell::window_config(shell, &display));
 
     // Dioxus installs a default Window/Edit/Help menu bar on a decorated
     // window. The launcher has no use for it (navigation lives in the left
@@ -95,6 +114,11 @@ fn main() {
 
     dioxus::LaunchBuilder::desktop()
         .with_cfg(config)
+        .with_context(shell::ShellStart {
+            shell,
+            display,
+            config_path: pitagames_core::paths::config_file(),
+        })
         .launch(App);
 }
 
@@ -188,6 +212,11 @@ impl MetadataQueue {
 // Component; PascalCase is the dioxus convention.
 #[allow(non_snake_case)]
 fn App() -> Element {
+    // The shell the window was opened in and the display numbers both shells
+    // read. `main` resolved them from the config and the command line; the app
+    // only toggles and remembers.
+    let start = use_context::<shell::ShellStart>();
+    let shell_state = use_hook(|| shell::ShellState::new(&start));
     let mut library_state = use_signal(|| None::<Library>);
     let mut db_state = use_signal(|| None::<pitagames_db::Db>);
     let mut board = use_signal(Downloads::default);
@@ -197,6 +226,10 @@ fn App() -> Element {
     // after it opens shows up without a second copy of the game.
     let mut selected_game = use_signal(|| None::<GameId>);
     let mut query = use_signal(String::new);
+    // Whether a text field owns the keyboard. The window-level key pump must
+    // not steal arrows from a text field. The search field, the sign-in
+    // terminal's pasted line and the profile name all set this.
+    let mut text_focused = use_signal(|| false);
     let mut notice = use_signal(String::new);
     // Art is optional: until the cache/server is up, cards show placeholders.
     let mut art_state = use_signal(|| None::<std::sync::Arc<art::ArtContext>>);
@@ -247,6 +280,197 @@ fn App() -> Element {
     // The play slot's channel, same shape: the grid and the detail page hold a
     // sender, one drain future below owns the receiver.
     let play_channel = use_hook(play::PlayChannel::new);
+
+    // The one input pump's per-screen action channels. The keyboard handler and
+    // the gamepad drain below post into whichever screen is showing; each screen
+    // owns its own `ScreenFocus` and drains its channel. The Downloads screen's
+    // focus lives here because its body is rendered inline in `App`.
+    let library_actions = use_hook(focus::ActionChannel::new);
+    let downloads_actions = use_hook(focus::ActionChannel::new);
+    let stores_actions = use_hook(focus::ActionChannel::new);
+    let detail_actions = use_hook(focus::ActionChannel::new);
+    let downloads_focus = focus::use_focus();
+
+    // The persisted input maps. The keyboard pump and the gamepad worker both
+    // read these, so a remap in `input.toml` applies to every screen's graph.
+    let input_maps = use_hook(|| match pitagames_input::InputMaps::load_default() {
+        Ok(maps) => maps,
+        Err(error) => {
+            eprintln!("[pitagames] ignoring input.toml: {error}");
+            pitagames_input::InputMaps::new()
+        }
+    });
+    // The shared keyboard layout, so a remap applies to every screen's graph.
+    // The pump moves one copy; the hint row keeps another.
+    let keyboard_map = use_hook(|| input_maps.keyboard());
+    let hint_keyboard_map = keyboard_map.clone();
+
+    // The last device that produced input, for glyph hints and cursor hiding.
+    // The keyboard and gamepad pumps set it; a pointer move counts as the
+    // desktop side. `pad_active` is `false` until the first pad action.
+    let pad_active = use_signal(|| false);
+    // When the pointer last moved. A plain `Cell` so tracking it never
+    // re-renders the window; the timer below reads it.
+    let last_pointer = use_hook(|| Rc::new(Cell::new(Instant::now())));
+    let cursor_hidden = use_signal(|| false);
+
+    // The gamepad pump: one `gilrs` source for the whole window. It posts an
+    // action into the active screen's channel; the thread exits when the app's
+    // receiver drops. A machine with no pad reports `Unavailable`, never a
+    // crash, so the keyboard path stays usable.
+    let pad = use_hook(|| {
+        let channel = gamepad::GamepadChannel::new();
+        gamepad::spawn(input_maps.clone(), channel.sender());
+        channel
+    });
+    // The gamepad pump and the keyboard pump are long-lived closures, so each
+    // gets its own clones; the originals stay with the screens that drain them.
+    // An `ActionChannel` is not `Copy`, and `dispatch_action` only borrows.
+    let gamepad_actions = (
+        library_actions.clone(),
+        downloads_actions.clone(),
+        stores_actions.clone(),
+        detail_actions.clone(),
+    );
+    let pad_shell = shell_state.clone();
+    use_future(move || {
+        let channel = pad.clone();
+        let actions = gamepad_actions.clone();
+        let mut shell = pad_shell.clone();
+        let mut pad_active = pad_active;
+        async move {
+            while let Some(event) = channel.next().await {
+                match event {
+                    gamepad::GamepadEvent::Action(action) if action.is_press() => {
+                        // Any pad press makes the pad the last device: the hint
+                        // row switches to its glyphs and the cursor may hide.
+                        pad_active.set(true);
+                        // `Guide` is the shell's own action, not the screen's:
+                        // it toggles the two shells wherever the player is.
+                        if action.action == pitagames_input::Action::Guide {
+                            shell.toggle();
+                            continue;
+                        }
+                        dispatch_action(
+                            action.action,
+                            view,
+                            &actions.0,
+                            &actions.1,
+                            &actions.2,
+                            &actions.3,
+                        );
+                    }
+                    gamepad::GamepadEvent::Action(_) => {}
+                    gamepad::GamepadEvent::Unavailable(message) => {
+                        eprintln!("[pitagames] {message}");
+                    }
+                }
+            }
+        }
+    });
+
+    // Hide the cursor when the pad is the last input and the pointer has been
+    // idle for 2 s. The timer polls a plain `Cell`, so a pointer move never
+    // wakes the event loop; a mouse move resets the cell and shows the cursor
+    // again. The plan's "auto-hide the cursor after 2 s" lives here.
+    {
+        let last_pointer = Rc::clone(&last_pointer);
+        use_future(move || {
+            let last_pointer = Rc::clone(&last_pointer);
+            let mut cursor_hidden = cursor_hidden;
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let hide =
+                        *pad_active.peek() && last_pointer.get().elapsed() > Duration::from_secs(2);
+                    if hide != *cursor_hidden.peek() {
+                        cursor_hidden.set(hide);
+                    }
+                }
+            }
+        });
+    }
+
+    // Window-level key pump: DOM focus is deliberately not part of navigation,
+    // so the events are read from tao rather than from a focused element. The
+    // handler lives in `App` so one pump serves every screen; the active
+    // screen's action channel does the navigation.
+    let key_actions = (
+        library_actions.clone(),
+        downloads_actions.clone(),
+        stores_actions.clone(),
+        detail_actions.clone(),
+    );
+    let mut key_shell = shell_state.clone();
+    let mut key_pad_active = pad_active;
+    use_wry_event_handler(move |event, _| {
+        let dioxus::desktop::tao::event::Event::WindowEvent {
+            event:
+                dioxus::desktop::tao::event::WindowEvent::KeyboardInput {
+                    event: key_event, ..
+                },
+            ..
+        } = event
+        else {
+            return;
+        };
+        if key_event.state != ElementState::Pressed {
+            return;
+        }
+        // Any key press makes the keyboard the last device: the hint row shows
+        // its glyphs and the cursor stays visible.
+        key_pad_active.set(false);
+        let Some(key) = focus::key_from_tao(key_event.physical_key) else {
+            return;
+        };
+        let Some(action) = keyboard_map.action_for_key(key) else {
+            return;
+        };
+        // A text field owns the arrows and typing; Back still leaves the field
+        // (and its screen) so the keyboard is never trapped in a caret.
+        if text_focused() && action != pitagames_input::Action::Back {
+            return;
+        }
+        // Movement may repeat while a key is held; Confirm/Back must not.
+        if key_event.repeat && !action.is_navigation() {
+            return;
+        }
+        // `F11` maps to `Guide`: the shell's own action, handled here rather
+        // than by the screen, so it toggles wherever the player is.
+        if action == pitagames_input::Action::Guide {
+            key_shell.toggle();
+            return;
+        }
+        dispatch_action(
+            action,
+            view,
+            &key_actions.0,
+            &key_actions.1,
+            &key_actions.2,
+            &key_actions.3,
+        );
+    });
+
+    // The Downloads screen's action drain. Its body is inline in `App`, so its
+    // focus graph is too; the future only runs while that view is showing.
+    use_future(move || {
+        let channel = downloads_actions.clone();
+        async move {
+            while let Some(action) = channel.next().await {
+                if view() != View::Downloads {
+                    continue;
+                }
+                handle_downloads_action(
+                    action,
+                    downloads_focus,
+                    installs,
+                    install_events,
+                    view,
+                    notice,
+                );
+            }
+        }
+    });
 
     // Drive the install queue: fold each worker report in, flip the row a
     // finished install turned into a real directory, and hand the next queued
@@ -589,6 +813,12 @@ fn App() -> Element {
         .into_iter()
         .map(|(index, job)| (index, job.clone()))
         .collect();
+    // The Downloads focus graph's cell order: the "Clear finished" row first
+    // when there is one, then active store jobs, then finished ones. The same
+    // order is applied by `handle_downloads_action`.
+    let downloads_clear_cell = usize::from(!store_finished.is_empty());
+    let downloads_active_start = downloads_clear_cell;
+    let downloads_finished_start = downloads_active_start + store_active.len();
     let active_count = downloads_snapshot.active_count() + install_snapshot.active_count();
     let nothing_tracked = downloads_snapshot.rows().is_empty()
         && store_active.is_empty()
@@ -633,12 +863,40 @@ fn App() -> Element {
         }
     };
 
+    // The shell's CSS. Both branches name the same properties so the style
+    // setter cannot keep a console-only value after a switch back.
+    let mut root_style = shell::root_style(shell_state.shell(), &shell_state.display);
+    // A hidden cursor is the whole-window answer to "the pad is driving": the
+    // hint row shows the pad's glyphs and the pointer disappears until the next
+    // mouse move. `cursor:none` is appended so the base style stays unchanged.
+    if *cursor_hidden.read() {
+        root_style.push_str("cursor:none;");
+    }
+    let header_style = shell::header_style(shell_state.shell(), &shell_state.display);
+    let shell_label = shell_state.shell().label();
+    let shell_hint = if shell_state.shell().is_console() {
+        "Guide or F11 returns to the desktop"
+    } else {
+        "Guide or F11 opens the console shell"
+    };
+
+    // The hint row follows the device last used: the pad's labels while it is
+    // active, the keyboard's otherwise. Both read the same maps the pumps do,
+    // so a remap changes the hints without a second table.
+    let hint_map = if *pad_active.read() {
+        input_maps.for_device("", true)
+    } else {
+        hint_keyboard_map.clone()
+    };
+    let hint_row = pitagames_input::hints(&hint_map);
+
     // The grid is a child component so scroll-position changes re-render only
     // it, never the whole window (and never clone the library per scroll tick).
     let library_body = rsx! {
         LibraryGrid {
             library: library_state,
             query,
+            actions: library_actions,
             art_state,
             art_revision,
             board,
@@ -673,17 +931,23 @@ fn App() -> Element {
                         "Store installs"
                     }
                     if !store_finished.is_empty() {
-                        button {
-                            onclick: move |_| {
-                                installs.write().clear_finished();
-                            },
-                            style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;",
-                            "Clear finished"
+                        {
+                            let focused = downloads_focus.index() == Some(0);
+                            let ring = focus::ring_style(focused);
+                            rsx! {
+                                button {
+                                    onclick: move |_| {
+                                        installs.write().clear_finished();
+                                    },
+                                    style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;{ring}",
+                                    "Clear finished"
+                                }
+                            }
                         }
                     }
                 }
 
-                for (index, job) in store_active {
+                for (position, (index, job)) in store_active.into_iter().enumerate() {
                     {
                         let title = job.title.clone();
                         let store = job.id.store.as_str();
@@ -705,11 +969,14 @@ fn App() -> Element {
                         // stopped through the token its worker registered.
                         let cancellable = job.state == JobState::Queued
                             || (job.state == JobState::Running && !cancelling);
+                        let focused = downloads_focus.index()
+                            == Some(downloads_active_start + position);
+                        let ring = focus::ring_style(focused);
 
                         rsx! {
                             div {
                                 key: "store-active-{index}",
-                                style: "display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;",
+                                style: "display:flex;flex-direction:column;gap:8px;padding:14px;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;{ring}",
 
                                 div {
                                     style: "display:flex;align-items:baseline;gap:12px;",
@@ -763,7 +1030,7 @@ fn App() -> Element {
                     }
                 }
 
-                for (index, job) in store_finished {
+                for (position, (index, job)) in store_finished.into_iter().enumerate() {
                     {
                         let title = job.title.clone();
                         let meta = format!(
@@ -780,11 +1047,14 @@ fn App() -> Element {
                             job.state,
                             JobState::Failed { .. } | JobState::Cancelled
                         );
+                        let focused = downloads_focus.index()
+                            == Some(downloads_finished_start + position);
+                        let ring = focus::ring_style(focused);
 
                         rsx! {
                             div {
                                 key: "store-done-{index}",
-                                style: "display:flex;flex-direction:column;gap:4px;padding:12px 14px;border-radius:12px;background:#1a1a22;border:1px solid #26262f;",
+                                style: "display:flex;flex-direction:column;gap:4px;padding:12px 14px;border-radius:12px;background:#1a1a22;border:1px solid #26262f;{ring}",
                                 div {
                                     style: "display:flex;align-items:center;gap:12px;",
                                     span {
@@ -934,25 +1204,54 @@ fn App() -> Element {
         }
     };
 
+    // The pointer handler's captures. The `Rc` is cloned per render; the
+    // signals are Copy. A pointer move is desktop input: it shows the cursor
+    // and switches the hint row back to the keyboard glyphs.
+    let pointer_cell = Rc::clone(&last_pointer);
+    let mut pointer_pad_active = pad_active;
+    let mut pointer_cursor_hidden = cursor_hidden;
+
     rsx! {
         div {
-            style: "display:flex;flex-direction:column;height:100vh;overflow:hidden;background:#14141c;color:#e8e8ee;font-family:sans-serif;",
+            style: "{root_style}",
+            onmousemove: move |_| {
+                pointer_cell.set(Instant::now());
+                if *pointer_pad_active.peek() {
+                    pointer_pad_active.set(false);
+                }
+                if *pointer_cursor_hidden.peek() {
+                    pointer_cursor_hidden.set(false);
+                }
+            },
 
             header {
-                style: "display:flex;align-items:baseline;gap:24px;padding:20px 32px 12px;",
+                style: "{header_style}",
                 h1 {
-                    style: "font-size:22px;font-weight:600;margin:0;color:#ffffff;",
+                    style: "font-size:var(--title-size);font-weight:600;margin:0;color:#ffffff;",
                     "PitaGames"
                 }
                 span {
-                    style: "font-size:12px;color:#78788a;",
+                    style: "font-size:inherit;color:#78788a;",
                     "{subtitle}"
+                }
+                span {
+                    style: "font-size:inherit;text-transform:uppercase;letter-spacing:0.08em;color:#7a9ad6;",
+                    title: "{shell_hint}",
+                    "{shell_label}"
+                }
+                if shell_state.shell().is_console() {
+                    span {
+                        style: "font-size:inherit;color:#78788a;",
+                        "{shell_hint}"
+                    }
                 }
                 input {
                     placeholder: "Search your library",
                     value: "{query}",
                     oninput: move |event| query.set(event.value()),
-                    style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;width:260px;outline:none;",
+                    onfocus: move |_| text_focused.set(true),
+                    onblur: move |_| text_focused.set(false),
+                    style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;font-size:inherit;outline:none;",
                 }
             }
 
@@ -1068,6 +1367,8 @@ fn App() -> Element {
                             entry,
                             db: detail::DbHandle(db_handle.clone()),
                             view,
+                            actions: detail_actions,
+                            text_focused,
                             hero: hero_url,
                             steam_root: steam_root.clone(),
                             proton: proton_report.clone(),
@@ -1088,6 +1389,9 @@ fn App() -> Element {
                     stores_view::StoresView {
                         library: library_state,
                         db: db_state,
+                        view,
+                        actions: stores_actions,
+                        text_focused,
                     }
                 }
             } else if current_view == View::History {
@@ -1118,6 +1422,24 @@ fn App() -> Element {
             } else {
                 {library_body}
             }
+
+            // The hint row: the device's labels for the actions the shell
+            // offers. It sits at the bottom of the window so a couch user can
+            // read what the pad does without a pointer. A screen that hides an
+            // action (a dialog without Menu) filters `hint_row` before it draws.
+            footer {
+                style: "display:flex;flex-wrap:wrap;gap:1.25rem;align-items:center;padding:0.5rem 2rem;border-top:1px solid #26262f;color:#9a9aac;font-size:0.875rem;",
+                for hint in hint_row.iter() {
+                    span {
+                        style: "display:inline-flex;align-items:center;gap:0.4rem;",
+                        span {
+                            style: "min-width:1.4rem;padding:0.05rem 0.35rem;border:1px solid #3a3a4a;border-radius:0.3rem;background:#1e1e28;color:#e8e8f0;text-align:center;font-weight:600;",
+                            "{hint.label}"
+                        }
+                        span { "{pitagames_input::action_label(hint.action)}" }
+                    }
+                }
+            }
         }
     }
 }
@@ -1130,6 +1452,8 @@ fn App() -> Element {
 struct LibraryGridProps {
     pub library: Signal<Option<Library>>,
     pub query: Signal<String>,
+    /// The app's one input pump posts this screen's actions here.
+    pub actions: focus::ActionChannel,
     pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
     pub art_revision: Signal<u64>,
     pub board: Signal<Downloads>,
@@ -1181,6 +1505,46 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     // Reading the revision makes a capsule that just finished downloading
     // repaint without re-rendering the whole window.
     let _ = art_revision();
+
+    // Focus lives here, not in the DOM: cards scroll in and out of existence
+    // with the window, but keyboard/controller focus must be able to walk past
+    // the drawn edge and scroll it into view. The graph is rebuilt from the
+    // logical list on every move (`focus::ScreenFocus`).
+    let screen_focus = focus::use_focus();
+    // The scroll container's mounted handle. Scrolling is imperative; the
+    // handle is kept here so the action drain can move the viewport.
+    let scroller = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
+    let action_scroller = Rc::clone(&scroller);
+
+    // The app's one input pump posts this screen's actions here. The grid owns
+    // its own focus and scroll geometry, so it applies the action itself; the
+    // `view` check keeps a late action from a previous screen out.
+    let actions = props.actions;
+    use_future(move || {
+        let channel = actions.clone();
+        // Cloned outside the async block: the outer closure is `FnMut`, so it
+        // must not move the `Rc` the future would consume.
+        let scroller = Rc::clone(&action_scroller);
+        async move {
+            while let Some(action) = channel.next().await {
+                if view() != View::Library {
+                    continue;
+                }
+                perform_action(
+                    action,
+                    library,
+                    query,
+                    view,
+                    selected_game,
+                    screen_focus,
+                    viewport_width,
+                    viewport_height,
+                    scroll_top,
+                    Rc::clone(&scroller),
+                );
+            }
+        }
+    });
 
     let library_guard = library.read();
     let Some(state) = library_guard.as_ref() else {
@@ -1263,6 +1627,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
             // scrolls, so `onscroll` reports this container's offset.
             div {
                 style: "flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;",
+                onmounted: move |event| {
+                    // Keep the handle: the focus pump scrolls the container
+                    // imperatively so the focused row is drawn next render.
+                    *scroller.borrow_mut() = Some(event.data());
+                },
                 onscroll: move |event| {
                     scroll_top.set(event.scroll_top());
                     if event.client_height() > 0 {
@@ -1293,10 +1662,13 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                     div {
                         style: "position:absolute;left:0;right:0;top:{offset_y}px;display:grid;grid-template-columns:repeat({columns},minmax(0,1fr));gap:{row_gap}px {column_gap}px;padding:0 {h_padding}px;",
 
-                        for entry in visible {
+                        for (offset, entry) in visible.iter().enumerate() {
                             {
                                 // Every closure below needs owned data: rsx
                                 // children outlive this iteration.
+                                let card_index = window.item_start + offset;
+                                let focused = screen_focus.index() == Some(card_index);
+                                let ring = focus::ring_style(focused);
                                 let app_id = entry.app_id().to_string();
                                 let title = entry.title().to_string();
                                 let game_id = entry.game.id.clone();
@@ -1365,10 +1737,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                     div {
                                         key: "{card_key}",
                                         onclick: move |_| {
+                                            screen_focus.set(Some(card_index));
                                             selected_game.set(Some(open_id.clone()));
                                             view.set(View::Detail);
                                         },
-                                        style: "display:flex;flex-direction:column;gap:6px;padding:14px;box-sizing:border-box;height:{card_height}px;overflow:hidden;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;",
+                                        style: "display:flex;flex-direction:column;gap:6px;padding:14px;box-sizing:border-box;height:{card_height}px;overflow:hidden;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
 
                                         if let Some(url) = art_url {
                                             img {
@@ -1521,11 +1894,231 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     }
 }
 
-fn nav_style(active: bool) -> &'static str {
-    if active {
-        "padding:6px 14px;border-radius:999px;border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;"
+/// Apply one action to the library's focus graph.
+///
+/// Both the keyboard pump and the gamepad pump call this, so `Confirm` opens the
+/// same card and a direction resolves through the same [`pitagames_input::FocusGraph`]
+/// regardless of which device produced the action. It is a free function rather
+/// than a shared closure because its two callers are a window event handler and
+/// an async future, which cannot capture one closure without wrapping it in an
+/// `Rc`.
+#[allow(clippy::too_many_arguments)]
+fn perform_action(
+    action: pitagames_input::Action,
+    library: Signal<Option<Library>>,
+    mut query: Signal<String>,
+    mut view: Signal<View>,
+    mut selected_game: Signal<Option<GameId>>,
+    screen_focus: focus::ScreenFocus,
+    viewport_width: Signal<f64>,
+    viewport_height: Signal<f64>,
+    mut scroll_top: Signal<f64>,
+    scroller: Rc<RefCell<Option<Rc<MountedData>>>>,
+) {
+    // Back on the library clears the search before it leaves the screen; the
+    // grid is the root view, so there is nowhere else to go.
+    if action == pitagames_input::Action::Back {
+        if !query.read().is_empty() {
+            query.set(String::new());
+        }
+        return;
+    }
+
+    let (count, columns) = {
+        let guard = library.read();
+        let Some(state) = guard.as_ref() else {
+            return;
+        };
+        let needle = query.read().to_string();
+        let columns = grid::GridGeometry::for_width(viewport_width()).columns;
+        (state.filtered(&needle).len(), columns)
+    };
+    if count == 0 {
+        return;
+    }
+
+    if action.is_navigation() {
+        let Some(index) = screen_focus.move_focus(action, count, columns) else {
+            return;
+        };
+        let geometry = grid::GridGeometry::for_width(viewport_width());
+        let target = grid::scroll_into_view(
+            scroll_top(),
+            viewport_height(),
+            geometry,
+            geometry.row_of(index),
+            grid::ROW_GAP,
+        );
+        if (target - scroll_top()).abs() > 0.5 {
+            // Update the window model now so the next render draws the focused
+            // row; the DOM scroll keeps the container in sync.
+            scroll_top.set(target);
+            let future = scroller
+                .borrow()
+                .as_ref()
+                .map(|data| data.scroll(PixelsVector2D::new(0.0, target), ScrollBehavior::Instant));
+            if let Some(future) = future {
+                spawn(async move {
+                    let _ = future.await;
+                });
+            }
+        }
+        return;
+    }
+
+    if action == pitagames_input::Action::Confirm {
+        let open = {
+            let guard = library.read();
+            guard.as_ref().and_then(|state| {
+                let needle = query.read().to_string();
+                let matches = state.filtered(&needle);
+                screen_focus
+                    .index()
+                    .filter(|index| *index < matches.len())
+                    .map(|index| matches[index].game.id.clone())
+            })
+        };
+        if let Some(id) = open {
+            selected_game.set(Some(id));
+            view.set(View::Detail);
+        }
+    }
+}
+
+/// Route one action from the app's one input pump to the active screen.
+///
+/// The pump lives in `App`; each screen owns its own `ScreenFocus` and applies
+/// the action in its own future. A screen without a graph (History, Account,
+/// Logs) only gets `Back`, which returns to the library.
+fn dispatch_action(
+    action: pitagames_input::Action,
+    mut view: Signal<View>,
+    library: &focus::ActionChannel,
+    downloads: &focus::ActionChannel,
+    stores: &focus::ActionChannel,
+    detail: &focus::ActionChannel,
+) {
+    let channel = match view() {
+        View::Library => library,
+        View::Downloads => downloads,
+        View::Stores => stores,
+        View::Detail => detail,
+        View::History | View::Account | View::Logs => {
+            // These screens have no graph yet; Back still leaves them so the
+            // keyboard and a pad cannot trap the user.
+            if action == pitagames_input::Action::Back {
+                view.set(View::Library);
+            }
+            return;
+        }
+    };
+    let _ = channel.send(action);
+}
+
+/// Apply one action to the Downloads screen's inline focus graph.
+///
+/// The cells are the actionable store-install rows: the "Clear finished" row
+/// first when there is one, then each active job (Cancel), then each finished
+/// job (Retry when it failed, Remove otherwise). Steam's own download rows are
+/// informational and stay pointer-only for now.
+fn handle_downloads_action(
+    action: pitagames_input::Action,
+    focus: focus::ScreenFocus,
+    mut installs: Signal<Installs>,
+    install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    mut view: Signal<View>,
+    notice: Signal<String>,
+) {
+    if action == pitagames_input::Action::Back {
+        view.set(View::Library);
+        return;
+    }
+
+    let (count, clear_cell, active_len, finished_len) = {
+        let snapshot = installs.read();
+        let active_len = snapshot.active().len();
+        let finished_len = snapshot.finished().len();
+        let clear_cell = usize::from(finished_len > 0);
+        (
+            clear_cell + active_len + finished_len,
+            clear_cell,
+            active_len,
+            finished_len,
+        )
+    };
+
+    if action.is_navigation() {
+        focus.move_focus(action, count, 1);
+        return;
+    }
+
+    if action != pitagames_input::Action::Confirm {
+        return;
+    }
+
+    let Some(index) = focus.index() else {
+        return;
+    };
+    if clear_cell == 1 && index == 0 {
+        installs.write().clear_finished();
+        return;
+    }
+
+    let row = index.saturating_sub(clear_cell);
+    if row < active_len {
+        let row_index = {
+            let snapshot = installs.read();
+            snapshot.active().get(row).map(|(index, _)| *index)
+        };
+        if let Some(row_index) = row_index {
+            installs.write().cancel(row_index);
+        }
+        return;
+    }
+
+    let finished_index = row - active_len;
+    if finished_index >= finished_len {
+        return;
+    }
+    let row_index = {
+        let snapshot = installs.read();
+        snapshot
+            .finished()
+            .get(finished_index)
+            .map(|(index, _)| *index)
+    };
+    let Some(row_index) = row_index else {
+        return;
+    };
+    let retry = {
+        let snapshot = installs.read();
+        snapshot
+            .finished()
+            .get(finished_index)
+            .map(|(_, job)| matches!(job.state, JobState::Failed { .. } | JobState::Cancelled))
+            .unwrap_or(false)
+    };
+    if retry {
+        if installs.write().retry(row_index) {
+            pump_installs(installs, install_events, notice);
+        }
     } else {
-        "padding:6px 14px;border-radius:999px;border:1px solid #2c2c38;background:#1e1e28;color:#a8a8b8;font-size:12px;cursor:pointer;"
+        installs.write().remove(row_index);
+    }
+}
+
+fn nav_style(active: bool) -> String {
+    // The type scales with the shell's `--ui-scale`, so the console shell's
+    // navigation reads from a couch without every screen's sizes being revisited.
+    let font = "calc(12px * var(--ui-scale, 1))";
+    if active {
+        format!(
+            "padding:calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));border-radius:999px;border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;font-size:{font};cursor:pointer;"
+        )
+    } else {
+        format!(
+            "padding:calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));border-radius:999px;border:1px solid #2c2c38;background:#1e1e28;color:#a8a8b8;font-size:{font};cursor:pointer;"
+        )
     }
 }
 

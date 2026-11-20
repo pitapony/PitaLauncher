@@ -172,7 +172,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 | `crates/platform` | Proton discovery, the non-Steam prefix layout, disk-space checks, the compatibility DB loader, anti-cheat detection and the runtime env compiler |
 | `crates/art` | Art download, cover-crop, WebP cache and loopback server |
 | `crates/secrets` | Steam Web API key storage (keyring + `0600` fallback) |
-| `crates/input` | Controller/keyboard action model, `gilrs` and replay sources, per-device maps (M2.5) |
+| `crates/input` | Controller/keyboard action model, `gilrs` and replay sources, per-device maps and the spatial focus graph (M2.5) |
 | `crates/shim` | `pitagames-shim` launch shim |
 | `crates/cli` | Headless developer CLI |
 | `crates/app` | Dioxus desktop GUI (the only crate allowed to use RSX) |
@@ -206,6 +206,11 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2-importers.md`](docs/m2-importers.md) — the read-only Heroic, Lutris and Bottles importers.
 - [`docs/m2-prefixes.md`](docs/m2-prefixes.md) — non-Steam prefixes, disk-space checks and the install queue.
 - [`docs/m2-store-status.md`](docs/m2-store-status.md) — the store status row and the unified update list.
+- [`docs/m2.5-input.md`](docs/m2.5-input.md) — the console-shell input layer (`crates/input`).
+- [`docs/m2.5-focus.md`](docs/m2.5-focus.md) — the spatial focus graph and the library navigation pump.
+- [`docs/m2.5-gamepad.md`](docs/m2.5-gamepad.md) — the gamepad pump that drives the same focus graph.
+- [`docs/m2.5-shells.md`](docs/m2.5-shells.md) — the desktop/console shells, the start mode and the display config.
+- [`docs/m2.5-hints.md`](docs/m2.5-hints.md) — the glyph hint row and the auto-hidden cursor.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

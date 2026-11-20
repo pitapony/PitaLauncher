@@ -62,6 +62,11 @@ impl GridGeometry {
     pub fn art_height(&self) -> f64 {
         self.tile_width * ART_RATIO
     }
+
+    /// The row a linear item index occupies.
+    pub fn row_of(&self, index: usize) -> usize {
+        index / self.columns.max(1)
+    }
 }
 
 /// The slice of items to draw, and the geometry to place it with.
@@ -148,6 +153,40 @@ pub fn window(
         total_height,
         item_start,
         item_end,
+    }
+}
+
+/// Scroll offset that keeps `row` inside the viewport.
+///
+/// The focus graph moves by cells, but only a window of rows is drawn; the
+/// caller applies the returned offset to the scroll container so the focused
+/// tile exists on the next render. The offset moves as little as possible: a
+/// row already fully visible leaves it untouched, so moving along a row never
+/// jiggles the page. `margin` is breathing room above and below (the focus
+/// ring's outline must not be clipped); the result is clamped at zero, matching
+/// WebKit's rubber-banding clamp in [`window`].
+pub fn scroll_into_view(
+    scroll_top: f64,
+    viewport_height: f64,
+    geometry: GridGeometry,
+    row: usize,
+    margin: f64,
+) -> f64 {
+    let scroll_top = scroll_top.max(0.0);
+    let row_height = geometry.row_height;
+    if row_height <= 0.0 || viewport_height <= 0.0 {
+        return scroll_top;
+    }
+    let margin = margin.max(0.0).min(viewport_height / 2.0);
+    let top = row as f64 * row_height;
+    // The row pitch includes the gap below it; the card ends before that.
+    let bottom = top + row_height - ROW_GAP;
+    if top - margin < scroll_top {
+        (top - margin).max(0.0)
+    } else if bottom + margin > scroll_top + viewport_height {
+        (bottom + margin - viewport_height).max(0.0)
+    } else {
+        scroll_top
     }
 }
 
@@ -286,5 +325,59 @@ mod tests {
         };
         assert_eq!(window.slice(&items), &[3]);
         assert_eq!(window.last_row - window.first_row, 1);
+    }
+
+    #[test]
+    fn row_of_is_row_major_and_clamps_the_column_count() {
+        let geometry = GridGeometry::for_width(1280.0);
+        let columns = geometry.columns;
+        assert_eq!(geometry.row_of(0), 0);
+        assert_eq!(geometry.row_of(columns), 1);
+        assert_eq!(geometry.row_of(columns + 1), 1);
+        assert_eq!(geometry.row_of(columns * 3 + 2), 3);
+
+        let single = GridGeometry::for_width(0.0);
+        assert_eq!(single.row_of(2), 2);
+    }
+
+    #[test]
+    fn a_row_already_in_view_leaves_the_offset_alone() {
+        let geometry = geometry();
+        let viewport = geometry.row_height * 3.0;
+        let scroll_top = geometry.row_height * 4.0;
+        // Row 5 is fully inside rows 4..7.
+        assert_eq!(
+            scroll_into_view(scroll_top, viewport, geometry, 5, 8.0),
+            scroll_top
+        );
+    }
+
+    #[test]
+    fn a_row_below_the_viewport_scrolls_just_enough_to_show_it() {
+        let geometry = geometry();
+        let viewport = geometry.row_height * 3.0;
+        let margin = 8.0;
+        let target = scroll_into_view(0.0, viewport, geometry, 4, margin);
+        let bottom = 4.0 * geometry.row_height + geometry.row_height - ROW_GAP;
+        assert!((target - (bottom + margin - viewport)).abs() < 1e-9);
+        assert!(target > 0.0);
+    }
+
+    #[test]
+    fn a_row_above_the_viewport_scrolls_up_with_its_margin() {
+        let geometry = geometry();
+        let viewport = geometry.row_height * 3.0;
+        let scroll_top = geometry.row_height * 10.0;
+        let target = scroll_into_view(scroll_top, viewport, geometry, 8, 8.0);
+        assert!((target - (8.0 * geometry.row_height - 8.0)).abs() < 1e-9);
+        assert!(target < scroll_top);
+    }
+
+    #[test]
+    fn scrolling_never_goes_negative_or_moves_on_an_unmeasured_viewport() {
+        let geometry = geometry();
+        assert_eq!(scroll_into_view(0.0, 900.0, geometry, 0, 8.0), 0.0);
+        assert_eq!(scroll_into_view(-40.0, 900.0, geometry, 0, 8.0), 0.0);
+        assert_eq!(scroll_into_view(12.0, 0.0, geometry, 9, 8.0), 12.0);
     }
 }

@@ -19,12 +19,14 @@ use crate::View;
 use crate::anticheat::AnticheatView;
 use crate::copy::CopyButton;
 use crate::diagnostics::DiagnosticsEditor;
+use crate::focus::{self, ActionChannel};
 use crate::format;
 use crate::library::{self, GameEntry};
 use crate::persist;
 use crate::play::{self, Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
 use crate::wrappers::WrapperEditor;
+use pitagames_input::Action;
 
 /// Sessions the detail page's history card shows.
 const HISTORY_ROWS: usize = 5;
@@ -46,6 +48,10 @@ pub struct DetailProps {
     pub db: DbHandle,
     /// Back button target; navigation stays in `main.rs`.
     pub view: Signal<View>,
+    /// The app's one input pump posts this screen's actions here.
+    pub actions: ActionChannel,
+    /// True while a text field owns the keyboard; the profile name input sets it.
+    pub text_focused: Signal<bool>,
     /// Loopback URL for the header art, once it is on disk.
     pub hero: Option<String>,
     /// The Steam root the game came from; `None` disables the routing panel.
@@ -66,6 +72,9 @@ pub fn Detail(props: DetailProps) -> Element {
     let entry = props.entry;
     let db = props.db.0;
     let mut view = props.view;
+    let actions = props.actions;
+    let mut text_focused = props.text_focused;
+    let screen_focus = focus::use_focus();
     let game_id = entry.game.id.clone();
 
     let rows = use_signal(Vec::<StoredProfile>::new);
@@ -278,7 +287,7 @@ pub fn Detail(props: DetailProps) -> Element {
     // umu/Proton hand-off, which needs the store listing's executable.
     let play_wired = entry.play_is_wired();
     let play_blocked = entry.play_blocked();
-    let mut play_signal = props.play;
+    let play_signal = props.play;
     let play_events = props.play_events;
     let playing = play_signal.read().label(&game_id);
     let is_steam = entry.is_steam();
@@ -391,14 +400,65 @@ pub fn Detail(props: DetailProps) -> Element {
     // Computed before `save_report` is moved into the button's closure.
     let save_available = selected_profile.is_some() && save_report.is_some();
 
+    // The detail screen's action drain. The app's one pump posts here; this
+    // screen owns its own graph. The cells are the two primary actions the page
+    // always offers: Back, then Play when the game is wired and not running.
+    // The runtime panels keep their pointer controls; a controller can reach
+    // Back and Play without a pointer.
+    let action_entry = play_entry.clone();
+    let action_db = play_db.clone();
+    let action_game = game_id.clone();
+    use_future(move || {
+        let channel = actions.clone();
+        let entry = action_entry.clone();
+        let db = action_db.clone();
+        let game = action_game.clone();
+        async move {
+            while let Some(action) = channel.next().await {
+                if view() != View::Detail {
+                    continue;
+                }
+                let playing = play_signal.read().label(&game).is_some();
+                let count = if play_wired && !playing { 2 } else { 1 };
+                match action {
+                    Action::Back => view.set(View::Library),
+                    action if action.is_navigation() => {
+                        screen_focus.move_focus(action, count, 1);
+                    }
+                    Action::Confirm => match screen_focus.index() {
+                        Some(0) => view.set(View::Library),
+                        Some(1) if play_wired && !playing => {
+                            start_play(
+                                error,
+                                play_signal,
+                                play_events,
+                                entry.clone(),
+                                is_steam,
+                                db.clone(),
+                            );
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+    });
+
     rsx! {
         div {
             style: "display:flex;flex-direction:column;gap:18px;padding:0 32px 40px;",
 
-            button {
-                onclick: move |_| view.set(View::Library),
-                style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;",
-                "← Library"
+            {
+                let focused = screen_focus.index() == Some(0);
+                let ring = focus::ring_style(focused);
+                rsx! {
+                    button {
+                        onclick: move |_| view.set(View::Library),
+                        style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;{ring}",
+                        "← Library"
+                    }
+                }
             }
 
             if let Some(hero) = props.hero {
@@ -436,40 +496,26 @@ pub fn Detail(props: DetailProps) -> Element {
                         "{label}"
                     }
                 } else if play_wired {
-                    button {
-                        disabled: !can_play,
-                        onclick: move |_| {
-                            error.set(String::new());
-                            if !is_steam {
-                                let Some(sender) = play_events.read().clone() else {
-                                    error.set("The launcher is still starting; try again in a moment.".to_string());
-                                    return;
-                                };
-                                if let Err(message) = play_signal.write().begin(&play_entry.game) {
-                                    error.set(message);
-                                    return;
-                                }
-                                play::spawn(play_entry.game.clone(), sender);
-                                return;
+                    {
+                        let focused = screen_focus.index() == Some(1);
+                        let ring = focus::ring_style(focused);
+                        rsx! {
+                            button {
+                                disabled: !can_play,
+                                onclick: move |_| {
+                                    start_play(
+                                        error,
+                                        play_signal,
+                                        play_events,
+                                        play_entry.clone(),
+                                        is_steam,
+                                        play_db.clone(),
+                                    );
+                                },
+                                style: "{play_style(can_play)}{ring}",
+                                "Play"
                             }
-                            let app_id = play_entry.app_id().to_string();
-                            if let Err(launch_error) = library::spawn_steam(&app_id) {
-                                error.set(format!("Could not ask Steam to run appid {app_id}: {launch_error}"));
-                                return;
-                            }
-                            let Some(db) = play_db.clone() else {
-                                return;
-                            };
-                            let id = play_entry.game.id.clone();
-                            let playtime = play_entry.playtime();
-                            spawn(async move {
-                                if let Err(message) = persist::record_launch(&db, &id, playtime).await {
-                                    error.set(message);
-                                }
-                            });
-                        },
-                        style: play_style(can_play),
-                        "Play"
+                        }
                     }
                 } else if let Some(reason) = play_blocked {
                     // A button that cannot launch is worse than a sentence that
@@ -674,6 +720,8 @@ pub fn Detail(props: DetailProps) -> Element {
                             placeholder: "New profile name",
                             value: "{name}",
                             oninput: move |event| new_name.set(event.value()),
+                            onfocus: move |_| text_focused.set(true),
+                            onblur: move |_| text_focused.set(false),
                             style: "flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;outline:none;font-size:13px;",
                         }
                         button {
@@ -1139,6 +1187,53 @@ fn platforms_label(platforms: pitagames_core::Platforms) -> String {
     } else {
         names.join(", ")
     }
+}
+
+/// Start the game from the detail page, whichever launch shape it uses.
+///
+/// The Play button and the focus graph's Confirm both call this, so a controller
+/// press and a pointer click cannot drift. A Steam row asks Steam to launch; a
+/// non-Steam row starts the hand-off and records the playtime when it ends.
+#[allow(clippy::too_many_arguments)]
+fn start_play(
+    mut error: Signal<String>,
+    mut play_signal: Signal<Play>,
+    play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
+    entry: GameEntry,
+    is_steam: bool,
+    db: Option<Db>,
+) {
+    error.set(String::new());
+    if !is_steam {
+        let Some(sender) = play_events.read().clone() else {
+            error.set("The launcher is still starting; try again in a moment.".to_string());
+            return;
+        };
+        if let Err(message) = play_signal.write().begin(&entry.game) {
+            error.set(message);
+            return;
+        }
+        play::spawn(entry.game.clone(), sender);
+        return;
+    }
+
+    let app_id = entry.app_id().to_string();
+    if let Err(launch_error) = library::spawn_steam(&app_id) {
+        error.set(format!(
+            "Could not ask Steam to run appid {app_id}: {launch_error}"
+        ));
+        return;
+    }
+    let Some(db) = db else {
+        return;
+    };
+    let id = entry.game.id.clone();
+    let playtime = entry.playtime();
+    spawn(async move {
+        if let Err(message) = persist::record_launch(&db, &id, playtime).await {
+            error.set(message);
+        }
+    });
 }
 
 fn play_style(enabled: bool) -> &'static str {

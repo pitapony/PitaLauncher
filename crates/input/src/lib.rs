@@ -20,16 +20,21 @@
 //!   applies the deadzone, turns held directions into timed repeats, and emits
 //!   [`ActionEvent`]s. Time is passed in ([`std::time::Instant`]) so the repeat
 //!   rules are tested without sleeping.
+//! - [`FocusGraph`] is the screen's logical layout: cells at `(row, col)`, a
+//!   spatial resolver that prefers the same row or column, per-axis wrap and a
+//!   deterministic tie-break. The shells render the ring and scroll the focused
+//!   cell into view; nothing here touches a DOM.
 //!
 //! [`Action`] is runtime state, not a persisted domain type: the keyboard and
-//! every controller share it, so the focus graph in `crates/input` (a later
-//! slice) and the same graph in `app` cannot disagree about what "Confirm"
-//! means. Only the [`InputMap`]s are persisted, in
+//! every controller share it, so the focus graph and both shells cannot disagree
+//! about what "Confirm" means. Only the [`InputMap`]s are persisted, in
 //! `<XDG_CONFIG_HOME>/pitagames/input.toml`.
 
 mod action;
 mod binding;
+mod focus;
 mod gamepad;
+mod hint;
 mod map;
 mod mapper;
 mod replay;
@@ -37,7 +42,9 @@ mod source;
 
 pub use action::{Action, ActionEvent, ActionKind, UnknownAction};
 pub use binding::{Axis, Binding, Button, Direction, Key, Stick};
+pub use focus::{FocusGraph, FocusId, FocusNode};
 pub use gamepad::{GilrsSource, SourceError};
+pub use hint::{HINT_ACTIONS, Hint, action_label, binding_label, hints};
 pub use map::{
     DEFAULT_DEADZONE, DEFAULT_REPEAT_DELAY_MS, DEFAULT_REPEAT_INTERVAL_MS, InputMap, InputMaps,
     InputMapsError, KEYBOARD_DEVICE,

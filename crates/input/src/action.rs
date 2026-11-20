@@ -99,6 +99,17 @@ impl Action {
                 | Self::TabPrev
         )
     }
+
+    /// Whether this action moves focus.
+    ///
+    /// The focus graph only resolves these four; every other action is for the
+    /// screen the focused cell belongs to.
+    pub const fn is_navigation(self) -> bool {
+        matches!(
+            self,
+            Self::NavigateUp | Self::NavigateDown | Self::NavigateLeft | Self::NavigateRight
+        )
+    }
 }
 
 impl std::fmt::Display for Action {

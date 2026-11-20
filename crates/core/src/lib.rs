@@ -17,6 +17,7 @@ pub mod paths;
 pub mod profile;
 pub mod profile_file;
 pub mod store;
+pub mod ui;
 
 #[cfg(unix)]
 pub use activation::{Activation, ActivationError, ActivationServer, request_focus};
@@ -41,3 +42,7 @@ pub use profile_file::{
     shim_profile_path,
 };
 pub use store::{AntiCheat, Game, GameId, OwnedGame, Store, UnknownAntiCheat, UnknownStore};
+pub use ui::{
+    AppConfig, ConfigError, DisplayConfig, Shell, StartMode, UiConfig, UnknownShell,
+    UnknownStartMode,
+};

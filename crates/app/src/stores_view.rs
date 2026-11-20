@@ -23,10 +23,13 @@ use pitagames_stores::cli::CliOptions;
 use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport};
 use pitagames_stores::sync::{Backends, StoreLibrary};
 
+use crate::View;
 use crate::auth::{self, AuthEvent, AuthInputs, AuthStatus, AuthTerminal};
 use crate::copy::CopyButton;
+use crate::focus::{self, ActionChannel};
 use crate::library::Library;
 use crate::store_sync;
+use pitagames_input::Action;
 
 /// A finished probe: the rows and the `list` flag they were fetched with.
 type ProbeReply = (bool, Vec<StoreStatusReport>);
@@ -129,6 +132,12 @@ pub struct StoresViewProps {
     pub library: Signal<Option<Library>>,
     /// Where the synced rows are written.
     pub db: Signal<Option<pitagames_db::Db>>,
+    /// The app's current view; Back leaves the Stores screen.
+    pub view: Signal<View>,
+    /// The app's one input pump posts this screen's actions here.
+    pub actions: ActionChannel,
+    /// True while a text field owns the keyboard; the sign-in terminal sets it.
+    pub text_focused: Signal<bool>,
 }
 
 /// The Stores screen.
@@ -145,6 +154,11 @@ pub fn StoresView(props: StoresViewProps) -> Element {
     let mut auth_state = use_signal(|| None::<AuthTerminal>);
     let mut auth_inputs = use_signal(|| None::<AuthInputs>);
     let mut auth_text = use_signal(String::new);
+
+    let mut view = props.view;
+    let actions = props.actions;
+    let mut text_focused = props.text_focused;
+    let screen_focus = focus::use_focus();
 
     let probes = use_hook(Channel::<ProbeReply>::new);
     let syncs = use_hook(Channel::<SyncReply>::new);
@@ -266,6 +280,94 @@ pub fn StoresView(props: StoresViewProps) -> Element {
         "Waiting for the browser…"
     };
 
+    // The Stores screen's action drain. The app's one pump posts here; this
+    // screen owns its own graph. Without the modal the cells are the three top
+    // actions followed by one cell per store row; with the modal open they are
+    // its Cancel/Close and Send buttons. Back leaves the screen (or closes the
+    // modal when one is open).
+    let action_probes = probes.clone();
+    let action_syncs = syncs.clone();
+    use_future(move || {
+        let channel = actions.clone();
+        let probes = action_probes.clone();
+        let syncs = action_syncs.clone();
+        async move {
+            while let Some(action) = channel.next().await {
+                if view() != View::Stores {
+                    continue;
+                }
+                let modal_open = auth_state.read().is_some();
+                if modal_open {
+                    let running = auth_state.read().as_ref().is_some_and(|t| t.running());
+                    let count = if running { 2 } else { 1 };
+                    match action {
+                        Action::Back => {
+                            text_focused.set(false);
+                            cancel_or_close_auth(auth_state, auth_inputs, auth_text);
+                        }
+                        action if action.is_navigation() => {
+                            screen_focus.move_focus(action, count, 1);
+                        }
+                        Action::Confirm => match screen_focus.index() {
+                            Some(0) => {
+                                text_focused.set(false);
+                                cancel_or_close_auth(auth_state, auth_inputs, auth_text);
+                            }
+                            Some(1) if running => submit_auth_line(auth_inputs, auth_text),
+                            _ => {}
+                        },
+                        _ => {}
+                    }
+                    continue;
+                }
+
+                let reports = (*rows.read()).clone().unwrap_or_default();
+                let count = 3 + reports.len();
+                match action {
+                    Action::Back => view.set(View::Library),
+                    action if action.is_navigation() => {
+                        screen_focus.move_focus(action, count, 1);
+                    }
+                    Action::Confirm => match screen_focus.index() {
+                        Some(0) => {
+                            pending.set(true);
+                            start_probe(probes.sender.clone(), counts());
+                        }
+                        Some(1) => {
+                            let next = !counts();
+                            pending.set(true);
+                            start_probe(probes.sender.clone(), next);
+                        }
+                        Some(2) => {
+                            syncing.set(true);
+                            sync_message.set(String::new());
+                            sync_problems.set(Vec::new());
+                            start_sync(syncs.sender.clone());
+                        }
+                        Some(index) if index >= 3 => {
+                            if let Some(report) = reports.get(index - 3) {
+                                start_sign_in(report.store, auth_state, auth_inputs, auth_events);
+                                screen_focus.set(Some(0));
+                            }
+                        }
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+    });
+
+    // Focus rings for the three top actions and the modal's two buttons. The
+    // row rings are computed by `StoreRow` from its own cell index. Reading
+    // `screen_focus` here subscribes the render to a move, so the ring repaints
+    // without a click.
+    let refresh_ring = focus::ring_style(screen_focus.index() == Some(0));
+    let counts_ring = focus::ring_style(screen_focus.index() == Some(1));
+    let sync_ring = focus::ring_style(screen_focus.index() == Some(2));
+    let cancel_ring = focus::ring_style(screen_focus.index() == Some(0));
+    let send_ring = focus::ring_style(screen_focus.index() == Some(1));
+
     rsx! {
         div {
             style: "position:relative;display:flex;flex-direction:column;gap:14px;padding:0 32px 40px;max-width:820px;",
@@ -290,7 +392,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         pending.set(true);
                         start_probe(refresh_probes.sender.clone(), show_counts);
                     },
-                    style: action_style(!is_pending),
+                    style: "{action_style(!is_pending)}{refresh_ring}",
                     "Refresh"
                 }
                 button {
@@ -300,7 +402,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         pending.set(true);
                         start_probe(counts_probes.sender.clone(), next);
                     },
-                    style: action_style(!is_pending),
+                    style: "{action_style(!is_pending)}{counts_ring}",
                     if show_counts { "Hide game counts" } else { "Show game counts" }
                 }
                 button {
@@ -311,7 +413,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         sync_problems.set(Vec::new());
                         start_sync(sync_starter.sender.clone());
                     },
-                    style: action_style(!is_syncing),
+                    style: "{action_style(!is_syncing)}{sync_ring}",
                     "Sync libraries"
                 }
                 if is_pending {
@@ -344,10 +446,12 @@ pub fn StoresView(props: StoresViewProps) -> Element {
             }
 
             if let Some(reports) = loaded {
-                for report in reports {
+                for (row_index, report) in reports.iter().enumerate() {
                     StoreRow {
                         key: "{report.store.as_str()}",
                         report: report.clone(),
+                        focused: screen_focus.index() == Some(3 + row_index),
+                        focus: screen_focus,
                         auth: auth_state,
                         auth_inputs,
                         auth_events,
@@ -391,12 +495,13 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                             inputs.cancel();
                                         }
                                     } else {
+                                        text_focused.set(false);
                                         auth_inputs.set(None);
                                         auth_state.set(None);
                                         auth_text.set(String::new());
                                     }
                                 },
-                                style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:11px;cursor:pointer;",
+                                style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:11px;cursor:pointer;{cancel_ring}",
                                 if terminal.running() { "Cancel" } else { "Close" }
                             }
                         }
@@ -428,6 +533,8 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                     placeholder: "{placeholder}",
                                     value: "{typed}",
                                     oninput: move |event| auth_text.set(event.value()),
+                                    onfocus: move |_| text_focused.set(true),
+                                    onblur: move |_| text_focused.set(false),
                                     onkeydown: move |event| {
                                         if event.key() != Key::Enter {
                                             return;
@@ -438,7 +545,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                 }
                                 button {
                                     onclick: move |_| submit_auth_line(auth_inputs, auth_text),
-                                    style: action_style(true),
+                                    style: "{action_style(true)}{send_ring}",
                                     "Send"
                                 }
                             }
@@ -479,6 +586,50 @@ fn submit_auth_line(auth_inputs: Signal<Option<AuthInputs>>, mut auth_text: Sign
     }
 }
 
+/// Cancel a running sign-in, or close a finished one.
+///
+/// The terminal's Cancel button and the controller's Back/Confirm both land
+/// here, so a running CLI is asked to stop and a finished panel is dismissed
+/// without leaving a dead handle behind.
+fn cancel_or_close_auth(
+    mut auth_state: Signal<Option<AuthTerminal>>,
+    mut auth_inputs: Signal<Option<AuthInputs>>,
+    mut auth_text: Signal<String>,
+) {
+    let running = auth_state
+        .read()
+        .as_ref()
+        .is_some_and(|terminal| terminal.running());
+    if running {
+        if let Some(inputs) = auth_inputs.read().as_ref() {
+            inputs.cancel();
+        }
+    } else {
+        auth_inputs.set(None);
+        auth_state.set(None);
+        auth_text.set(String::new());
+    }
+}
+
+/// Start a store's sign-in from a controller or keyboard action.
+///
+/// The row's button does the same three steps; this is the one copy the action
+/// drain calls so a controller cannot start a run the pointer could not.
+fn start_sign_in(
+    store: Store,
+    mut auth_state: Signal<Option<AuthTerminal>>,
+    mut auth_inputs: Signal<Option<AuthInputs>>,
+    auth_events: Signal<Option<UnboundedSender<AuthEvent>>>,
+) {
+    let Some(sender) = (*auth_events.read()).clone() else {
+        return;
+    };
+    let run = auth::next_run();
+    let inputs = auth::spawn(run, store, auth_options(), sender);
+    auth_inputs.set(Some(inputs));
+    auth_state.set(Some(AuthTerminal::new(run, store)));
+}
+
 fn status_label(status: &AuthStatus) -> &'static str {
     match status {
         AuthStatus::Running => "running",
@@ -511,6 +662,11 @@ fn store_label(store: Store) -> &'static str {
 #[derive(Props, Clone, PartialEq)]
 struct StoreRowProps {
     report: StoreStatusReport,
+    /// Whether this row's cell is the screen's focused cell.
+    focused: bool,
+    /// The screen's focus, so the row's own Sign in button can move the ring
+    /// into the modal.
+    focus: focus::ScreenFocus,
     /// The sign-in terminal, so a row can show that its own run is live.
     auth: Signal<Option<AuthTerminal>>,
     /// The running sign-in's input, which the button starts and the terminal
@@ -523,9 +679,12 @@ struct StoreRowProps {
 #[allow(non_snake_case)]
 fn StoreRow(props: StoreRowProps) -> Element {
     let report = props.report;
+    let focused = props.focused;
+    let focus = props.focus;
     let mut auth = props.auth;
     let mut auth_inputs = props.auth_inputs;
     let auth_events = props.auth_events;
+    let ring = focus::ring_style(focused);
     let state = report.state();
     let (badge, badge_background) = match state {
         RowState::Ready => ("ready", "#2e4a34"),
@@ -579,7 +738,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
 
     rsx! {
         div {
-            style: "display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;",
+            style: "display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;{ring}",
 
             div {
                 style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
@@ -602,6 +761,9 @@ fn StoreRow(props: StoreRowProps) -> Element {
                             let inputs = auth::spawn(run, store, auth_options(), sender);
                             auth_inputs.set(Some(inputs));
                             auth.set(Some(AuthTerminal::new(run, store)));
+                            // The modal's cells start at Cancel; the ring
+                            // follows so a controller sees where it landed.
+                            focus.set(Some(0));
                         },
                         style: action_style(!signing_in),
                         if signing_in { "signing in…" } else { "Sign in" }

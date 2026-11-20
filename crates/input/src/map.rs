@@ -110,7 +110,8 @@ impl InputMap {
     }
 
     /// The built-in keyboard layout: arrows *and* WASD move focus, `Enter`/`Space`
-    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs.
+    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs, and `F11`
+    /// switches shells (the pad's `Guide`).
     pub fn keyboard() -> Self {
         let mut map = Self::new(KEYBOARD_DEVICE);
         map.bind(Action::NavigateUp, Binding::key(Key::ArrowUp));
@@ -127,12 +128,29 @@ impl InputMap {
         map.bind(Action::TabNext, Binding::key(Key::Tab));
         map.add_binding(Action::TabNext, Binding::key(Key::E));
         map.bind(Action::TabPrev, Binding::key(Key::Q));
+        // `F11` switches shells, the keyboard's answer to the pad's `Guide`.
+        map.bind(Action::Guide, Binding::key(Key::F11));
         map
     }
 
     /// The bindings for an action, empty when it is unbound.
     pub fn binding(&self, action: Action) -> &[Binding] {
         self.bindings.get(&action).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The action a keyboard key drives on this map, if any.
+    ///
+    /// A key is only ever read from the keyboard map (device [`KEYBOARD_DEVICE`]);
+    /// the GUI uses this to translate a window key event into the same action a
+    /// controller would emit, so a remap of `Enter`/`Space` moves the focus
+    /// graph without the GUI hard-coding the bindings. When a hand-edited file
+    /// binds one key twice, [`Action::ALL`] order decides, deterministically.
+    pub fn action_for_key(&self, key: Key) -> Option<Action> {
+        Action::ALL.into_iter().find(|action| {
+            self.binding(*action)
+                .iter()
+                .any(|binding| matches!(binding, Binding::Key { key: bound } if *bound == key))
+        })
     }
 
     /// Whether an action has any binding on this device.
@@ -379,8 +397,30 @@ mod tests {
             &[Binding::key(Key::Enter), Binding::key(Key::Space)]
         );
         assert_eq!(map.binding(Action::Back), &[Binding::key(Key::Escape)]);
-        assert!(!map.is_bound(Action::Guide));
+        // `F11` is the keyboard's shell toggle, the same action as the pad's
+        // `Guide`.
+        assert_eq!(map.binding(Action::Guide), &[Binding::key(Key::F11)]);
         map.validate().unwrap();
+    }
+
+    #[test]
+    fn a_key_resolves_to_the_action_the_keyboard_layout_binds() {
+        let map = InputMap::keyboard();
+        assert_eq!(map.action_for_key(Key::ArrowUp), Some(Action::NavigateUp));
+        assert_eq!(map.action_for_key(Key::W), Some(Action::NavigateUp));
+        assert_eq!(
+            map.action_for_key(Key::ArrowRight),
+            Some(Action::NavigateRight)
+        );
+        assert_eq!(map.action_for_key(Key::Enter), Some(Action::Confirm));
+        assert_eq!(map.action_for_key(Key::Space), Some(Action::Confirm));
+        assert_eq!(map.action_for_key(Key::Escape), Some(Action::Back));
+        assert_eq!(map.action_for_key(Key::F11), Some(Action::Guide));
+        assert_eq!(map.action_for_key(Key::F), None, "F is reserved for search");
+        // A hand-edited duplicate is deterministic: the earliest action wins.
+        let mut edited = map.clone();
+        edited.add_binding(Action::TabPrev, Binding::key(Key::Enter));
+        assert_eq!(edited.action_for_key(Key::Enter), Some(Action::Confirm));
     }
 
     #[test]

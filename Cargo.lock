@@ -4259,6 +4259,7 @@ dependencies = [
  "pitagames-art",
  "pitagames-core",
  "pitagames-db",
+ "pitagames-input",
  "pitagames-metadata",
  "pitagames-platform",
  "pitagames-secrets",
@@ -4309,6 +4310,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "time",
+ "toml",
 ]
 
 [[package]]
