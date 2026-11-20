@@ -173,6 +173,75 @@ impl InputMap {
         self.bindings.remove(&action);
     }
 
+    /// Replace every binding of an action; an empty list unbinds it.
+    ///
+    /// This is the remap UI's "reset" and "clear": one call sets the whole
+    /// slot list without going through `bind`/`add_binding` one at a time.
+    pub fn set_bindings(&mut self, action: Action, bindings: Vec<Binding>) {
+        if bindings.is_empty() {
+            self.bindings.remove(&action);
+        } else {
+            self.bindings.insert(action, bindings);
+        }
+    }
+
+    /// Replace one slot of an action's bindings.
+    ///
+    /// Returns `false` when the action has no such slot, so a remap UI holding
+    /// a stale index cannot silently corrupt the list.
+    pub fn set_binding(&mut self, action: Action, index: usize, binding: Binding) -> bool {
+        let Some(list) = self.bindings.get_mut(&action) else {
+            return false;
+        };
+        let Some(slot) = list.get_mut(index) else {
+            return false;
+        };
+        *slot = binding;
+        true
+    }
+
+    /// Remove one slot of an action's bindings.
+    ///
+    /// An action left with no bindings is dropped, so [`InputMap::is_bound`]
+    /// stays honest rather than reporting a bound-but-empty action.
+    pub fn remove_binding(&mut self, action: Action, index: usize) -> Option<Binding> {
+        let list = self.bindings.get_mut(&action)?;
+        if index >= list.len() {
+            return None;
+        }
+        let removed = list.remove(index);
+        if list.is_empty() {
+            self.bindings.remove(&action);
+        }
+        Some(removed)
+    }
+
+    /// Keep `binding` only on `action`, dropping it from every other action and
+    /// every other slot of the same action.
+    ///
+    /// The map itself allows one control to drive two actions (a hand-edited
+    /// file can say so), but a remap UI should not make that easy: a capture
+    /// steals its control rather than duplicating it.
+    pub fn dedup_binding(&mut self, action: Action, binding: &Binding) {
+        for (other, list) in self.bindings.iter_mut() {
+            if *other == action {
+                let mut kept = false;
+                list.retain(|candidate| {
+                    if candidate == binding {
+                        if kept {
+                            return false;
+                        }
+                        kept = true;
+                    }
+                    true
+                });
+            } else {
+                list.retain(|candidate| candidate != binding);
+            }
+        }
+        self.bindings.retain(|_, list| !list.is_empty());
+    }
+
     /// Actions and their bindings, in [`Action::ALL`] order.
     pub fn iter(&self) -> impl Iterator<Item = (Action, &[Binding])> {
         Action::ALL
@@ -521,5 +590,71 @@ mod tests {
         assert_eq!(loaded, maps);
         // No leftover temp file.
         assert!(!path.with_extension("toml.tmp").exists());
+    }
+
+    #[test]
+    fn a_slot_can_be_replaced_removed_and_reset() {
+        let mut map = InputMap::gamepad("pad");
+        // Replacing a slot keeps the others.
+        assert!(map.set_binding(Action::NavigateUp, 0, Binding::button(Button::North)));
+        assert_eq!(
+            map.binding(Action::NavigateUp),
+            &[
+                Binding::button(Button::North),
+                Binding::stick(Stick::Left, Direction::Up)
+            ]
+        );
+        // A stale index is refused, not clamped.
+        assert!(!map.set_binding(Action::Confirm, 99, Binding::button(Button::North)));
+
+        // Removing one of two bindings keeps the action bound.
+        assert_eq!(
+            map.remove_binding(Action::NavigateUp, 0),
+            Some(Binding::button(Button::North))
+        );
+        assert_eq!(
+            map.binding(Action::NavigateUp),
+            &[Binding::stick(Stick::Left, Direction::Up)]
+        );
+        // Removing the last one drops the action entirely.
+        map.remove_binding(Action::NavigateUp, 0);
+        assert!(!map.is_bound(Action::NavigateUp));
+        assert_eq!(map.remove_binding(Action::NavigateUp, 0), None);
+
+        // Setting a whole list at once; an empty list unbinds.
+        map.set_bindings(
+            Action::Confirm,
+            vec![Binding::key(Key::Enter), Binding::key(Key::Space)],
+        );
+        assert_eq!(map.binding(Action::Confirm).len(), 2);
+        map.set_bindings(Action::Confirm, Vec::new());
+        assert!(!map.is_bound(Action::Confirm));
+    }
+
+    #[test]
+    fn capturing_a_control_steals_it_from_the_other_action() {
+        let mut map = InputMap::gamepad("pad");
+        // Rebinding Back to `South` (Confirm's button) makes Confirm lose it.
+        map.set_bindings(Action::Back, vec![Binding::button(Button::South)]);
+        map.dedup_binding(Action::Back, &Binding::button(Button::South));
+        assert!(!map.is_bound(Action::Confirm));
+        assert_eq!(map.binding(Action::Back), &[Binding::button(Button::South)]);
+        // Duplicates inside one action collapse to the first slot.
+        map.set_bindings(
+            Action::Back,
+            vec![
+                Binding::button(Button::South),
+                Binding::button(Button::South),
+                Binding::button(Button::East),
+            ],
+        );
+        map.dedup_binding(Action::Back, &Binding::button(Button::South));
+        assert_eq!(
+            map.binding(Action::Back),
+            &[
+                Binding::button(Button::South),
+                Binding::button(Button::East)
+            ]
+        );
     }
 }

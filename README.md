@@ -206,11 +206,19 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2-importers.md`](docs/m2-importers.md) — the read-only Heroic, Lutris and Bottles importers.
 - [`docs/m2-prefixes.md`](docs/m2-prefixes.md) — non-Steam prefixes, disk-space checks and the install queue.
 - [`docs/m2-store-status.md`](docs/m2-store-status.md) — the store status row and the unified update list.
+- [`docs/m2-store-sync.md`](docs/m2-store-sync.md) — the library sync that writes the CLI stores' rows.
+- [`docs/m2-store-installs.md`](docs/m2-store-installs.md) — the GUI install flow that drives the install queue.
+- [`docs/m2-launch.md`](docs/m2-launch.md) — the umu/Proton and store-client launch hand-off.
+- [`docs/m2-runtime-editor.md`](docs/m2-runtime-editor.md) — the per-game runtime editor for non-Steam rows.
+- [`docs/m2-auth-terminal.md`](docs/m2-auth-terminal.md) — the in-app store sign-in terminal.
+- [`docs/m2-cancel-install.md`](docs/m2-cancel-install.md) — stopping a running store install.
+- [`docs/m2-launch-history.md`](docs/m2-launch-history.md) — the supervised-session history.
 - [`docs/m2.5-input.md`](docs/m2.5-input.md) — the console-shell input layer (`crates/input`).
 - [`docs/m2.5-focus.md`](docs/m2.5-focus.md) — the spatial focus graph and the library navigation pump.
 - [`docs/m2.5-gamepad.md`](docs/m2.5-gamepad.md) — the gamepad pump that drives the same focus graph.
 - [`docs/m2.5-shells.md`](docs/m2.5-shells.md) — the desktop/console shells, the start mode and the display config.
 - [`docs/m2.5-hints.md`](docs/m2.5-hints.md) — the glyph hint row and the auto-hidden cursor.
+- [`docs/m2.5-remap.md`](docs/m2.5-remap.md) — the controller remap UI and the `input.toml` writer.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

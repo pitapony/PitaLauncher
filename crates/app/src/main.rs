@@ -39,6 +39,7 @@ mod activation;
 mod anticheat;
 mod art;
 mod auth;
+mod controls;
 mod copy;
 mod desktop_entry;
 mod detail;
@@ -164,6 +165,7 @@ pub(crate) enum View {
     Stores,
     Detail,
     Account,
+    Controls,
     Logs,
 }
 
@@ -289,21 +291,37 @@ fn App() -> Element {
     let downloads_actions = use_hook(focus::ActionChannel::new);
     let stores_actions = use_hook(focus::ActionChannel::new);
     let detail_actions = use_hook(focus::ActionChannel::new);
+    let controls_actions = use_hook(focus::ActionChannel::new);
     let downloads_focus = focus::use_focus();
 
     // The persisted input maps. The keyboard pump and the gamepad worker both
     // read these, so a remap in `input.toml` applies to every screen's graph.
-    let input_maps = use_hook(|| match pitagames_input::InputMaps::load_default() {
+    // They live in a signal because the Controls screen saves new ones and the
+    // hint row, the keyboard handler and the worker all have to follow.
+    let seed_maps = use_hook(|| match pitagames_input::InputMaps::load_default() {
         Ok(maps) => maps,
         Err(error) => {
             eprintln!("[pitagames] ignoring input.toml: {error}");
             pitagames_input::InputMaps::new()
         }
     });
-    // The shared keyboard layout, so a remap applies to every screen's graph.
-    // The pump moves one copy; the hint row keeps another.
-    let keyboard_map = use_hook(|| input_maps.keyboard());
-    let hint_keyboard_map = keyboard_map.clone();
+    let input_maps = use_signal({
+        let seed = seed_maps.clone();
+        move || seed
+    });
+    // The one remap session the Controls screen edits and the input pumps
+    // consult. It starts on the keyboard; the screen switches device.
+    let mut remap = use_signal({
+        let seed = seed_maps.clone();
+        move || {
+            Some(pitagames_input::RemapSession::new(
+                pitagames_input::RemapTarget::keyboard(),
+                &seed,
+            ))
+        }
+    });
+    // The pads the worker has named, for the Controls screen's target list.
+    let mut pads = use_signal(Vec::<pitagames_input::Device>::new);
 
     // The last device that produced input, for glyph hints and cursor hiding.
     // The keyboard and gamepad pumps set it; a pointer move counts as the
@@ -317,12 +335,21 @@ fn App() -> Element {
     // The gamepad pump: one `gilrs` source for the whole window. It posts an
     // action into the active screen's channel; the thread exits when the app's
     // receiver drops. A machine with no pad reports `Unavailable`, never a
-    // crash, so the keyboard path stays usable.
-    let pad = use_hook(|| {
-        let channel = gamepad::GamepadChannel::new();
-        gamepad::spawn(input_maps.clone(), channel.sender());
-        channel
+    // crash, so the keyboard path stays usable. The returned handle lets the
+    // Controls screen push a saved remap into the live worker.
+    let pad = use_hook({
+        let seed = seed_maps.clone();
+        move || {
+            let channel = gamepad::GamepadChannel::new();
+            let reload = gamepad::spawn(seed, channel.sender());
+            (channel, reload)
+        }
     });
+    let (pad_channel, pad_reload) = pad;
+    // The reload handle goes into a signal so the Controls screen can pass it
+    // into as many event handlers as it needs; a `MapReload` is `Clone` but not
+    // `Copy`, and a `Signal` is `Copy`.
+    let map_reload = use_signal(move || pad_reload);
     // The gamepad pump and the keyboard pump are long-lived closures, so each
     // gets its own clones; the originals stay with the screens that drain them.
     // An `ActionChannel` is not `Copy`, and `dispatch_action` only borrows.
@@ -331,10 +358,11 @@ fn App() -> Element {
         downloads_actions.clone(),
         stores_actions.clone(),
         detail_actions.clone(),
+        controls_actions.clone(),
     );
     let pad_shell = shell_state.clone();
     use_future(move || {
-        let channel = pad.clone();
+        let channel = pad_channel.clone();
         let actions = gamepad_actions.clone();
         let mut shell = pad_shell.clone();
         let mut pad_active = pad_active;
@@ -345,6 +373,24 @@ fn App() -> Element {
                         // Any pad press makes the pad the last device: the hint
                         // row switches to its glyphs and the cursor may hide.
                         pad_active.set(true);
+                        // While a remap capture is pending, the pad's actions are
+                        // swallowed so the pressed control can be bound instead
+                        // of navigating; `Back` cancels the capture. The capture
+                        // flag is read into a local so its guard drops before the
+                        // write below.
+                        let capturing = view() == View::Controls && {
+                            let guard = remap.read();
+                            guard.as_ref().is_some_and(|session| session.is_capturing())
+                        };
+                        if capturing {
+                            if action.action == pitagames_input::Action::Back {
+                                let mut guard = remap.write();
+                                if let Some(session) = guard.as_mut() {
+                                    session.cancel_capture();
+                                }
+                            }
+                            continue;
+                        }
                         // `Guide` is the shell's own action, not the screen's:
                         // it toggles the two shells wherever the player is.
                         if action.action == pitagames_input::Action::Guide {
@@ -358,7 +404,25 @@ fn App() -> Element {
                             &actions.1,
                             &actions.2,
                             &actions.3,
+                            &actions.4,
                         );
+                    }
+                    gamepad::GamepadEvent::Control(binding) => {
+                        // A raw button press is only useful to a pending capture.
+                        if view() == View::Controls {
+                            let mut guard = remap.write();
+                            if let Some(session) = guard.as_mut()
+                                && session.is_capturing()
+                            {
+                                session.capture_control(binding);
+                            }
+                        }
+                    }
+                    gamepad::GamepadEvent::Device(device) => {
+                        let mut known = pads.write();
+                        if !known.iter().any(|seen| seen.guid == device.guid) {
+                            known.push(device);
+                        }
                     }
                     gamepad::GamepadEvent::Action(_) => {}
                     gamepad::GamepadEvent::Unavailable(message) => {
@@ -400,9 +464,14 @@ fn App() -> Element {
         downloads_actions.clone(),
         stores_actions.clone(),
         detail_actions.clone(),
+        controls_actions.clone(),
     );
     let mut key_shell = shell_state.clone();
     let mut key_pad_active = pad_active;
+    // The keyboard pump reads the maps signal per event so a remap of
+    // `Enter`/`Escape` (or a shell toggle) takes effect without a restart.
+    let key_maps = input_maps;
+    let mut key_remap = remap;
     use_wry_event_handler(move |event, _| {
         let dioxus::desktop::tao::event::Event::WindowEvent {
             event:
@@ -423,7 +492,28 @@ fn App() -> Element {
         let Some(key) = focus::key_from_tao(key_event.physical_key) else {
             return;
         };
-        let Some(action) = keyboard_map.action_for_key(key) else {
+        let action = key_maps.peek().keyboard().action_for_key(key);
+        // A pending remap capture takes the key instead of navigating: the next
+        // key pressed is bound to the action being edited, so it must not also
+        // move the ring. `Escape` (the keyboard's Back) cancels the capture. The
+        // capture flag is read into a local so its guard drops before the write.
+        let capturing = view() == View::Controls && {
+            let guard = key_remap.read();
+            guard.as_ref().is_some_and(|session| session.is_capturing())
+        };
+        if capturing {
+            let cancelling = action == Some(pitagames_input::Action::Back);
+            let mut guard = key_remap.write();
+            if let Some(session) = guard.as_mut() {
+                if cancelling {
+                    session.cancel_capture();
+                } else {
+                    session.capture_control(pitagames_input::Binding::key(key));
+                }
+            }
+            return;
+        }
+        let Some(action) = action else {
             return;
         };
         // A text field owns the arrows and typing; Back still leaves the field
@@ -448,6 +538,7 @@ fn App() -> Element {
             &key_actions.1,
             &key_actions.2,
             &key_actions.3,
+            &key_actions.4,
         );
     });
 
@@ -882,11 +973,17 @@ fn App() -> Element {
 
     // The hint row follows the device last used: the pad's labels while it is
     // active, the keyboard's otherwise. Both read the same maps the pumps do,
-    // so a remap changes the hints without a second table.
+    // so a remap changes the hints without a second table. For a pad the app now
+    // knows the GUID (the worker names every device), so the row reads *that*
+    // pad's remap rather than the built-in layout.
     let hint_map = if *pad_active.read() {
-        input_maps.for_device("", true)
+        let maps = input_maps.read();
+        match pads.read().last().filter(|device| device.is_gamepad) {
+            Some(device) => maps.for_device(&device.guid, true),
+            None => maps.for_device("", true),
+        }
     } else {
-        hint_keyboard_map.clone()
+        input_maps.read().keyboard()
     };
     let hint_row = pitagames_input::hints(&hint_map);
 
@@ -1303,6 +1400,14 @@ fn App() -> Element {
                 button {
                     onclick: move |_| {
                         selected_game.set(None);
+                        view.set(View::Controls);
+                    },
+                    style: nav_style(current_view == View::Controls),
+                    "Controls"
+                }
+                button {
+                    onclick: move |_| {
+                        selected_game.set(None);
                         view.set(View::Logs);
                     },
                     style: nav_style(current_view == View::Logs),
@@ -1412,6 +1517,19 @@ fn App() -> Element {
                         db: detail::DbHandle(db_handle.clone()),
                         metadata: metadata_queue,
                         library: library_state,
+                    }
+                }
+            } else if current_view == View::Controls {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    controls::ControlsView {
+                        view,
+                        actions: controls_actions,
+                        maps: input_maps,
+                        remap,
+                        pads,
+                        reload: map_reload,
+                        text_focused,
                     }
                 }
             } else if current_view == View::Logs {
@@ -1997,12 +2115,14 @@ fn dispatch_action(
     downloads: &focus::ActionChannel,
     stores: &focus::ActionChannel,
     detail: &focus::ActionChannel,
+    controls: &focus::ActionChannel,
 ) {
     let channel = match view() {
         View::Library => library,
         View::Downloads => downloads,
         View::Stores => stores,
         View::Detail => detail,
+        View::Controls => controls,
         View::History | View::Account | View::Logs => {
             // These screens have no graph yet; Back still leaves them so the
             // keyboard and a pad cannot trap the user.
