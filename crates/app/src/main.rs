@@ -16,7 +16,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use dioxus::desktop::{tao::event::ElementState, use_wry_event_handler};
+use dioxus::desktop::tao::event::ElementState;
+use dioxus::desktop::tao::keyboard::KeyCode;
+use dioxus::desktop::use_wry_event_handler;
 use dioxus::html::geometry::PixelsVector2D;
 use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
@@ -50,6 +52,8 @@ mod format;
 mod gamepad;
 mod grid;
 mod history_view;
+mod home;
+mod home_view;
 mod icon;
 mod library;
 mod log_view;
@@ -159,6 +163,7 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
 /// Which top-level list the window shows.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum View {
+    Home,
     Library,
     Downloads,
     History,
@@ -223,10 +228,22 @@ fn App() -> Element {
     let mut db_state = use_signal(|| None::<pitagames_db::Db>);
     let mut board = use_signal(Downloads::default);
     let mut events = use_signal(|| None::<UnboundedSender<DownloadEvent>>);
-    let mut view = use_signal(|| View::Library);
+    // The console shell opens on its couch home; the desktop shell on the grid.
+    let mut view = use_signal(|| {
+        if start.shell.is_console() {
+            View::Home
+        } else {
+            View::Library
+        }
+    });
     // The detail page follows the library by id, so cached metadata arriving
     // after it opens shows up without a second copy of the game.
     let mut selected_game = use_signal(|| None::<GameId>);
+    // Where the detail page's Back returns to. A game opens from the grid *and*
+    // from the console home, so Back cannot be hardcoded to the library: the
+    // screen that opens the page records itself here first. It defaults to the
+    // grid, which is the desktop shell's start screen.
+    let detail_back = use_signal(|| View::Library);
     let mut query = use_signal(String::new);
     // Whether a text field owns the keyboard. The window-level key pump must
     // not steal arrows from a text field. The search field, the sign-in
@@ -287,6 +304,7 @@ fn App() -> Element {
     // the gamepad drain below post into whichever screen is showing; each screen
     // owns its own `ScreenFocus` and drains its channel. The Downloads screen's
     // focus lives here because its body is rendered inline in `App`.
+    let home_actions = use_hook(focus::ActionChannel::new);
     let library_actions = use_hook(focus::ActionChannel::new);
     let downloads_actions = use_hook(focus::ActionChannel::new);
     let stores_actions = use_hook(focus::ActionChannel::new);
@@ -354,6 +372,7 @@ fn App() -> Element {
     // gets its own clones; the originals stay with the screens that drain them.
     // An `ActionChannel` is not `Copy`, and `dispatch_action` only borrows.
     let gamepad_actions = (
+        home_actions.clone(),
         library_actions.clone(),
         downloads_actions.clone(),
         stores_actions.clone(),
@@ -394,7 +413,7 @@ fn App() -> Element {
                         // `Guide` is the shell's own action, not the screen's:
                         // it toggles the two shells wherever the player is.
                         if action.action == pitagames_input::Action::Guide {
-                            shell.toggle();
+                            toggle_shell(&mut shell, view);
                             continue;
                         }
                         dispatch_action(
@@ -405,6 +424,7 @@ fn App() -> Element {
                             &actions.2,
                             &actions.3,
                             &actions.4,
+                            &actions.5,
                         );
                     }
                     gamepad::GamepadEvent::Control(binding) => {
@@ -460,6 +480,7 @@ fn App() -> Element {
     // handler lives in `App` so one pump serves every screen; the active
     // screen's action channel does the navigation.
     let key_actions = (
+        home_actions.clone(),
         library_actions.clone(),
         downloads_actions.clone(),
         stores_actions.clone(),
@@ -468,6 +489,12 @@ fn App() -> Element {
     );
     let mut key_shell = shell_state.clone();
     let mut key_pad_active = pad_active;
+    // GTK/WebKit delivers one Escape as *two* identical `KeyboardInput`
+    // presses (it reaches both the window and the webview), so a raw key that
+    // repeats back-to-back with no other event is ignored. A held key repeats
+    // far more slowly than this window, so normal auto-repeat is untouched;
+    // without the guard a single Back press pops two screens.
+    let last_press = use_hook(|| Rc::new(Cell::new(None::<(KeyCode, Instant)>)));
     // The keyboard pump reads the maps signal per event so a remap of
     // `Enter`/`Escape` (or a shell toggle) takes effect without a restart.
     let key_maps = input_maps;
@@ -486,6 +513,14 @@ fn App() -> Element {
         if key_event.state != ElementState::Pressed {
             return;
         }
+        let now = Instant::now();
+        if let Some((last, at)) = last_press.get()
+            && last == key_event.physical_key
+            && now.duration_since(at) < Duration::from_millis(50)
+        {
+            return;
+        }
+        last_press.set(Some((key_event.physical_key, now)));
         // Any key press makes the keyboard the last device: the hint row shows
         // its glyphs and the cursor stays visible.
         key_pad_active.set(false);
@@ -528,7 +563,7 @@ fn App() -> Element {
         // `F11` maps to `Guide`: the shell's own action, handled here rather
         // than by the screen, so it toggles wherever the player is.
         if action == pitagames_input::Action::Guide {
-            key_shell.toggle();
+            toggle_shell(&mut key_shell, view);
             return;
         }
         dispatch_action(
@@ -539,6 +574,7 @@ fn App() -> Element {
             &key_actions.2,
             &key_actions.3,
             &key_actions.4,
+            &key_actions.5,
         );
     });
 
@@ -998,6 +1034,7 @@ fn App() -> Element {
             art_revision,
             board,
             view,
+            back: detail_back,
             selected_game,
             notice,
             events,
@@ -1357,6 +1394,14 @@ fn App() -> Element {
                 button {
                     onclick: move |_| {
                         selected_game.set(None);
+                        view.set(View::Home);
+                    },
+                    style: nav_style(current_view == View::Home),
+                    "Home"
+                }
+                button {
+                    onclick: move |_| {
+                        selected_game.set(None);
                         view.set(View::Library);
                     },
                     style: nav_style(current_view == View::Library),
@@ -1472,6 +1517,7 @@ fn App() -> Element {
                             entry,
                             db: detail::DbHandle(db_handle.clone()),
                             view,
+                            back: detail_back,
                             actions: detail_actions,
                             text_focused,
                             hero: hero_url,
@@ -1537,6 +1583,24 @@ fn App() -> Element {
                     style: "flex:1;min-height:0;overflow-y:auto;",
                     log_view::LogsView { dir: pitagames_core::paths::logs_dir() }
                 }
+            } else if current_view == View::Home {
+                home_view::HomeView {
+                    library: library_state,
+                    actions: home_actions,
+                    art_state,
+                    art_revision,
+                    view,
+                    back: detail_back,
+                    selected_game,
+                    notice,
+                    board,
+                    events,
+                    db: db_state,
+                    installs,
+                    install_events,
+                    play,
+                    play_events,
+                }
             } else {
                 {library_body}
             }
@@ -1576,6 +1640,10 @@ struct LibraryGridProps {
     pub art_revision: Signal<u64>,
     pub board: Signal<Downloads>,
     pub view: Signal<View>,
+    /// Where the detail page's Back returns to; the grid records itself here
+    /// before opening a game, so a page opened from the console home still
+    /// returns to the home.
+    pub back: Signal<View>,
     pub selected_game: Signal<Option<GameId>>,
     pub notice: Signal<String>,
     pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
@@ -1607,13 +1675,14 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     // Signal setters need `&mut`; signals are Copy, so rebind locally and the
     // `move` closures below each get their own mutable copy.
     let mut view = props.view;
+    let mut back = props.back;
     let mut selected_game = props.selected_game;
-    let mut notice = props.notice;
+    let notice = props.notice;
     let events = props.events;
     let db = props.db;
-    let mut installs = props.installs;
+    let installs = props.installs;
     let install_events = props.install_events;
-    let mut play = props.play;
+    let play = props.play;
     let play_events = props.play_events;
 
     let mut scroll_top = use_signal(|| 0.0f64);
@@ -1653,6 +1722,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                     library,
                     query,
                     view,
+                    back,
                     selected_game,
                     screen_focus,
                     viewport_width,
@@ -1833,18 +1903,15 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                     .get(&app_id)
                                     .is_some_and(|row| !row.state.is_finished());
 
-                                let play_id = app_id.clone();
                                 let play_db = db_handle.clone();
-                                let play_game_id = game_id.clone();
-                                let steam_play = entry.is_steam();
                                 let play_game = entry.game.clone();
-                                let install_id = app_id.clone();
                                 let install_game = game_id.clone();
                                 let install_title = title.clone();
                                 let card_key = format!("{}-{app_id}", entry.store().as_str());
-                                let install_sender = events_sender.clone();
+                                // The Steam install path needs the downloads
+                                // channel; the CLI stores need the install queue's.
                                 let install_enabled = if steam_install {
-                                    install_sender.is_some()
+                                    events_sender.is_some()
                                 } else {
                                     install_ready
                                 };
@@ -1857,6 +1924,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                         onclick: move |_| {
                                             screen_focus.set(Some(card_index));
                                             selected_game.set(Some(open_id.clone()));
+                                            back.set(View::Library);
                                             view.set(View::Detail);
                                         },
                                         style: "display:flex;flex-direction:column;gap:6px;padding:14px;box-sizing:border-box;height:{card_height}px;overflow:hidden;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
@@ -1903,40 +1971,20 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                             } else if show_play {
                                                 button {
                                                     disabled: !can_play,
-                                                onclick: move |event| {
-                                                    // The card itself opens the detail page;
-                                                    // the buttons below only do their own action.
-                                                    event.stop_propagation();
-                                                    // Pointer clicks are M0-only; controller
-                                                    // navigation through gilrs arrives in M2.5.
-                                                    notice.set(String::new());
-                                                    if steam_play {
-                                                        if let Err(error) = library::spawn_steam(&play_id) {
-                                                            notice.set(format!("Could not ask Steam to run appid {play_id}: {error}"));
-                                                            return;
-                                                        }
-                                                        if let Some(db) = play_db.clone() {
-                                                            let id = play_game_id.clone();
-                                                            spawn(async move {
-                                                                if let Err(error) = persist::record_launch(&db, &id, playtime).await {
-                                                                    notice.set(error);
-                                                                }
-                                                            });
-                                                        }
-                                                        return;
-                                                    }
-                                                    // The hand-off owns the process: the worker
-                                                    // starts it and the header strip carries Stop.
-                                                    let Some(sender) = play_events.read().clone() else {
-                                                        notice.set("The launcher is still starting; try again in a moment.".to_string());
-                                                        return;
-                                                    };
-                                                    if let Err(error) = play.write().begin(&play_game) {
-                                                        notice.set(error);
-                                                        return;
-                                                    }
-                                                    play::spawn(play_game.clone(), sender);
-                                                },
+                                                    onclick: move |event| {
+                                                        // The card itself opens the detail
+                                                        // page; the buttons only do their own
+                                                        // action.
+                                                        event.stop_propagation();
+                                                        start_play(
+                                                            &play_game,
+                                                            playtime,
+                                                            play,
+                                                            play_events,
+                                                            notice,
+                                                            play_db.clone(),
+                                                        );
+                                                    },
                                                     style: button_style(can_play, "#2e3a56", "#ffffff"),
                                                     "Play"
                                                 }
@@ -1951,40 +1999,21 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                 button {
                                                     disabled: !install_enabled,
                                                     onclick: move |event| {
-                                                        // The card itself opens the detail page;
-                                                        // the buttons below only do their own action.
+                                                        // The card itself opens the detail
+                                                        // page; the buttons only do their own
+                                                        // action.
                                                         event.stop_propagation();
-                                                        notice.set(String::new());
-
-                                                        // The CLI stores run their own client, so
-                                                        // the queue owns the install and the
-                                                        // Downloads board shows it.
-                                                        if !steam_install {
-                                                            match pitagames_stores::installer::plan(&install_game, &install_title) {
-                                                                Ok(plan) => {
-                                                                    if let Err(error) = installs.write().enqueue(plan.job()) {
-                                                                        notice.set(error.to_string());
-                                                                        return;
-                                                                    }
-                                                                    pump_installs(installs, install_events, notice);
-                                                                    view.set(View::Downloads);
-                                                                }
-                                                                Err(error) => notice.set(error.to_string()),
-                                                            }
-                                                            return;
-                                                        }
-
-                                                        if let Err(error) = library::spawn_install(&install_id) {
-                                                            notice.set(format!("Could not ask Steam to install appid {install_id}: {error}"));
-                                                            return;
-                                                        }
-                                                        match install_sender.as_ref() {
-                                                            Some(sender) => {
-                                                                start_download(board, sender, &install_libraries, &install_id, &install_title);
-                                                                view.set(View::Downloads);
-                                                            }
-                                                            None => notice.set("Downloads are not ready yet; try again in a moment.".to_string()),
-                                                        }
+                                                        start_install(
+                                                            &install_game,
+                                                            &install_title,
+                                                            installs,
+                                                            install_events,
+                                                            events,
+                                                            board,
+                                                            &install_libraries,
+                                                            notice,
+                                                            view,
+                                                        );
                                                     },
                                                     style: button_style(install_enabled, "#243024", "#d8e8d0"),
                                                     "{install_label}"
@@ -2026,6 +2055,7 @@ fn perform_action(
     library: Signal<Option<Library>>,
     mut query: Signal<String>,
     mut view: Signal<View>,
+    mut back: Signal<View>,
     mut selected_game: Signal<Option<GameId>>,
     screen_focus: focus::ScreenFocus,
     viewport_width: Signal<f64>,
@@ -2098,8 +2128,25 @@ fn perform_action(
         };
         if let Some(id) = open {
             selected_game.set(Some(id));
+            back.set(View::Library);
             view.set(View::Detail);
         }
+    }
+}
+
+/// Toggle the shell and land the player on the shell's home screen.
+///
+/// Entering the console shell shows the couch home; leaving it returns to the
+/// library grid. A screen other than the home is left alone when going back to
+/// the desktop, so a pointer user who opened Settings and pressed `F11` twice
+/// is not thrown out of it.
+fn toggle_shell(shell: &mut shell::ShellState, view: Signal<View>) {
+    let mut view = view;
+    shell.toggle();
+    if shell.shell().is_console() {
+        view.set(View::Home);
+    } else if view() == View::Home {
+        view.set(View::Library);
     }
 }
 
@@ -2107,10 +2154,14 @@ fn perform_action(
 ///
 /// The pump lives in `App`; each screen owns its own `ScreenFocus` and applies
 /// the action in its own future. A screen without a graph (History, Account,
-/// Logs) only gets `Back`, which returns to the library.
+/// Logs) only gets `Back`, which returns to the library. The channel list is
+/// one parameter per screen, which keeps the match readable; the call sites
+/// pass the same tuple shape the two pumps own.
+#[allow(clippy::too_many_arguments)]
 fn dispatch_action(
     action: pitagames_input::Action,
     mut view: Signal<View>,
+    home: &focus::ActionChannel,
     library: &focus::ActionChannel,
     downloads: &focus::ActionChannel,
     stores: &focus::ActionChannel,
@@ -2118,6 +2169,7 @@ fn dispatch_action(
     controls: &focus::ActionChannel,
 ) {
     let channel = match view() {
+        View::Home => home,
         View::Library => library,
         View::Downloads => downloads,
         View::Stores => stores,
@@ -2252,6 +2304,104 @@ fn button_style(enabled: bool, background: &str, color: &str) -> String {
     } else {
         "flex:1;padding:8px 0;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;"
             .to_string()
+    }
+}
+
+/// Start a game from a card, the home hero or the detail page.
+///
+/// One function so the grid's Play button, the home hero's Play and a
+/// controller's `Confirm` cannot drift: a Steam row asks Steam to launch itself
+/// (and records the playtime Steam will not), every other store starts the
+/// supervised hand-off. `notice` doubles as the error line the caller shows.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_play(
+    game: &Game,
+    playtime: Duration,
+    mut play: Signal<Play>,
+    play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
+    mut notice: Signal<String>,
+    db: Option<pitagames_db::Db>,
+) {
+    notice.set(String::new());
+
+    if game.id.store != Store::Steam {
+        let Some(sender) = play_events.read().clone() else {
+            notice.set("The launcher is still starting; try again in a moment.".to_string());
+            return;
+        };
+        if let Err(message) = play.write().begin(game) {
+            notice.set(message);
+            return;
+        }
+        play::spawn(game.clone(), sender);
+        return;
+    }
+
+    if let Err(error) = library::spawn_steam(&game.id.store_id) {
+        notice.set(format!(
+            "Could not ask Steam to run appid {}: {error}",
+            game.id.store_id
+        ));
+        return;
+    }
+    let Some(db) = db else {
+        return;
+    };
+    let id = game.id.clone();
+    spawn(async move {
+        if let Err(message) = persist::record_launch(&db, &id, playtime).await {
+            notice.set(message);
+        }
+    });
+}
+
+/// Install (or update) a game from a card or the home hero.
+///
+/// Steam installs through its own client and the board follows the manifest;
+/// the CLI stores run their own client on the serial queue. The two paths also
+/// live in the grid's card button, so both go through this one function.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_install(
+    id: &GameId,
+    title: &str,
+    mut installs: Signal<Installs>,
+    install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    events: Signal<Option<UnboundedSender<DownloadEvent>>>,
+    board: Signal<Downloads>,
+    libraries: &[PathBuf],
+    mut notice: Signal<String>,
+    mut view: Signal<View>,
+) {
+    notice.set(String::new());
+
+    if id.store != Store::Steam {
+        match pitagames_stores::installer::plan(id, title) {
+            Ok(plan) => {
+                if let Err(error) = installs.write().enqueue(plan.job()) {
+                    notice.set(error.to_string());
+                    return;
+                }
+                pump_installs(installs, install_events, notice);
+                view.set(View::Downloads);
+            }
+            Err(error) => notice.set(error.to_string()),
+        }
+        return;
+    }
+
+    if let Err(error) = library::spawn_install(&id.store_id) {
+        notice.set(format!(
+            "Could not ask Steam to install appid {}: {error}",
+            id.store_id
+        ));
+        return;
+    }
+    match events.read().clone() {
+        Some(sender) => {
+            start_download(board, &sender, libraries, &id.store_id, title);
+            view.set(View::Downloads);
+        }
+        None => notice.set("Downloads are not ready yet; try again in a moment.".to_string()),
     }
 }
 

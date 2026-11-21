@@ -21,9 +21,9 @@ use crate::copy::CopyButton;
 use crate::diagnostics::DiagnosticsEditor;
 use crate::focus::{self, ActionChannel};
 use crate::format;
-use crate::library::{self, GameEntry};
+use crate::library::GameEntry;
 use crate::persist;
-use crate::play::{self, Play, PlayEvent};
+use crate::play::{Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
 use crate::wrappers::WrapperEditor;
 use pitagames_input::Action;
@@ -48,6 +48,10 @@ pub struct DetailProps {
     pub db: DbHandle,
     /// Back button target; navigation stays in `main.rs`.
     pub view: Signal<View>,
+    /// The screen that opened this page. Back returns here rather than always
+    /// to the library, so a game opened from the console home comes back to the
+    /// home shelves.
+    pub back: Signal<View>,
     /// The app's one input pump posts this screen's actions here.
     pub actions: ActionChannel,
     /// True while a text field owns the keyboard; the profile name input sets it.
@@ -72,6 +76,7 @@ pub fn Detail(props: DetailProps) -> Element {
     let entry = props.entry;
     let db = props.db.0;
     let mut view = props.view;
+    let back = props.back;
     let actions = props.actions;
     let mut text_focused = props.text_focused;
     let screen_focus = focus::use_focus();
@@ -421,21 +426,14 @@ pub fn Detail(props: DetailProps) -> Element {
                 let playing = play_signal.read().label(&game).is_some();
                 let count = if play_wired && !playing { 2 } else { 1 };
                 match action {
-                    Action::Back => view.set(View::Library),
+                    Action::Back => view.set(back()),
                     action if action.is_navigation() => {
                         screen_focus.move_focus(action, count, 1);
                     }
                     Action::Confirm => match screen_focus.index() {
-                        Some(0) => view.set(View::Library),
+                        Some(0) => view.set(back()),
                         Some(1) if play_wired && !playing => {
-                            start_play(
-                                error,
-                                play_signal,
-                                play_events,
-                                entry.clone(),
-                                is_steam,
-                                db.clone(),
-                            );
+                            start_play(error, play_signal, play_events, entry.clone(), db.clone());
                         }
                         _ => {}
                     },
@@ -452,11 +450,12 @@ pub fn Detail(props: DetailProps) -> Element {
             {
                 let focused = screen_focus.index() == Some(0);
                 let ring = focus::ring_style(focused);
+                let label = back_label(back());
                 rsx! {
                     button {
-                        onclick: move |_| view.set(View::Library),
+                        onclick: move |_| view.set(back()),
                         style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;{ring}",
-                        "← Library"
+                        "{label}"
                     }
                 }
             }
@@ -508,7 +507,6 @@ pub fn Detail(props: DetailProps) -> Element {
                                         play_signal,
                                         play_events,
                                         play_entry.clone(),
-                                        is_steam,
                                         play_db.clone(),
                                     );
                                 },
@@ -1189,51 +1187,39 @@ fn platforms_label(platforms: pitagames_core::Platforms) -> String {
     }
 }
 
-/// Start the game from the detail page, whichever launch shape it uses.
+/// The Back button's label for the screen it returns to.
 ///
-/// The Play button and the focus graph's Confirm both call this, so a controller
-/// press and a pointer click cannot drift. A Steam row asks Steam to launch; a
-/// non-Steam row starts the hand-off and records the playtime when it ends.
-#[allow(clippy::too_many_arguments)]
+/// A page opened from the console home says "Home"; one opened from the grid
+/// says "Library". Any other origin keeps the grid's wording, since the grid is
+/// the desktop shell's start screen.
+fn back_label(back: View) -> &'static str {
+    match back {
+        View::Home => "← Home",
+        _ => "← Library",
+    }
+}
+
+/// Start the game from the detail page.
+///
+/// The Play button and the focus graph's `Confirm` both call this, so a
+/// controller press and a pointer click cannot drift. The actual launch is
+/// [`crate::start_play`], shared with the library grid and the home hero, so the
+/// three surfaces always agree on how a Steam row and a store row start.
 fn start_play(
-    mut error: Signal<String>,
-    mut play_signal: Signal<Play>,
+    error: Signal<String>,
+    play_signal: Signal<Play>,
     play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
     entry: GameEntry,
-    is_steam: bool,
     db: Option<Db>,
 ) {
-    error.set(String::new());
-    if !is_steam {
-        let Some(sender) = play_events.read().clone() else {
-            error.set("The launcher is still starting; try again in a moment.".to_string());
-            return;
-        };
-        if let Err(message) = play_signal.write().begin(&entry.game) {
-            error.set(message);
-            return;
-        }
-        play::spawn(entry.game.clone(), sender);
-        return;
-    }
-
-    let app_id = entry.app_id().to_string();
-    if let Err(launch_error) = library::spawn_steam(&app_id) {
-        error.set(format!(
-            "Could not ask Steam to run appid {app_id}: {launch_error}"
-        ));
-        return;
-    }
-    let Some(db) = db else {
-        return;
-    };
-    let id = entry.game.id.clone();
-    let playtime = entry.playtime();
-    spawn(async move {
-        if let Err(message) = persist::record_launch(&db, &id, playtime).await {
-            error.set(message);
-        }
-    });
+    crate::start_play(
+        &entry.game,
+        entry.playtime(),
+        play_signal,
+        play_events,
+        error,
+        db,
+    );
 }
 
 fn play_style(enabled: bool) -> &'static str {
@@ -1322,5 +1308,20 @@ fn action_style(enabled: bool) -> String {
         "padding:8px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:13px;cursor:pointer;".to_string()
     } else {
         "padding:8px 16px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_back_label_names_the_screen_the_page_returns_to() {
+        assert_eq!(back_label(View::Home), "← Home");
+        assert_eq!(back_label(View::Library), "← Library");
+        // Any other origin keeps the grid's wording; the grid is the desktop
+        // shell's start screen, so that is the safe default.
+        assert_eq!(back_label(View::Downloads), "← Library");
+        assert_eq!(back_label(View::Detail), "← Library");
     }
 }

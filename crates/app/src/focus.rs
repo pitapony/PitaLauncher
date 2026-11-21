@@ -32,7 +32,7 @@ use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
-use pitagames_input::{Action, FocusGraph, Key as InputKey};
+use pitagames_input::{Action, FocusGraph, FocusId, Key as InputKey};
 
 /// The focus ring drawn around a focused tile.
 ///
@@ -69,8 +69,16 @@ pub fn use_focus() -> ScreenFocus {
 
 impl ScreenFocus {
     /// The focused cell index, if any.
+    ///
+    /// A grid screen's ids *are* its list indices, so this is also the focused
+    /// card's position in the filtered list.
     pub fn index(self) -> Option<usize> {
         *self.cell.read()
+    }
+
+    /// The focused cell id, for a screen whose graph is not the plain grid.
+    pub fn id(self) -> Option<FocusId> {
+        self.index().map(FocusId::from)
     }
 
     /// Focus a cell directly (a card click continues from that card).
@@ -94,6 +102,30 @@ impl ScreenFocus {
         let next = graph.focused_index();
         if next != self.index() {
             self.cell.set(next);
+        }
+        next
+    }
+
+    /// Resolve one navigation action over a caller-built graph.
+    ///
+    /// [`ScreenFocus::move_focus`] covers the rectangular library grid; the
+    /// console home has *ragged* rows (a full-bleed Continue hero above
+    /// variable-length shelves), so it builds its own [`FocusGraph`] and hands
+    /// it here. The current cell is re-applied by id before the move, so focus
+    /// survives a shelf whose length changed under it. Returns the new id, or
+    /// the unchanged focus for a non-navigation action or an empty graph.
+    pub fn move_in(mut self, graph: &FocusGraph, action: Action) -> Option<FocusId> {
+        if !action.is_navigation() {
+            return self.id();
+        }
+        let mut graph = graph.clone();
+        if let Some(id) = self.id() {
+            graph.focus(id);
+        }
+        graph.move_focus(action);
+        let next = graph.focused_node().map(|node| node.id);
+        if next != self.id() {
+            self.cell.set(next.map(|id| id.get() as usize));
         }
         next
     }
