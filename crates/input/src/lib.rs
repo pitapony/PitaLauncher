@@ -27,6 +27,10 @@
 //! - [`RemapSession`] is the one writer of the maps: it edits one device's
 //!   [`InputMap`] slot by slot, captures the next control a pump reports, and
 //!   folds the result back into [`InputMaps`] for the app to save.
+//! - [`OnScreenKeyboard`] is the console shell's text entry: one ragged key
+//!   grid walked by the same [`FocusGraph`], with shift and symbol layers, a
+//!   character caret and the text it edits. Its screen is a bottom sheet; this
+//!   module owns every rule that sheet applies.
 //!
 //! [`Action`] is runtime state, not a persisted domain type: the keyboard and
 //! every controller share it, so the focus graph and both shells cannot disagree
@@ -41,6 +45,7 @@ mod gamepad;
 mod hint;
 mod map;
 mod mapper;
+mod osk;
 mod remap;
 mod replay;
 mod source;
@@ -55,6 +60,7 @@ pub use map::{
     InputMapsError, KEYBOARD_DEVICE,
 };
 pub use mapper::{Input, LastInput};
+pub use osk::{MAX_TEXT, OnScreenKeyboard, OskKey, OskLayer, OskPress};
 pub use remap::{CaptureSlot, RemapSession, RemapTarget};
 pub use replay::ReplaySource;
 pub use source::{Battery, Device, DeviceId, InputSource, RawEvent};

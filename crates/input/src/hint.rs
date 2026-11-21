@@ -37,9 +37,9 @@ pub const HINT_ACTIONS: [Action; 5] = [
 
 /// The hint row for a map: each action's first binding, labelled.
 ///
-/// An action the map leaves unbound is skipped, so a keyboard row does not
-/// claim a `Search` key the keyboard layout does not bind. A binding with no
-/// short label (none in the built-in layouts) is skipped too.
+/// An action the map leaves unbound is skipped, so a row never claims a key a
+/// remap removed. A binding with no short label (none in the built-in layouts)
+/// is skipped too.
 pub fn hints(map: &InputMap) -> Vec<Hint> {
     HINT_ACTIONS
         .iter()
@@ -183,15 +183,16 @@ mod tests {
     fn the_keyboard_hint_row_skips_what_it_does_not_bind() {
         let map = InputMap::keyboard();
         let row = hints(&map);
-        // The keyboard layout binds Confirm, Back and Guide, but not Search or
-        // Menu, so those are absent rather than invented.
+        // The keyboard layout binds Confirm, Back, Search and Guide, but not
+        // Menu, so that one is absent rather than invented.
         assert_eq!(
             row.iter().map(|hint| hint.action).collect::<Vec<_>>(),
-            [Action::Confirm, Action::Back, Action::Guide]
+            [Action::Confirm, Action::Back, Action::Search, Action::Guide]
         );
         assert_eq!(row[0].label, "Enter");
         assert_eq!(row[1].label, "Esc");
-        assert_eq!(row[2].label, "F11");
+        assert_eq!(row[2].label, "F");
+        assert_eq!(row[3].label, "F11");
     }
 
     #[test]

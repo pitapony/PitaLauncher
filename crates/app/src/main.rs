@@ -57,6 +57,7 @@ mod home_view;
 mod icon;
 mod library;
 mod log_view;
+mod osk;
 mod persist;
 mod play;
 mod runtime;
@@ -1698,6 +1699,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     // the drawn edge and scroll it into view. The graph is rebuilt from the
     // logical list on every move (`focus::ScreenFocus`).
     let screen_focus = focus::use_focus();
+    // The on-screen keyboard, opened by the pad's `Search` button. The sheet
+    // owns every editing rule; this screen only seeds it from the filter and
+    // applies the committed text on Done.
+    let mut osk_open = use_signal(|| false);
+    let mut osk = use_signal(pitagames_input::OnScreenKeyboard::new);
     // The scroll container's mounted handle. Scrolling is imperative; the
     // handle is kept here so the action drain can move the viewport.
     let scroller = use_hook(|| Rc::new(RefCell::new(None::<Rc<MountedData>>)));
@@ -1715,6 +1721,28 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         async move {
             while let Some(action) = channel.next().await {
                 if view() != View::Library {
+                    continue;
+                }
+                // While the sheet is open it owns the keys: the typed text is
+                // the screen's, so a direction walks the key grid instead of
+                // the cards, and `Back` cancels the edit before it leaves.
+                if osk_open() {
+                    let press = osk.write().handle(action);
+                    if press == pitagames_input::OskPress::Submit {
+                        let text = osk.read().text().to_string();
+                        commit_search(query, screen_focus, osk_open, text);
+                    } else if press == pitagames_input::OskPress::Cancel {
+                        osk_open.set(false);
+                    }
+                    continue;
+                }
+                // `Search` is the pad's text-entry button: seed the keyboard
+                // with the current filter so editing never starts from nothing.
+                if action == pitagames_input::Action::Search {
+                    osk.set(pitagames_input::OnScreenKeyboard::with_text(
+                        query.read().clone(),
+                    ));
+                    osk_open.set(true);
                     continue;
                 }
                 perform_action(
@@ -2038,7 +2066,35 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                 }
             }
         }
+
+        // The on-screen keyboard is an overlay, so it sits outside the scroll
+        // container: the grid behind it never scrolls while typing.
+        if osk_open() {
+            osk::OskSheet {
+                title: "Search your library".to_string(),
+                keyboard: osk,
+                on_done: move |text| commit_search(query, screen_focus, osk_open, text),
+                on_cancel: move |_| osk_open.set(false),
+            }
+        }
     }
+}
+
+/// Apply the on-screen keyboard's text to the library filter.
+///
+/// Both the action drain and the sheet's pointer path commit through here, so a
+/// controller and a mouse cannot leave the filter and the focus in different
+/// states. The focused card is cleared because the new filter may not contain
+/// it; the next navigation re-enters at the first match.
+fn commit_search(
+    mut query: Signal<String>,
+    screen_focus: focus::ScreenFocus,
+    mut osk_open: Signal<bool>,
+    text: String,
+) {
+    query.set(text);
+    screen_focus.set(None);
+    osk_open.set(false);
 }
 
 /// Apply one action to the library's focus graph.

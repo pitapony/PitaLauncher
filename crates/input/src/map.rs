@@ -110,8 +110,9 @@ impl InputMap {
     }
 
     /// The built-in keyboard layout: arrows *and* WASD move focus, `Enter`/`Space`
-    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs, and `F11`
-    /// switches shells (the pad's `Guide`).
+    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs, `F11` switches
+    /// shells (the pad's `Guide`) and `F` opens the on-screen keyboard (the
+    /// pad's `Search`).
     pub fn keyboard() -> Self {
         let mut map = Self::new(KEYBOARD_DEVICE);
         map.bind(Action::NavigateUp, Binding::key(Key::ArrowUp));
@@ -125,6 +126,10 @@ impl InputMap {
         map.bind(Action::Confirm, Binding::key(Key::Enter));
         map.add_binding(Action::Confirm, Binding::key(Key::Space));
         map.bind(Action::Back, Binding::key(Key::Escape));
+        // `F` is "find": the keyboard's text-entry button. While a text field
+        // has focus the app's pump yields typing to the field, so an `f` still
+        // types an `f` there.
+        map.bind(Action::Search, Binding::key(Key::F));
         map.bind(Action::TabNext, Binding::key(Key::Tab));
         map.add_binding(Action::TabNext, Binding::key(Key::E));
         map.bind(Action::TabPrev, Binding::key(Key::Q));
@@ -485,7 +490,7 @@ mod tests {
         assert_eq!(map.action_for_key(Key::Space), Some(Action::Confirm));
         assert_eq!(map.action_for_key(Key::Escape), Some(Action::Back));
         assert_eq!(map.action_for_key(Key::F11), Some(Action::Guide));
-        assert_eq!(map.action_for_key(Key::F), None, "F is reserved for search");
+        assert_eq!(map.action_for_key(Key::F), Some(Action::Search));
         // A hand-edited duplicate is deterministic: the earliest action wins.
         let mut edited = map.clone();
         edited.add_binding(Action::TabPrev, Binding::key(Key::Enter));

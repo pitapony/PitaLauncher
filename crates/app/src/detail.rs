@@ -86,6 +86,11 @@ pub fn Detail(props: DetailProps) -> Element {
     let mut selected = use_signal(|| None::<String>);
     let mut new_name = use_signal(String::new);
     let mut error = use_signal(String::new);
+    // The on-screen keyboard: opened by the pad's Search button while this page
+    // shows, seeded from the name field, and submitted through the same
+    // `create_profile` the pointer's Save button calls.
+    let mut osk_open = use_signal(|| false);
+    let mut osk = use_signal(pitagames_input::OnScreenKeyboard::new);
 
     // Runtime panel: the profile's Proton choice and wrapper chain, the routing
     // state and the last action's message.
@@ -404,6 +409,10 @@ pub fn Detail(props: DetailProps) -> Element {
     let route_app = entry.app_id().to_string();
     // Computed before `save_report` is moved into the button's closure.
     let save_available = selected_profile.is_some() && save_report.is_some();
+    // The sheet's submit path needs its own copies: `db` and `game_id` are
+    // moved into other closures below.
+    let osk_db = db.clone();
+    let osk_game = game_id.clone();
 
     // The detail screen's action drain. The app's one pump posts here; this
     // screen owns its own graph. The cells are the two primary actions the page
@@ -421,6 +430,43 @@ pub fn Detail(props: DetailProps) -> Element {
         async move {
             while let Some(action) = channel.next().await {
                 if view() != View::Detail {
+                    continue;
+                }
+                // While the on-screen keyboard is open it owns the keys: a
+                // direction walks its key grid, `Back` cancels the edit, and
+                // `Done` creates the profile the name field would have made.
+                if osk_open() {
+                    let press = osk.write().handle(action);
+                    match press {
+                        pitagames_input::OskPress::Submit => {
+                            let name = osk.read().text().to_string();
+                            osk_open.set(false);
+                            new_name.set(String::new());
+                            spawn(create_profile(
+                                db.clone(),
+                                game.clone(),
+                                name,
+                                new_name,
+                                rows,
+                                selected,
+                                proton_choice,
+                                wrapper_draft,
+                                diagnostics_draft,
+                                error,
+                            ));
+                        }
+                        pitagames_input::OskPress::Cancel => osk_open.set(false),
+                        pitagames_input::OskPress::Idle | pitagames_input::OskPress::Edited => {}
+                    }
+                    continue;
+                }
+                // The pad's Search button is the page's text entry; the only
+                // field here is the new profile's name.
+                if action == Action::Search {
+                    osk.set(pitagames_input::OnScreenKeyboard::with_text(
+                        new_name.read().clone(),
+                    ));
+                    osk_open.set(true);
                     continue;
                 }
                 let playing = play_signal.read().label(&game).is_some();
@@ -729,21 +775,18 @@ pub fn Detail(props: DetailProps) -> Element {
                                 if name.is_empty() {
                                     return;
                                 }
-                                let db = create_db.clone();
-                                let game_id = create_game.clone();
-                                spawn(async move {
-                                    let Some(db) = db else {
-                                        error.set("Profiles are unavailable until the database opens.".to_string());
-                                        return;
-                                    };
-                                    match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
-                                        Ok(_) => {
-                                            new_name.set(String::new());
-                                            load_profiles(Some(db), game_id, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
-                                        }
-                                        Err(message) => error.set(message),
-                                    }
-                                });
+                                spawn(create_profile(
+                                    create_db.clone(),
+                                    create_game.clone(),
+                                    name,
+                                    new_name,
+                                    rows,
+                                    selected,
+                                    proton_choice,
+                                    wrapper_draft,
+                                    diagnostics_draft,
+                                    error,
+                                ));
                             },
                             style: create_style(name.trim().is_empty()),
                             "Save profile"
@@ -1074,6 +1117,31 @@ pub fn Detail(props: DetailProps) -> Element {
                     }
                 }
         }
+
+        // The on-screen keyboard types a profile name; `Done` submits it the
+        // same way the pointer's Save button does.
+        if osk_open() {
+            crate::osk::OskSheet {
+                title: "New profile name".to_string(),
+                keyboard: osk,
+                on_done: move |text| {
+                    osk_open.set(false);
+                    spawn(create_profile(
+                        osk_db.clone(),
+                        osk_game.clone(),
+                        text,
+                        new_name,
+                        rows,
+                        selected,
+                        proton_choice,
+                        wrapper_draft,
+                        diagnostics_draft,
+                        error,
+                    ));
+                },
+                on_cancel: move |_| osk_open.set(false),
+            }
+        }
     }
 }
 
@@ -1148,6 +1216,52 @@ async fn load_profiles(
             selected.set(next);
             rows.set(profiles);
             error.set(String::new());
+        }
+        Err(message) => error.set(message),
+    }
+}
+
+/// Create (or overwrite) one profile from a name.
+///
+/// The pointer's Save button and the on-screen keyboard's `Done` both call this,
+/// so a controller cannot create a differently-shaped profile than a mouse. The
+/// name is trimmed here because both callers pass raw field text; an empty name
+/// (or one only of spaces) is ignored rather than stored.
+#[allow(clippy::too_many_arguments)]
+async fn create_profile(
+    db: Option<Db>,
+    game_id: GameId,
+    name: String,
+    mut new_name: Signal<String>,
+    rows: Signal<Vec<StoredProfile>>,
+    selected: Signal<Option<String>>,
+    proton_choice: Signal<ProtonRef>,
+    wrapper_draft: Signal<WrapperDraft>,
+    diagnostics_draft: Signal<DiagnosticsDraft>,
+    mut error: Signal<String>,
+) {
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        return;
+    }
+    let Some(db) = db else {
+        error.set("Profiles are unavailable until the database opens.".to_string());
+        return;
+    };
+    match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
+        Ok(_) => {
+            new_name.set(String::new());
+            load_profiles(
+                Some(db),
+                game_id,
+                rows,
+                selected,
+                proton_choice,
+                wrapper_draft,
+                diagnostics_draft,
+                error,
+            )
+            .await;
         }
         Err(message) => error.set(message),
     }
