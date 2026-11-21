@@ -1,7 +1,6 @@
 # ADR-0007: Dioxus webview with a renderer-agnostic boundary (and safe mode)
 
-- **Status:** Accepted (renderer and boundary); **Proposed** for safe mode
-  (`--safe-mode` is not implemented yet)
+- **Status:** Accepted (renderer, boundary and safe mode)
 - **Date:** 2026-11-20
 - **Deciders:** julienpohie
 - **Source:** plan §7 (Renderer boundary, Dioxus implementation notes); `AGENTS.md` (Safe mode)
@@ -25,11 +24,14 @@ A black screen with no keyboard is unacceptable on a couch machine.
 - `crates/app` is the only crate that knows about Dioxus. No `<video>` in the
   v1 UI, no JS-based navigation, no `<img>` inlining (art is served — see
   ADR-0008).
-- **Safe mode (Proposed):** default to WebKit's DMABUF renderer; if webview init
-  fails, relaunch with `WEBKIT_DISABLE_DMABUF_RENDERER=1` and animations/blur
-  off. `--safe-mode` forces that path. Keep the toggle in Settings, not in the
-  `.desktop` file — disabling it unconditionally costs performance on the 9070.
-  Console mode auto-retries into it so a GPU crash never leaves a black screen.
+- **Safe mode (Accepted):** default to WebKit's DMABUF renderer; a webview init
+  failure makes the supervisor relaunch the GUI child with
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1` and animations/blur off. `--safe-mode` forces
+  that path for a run, and `[ui] safe_mode` in `config.toml` makes it stick (there
+  is no Settings screen yet, so the file is the toggle — deliberately not the
+  `.desktop` file, since disabling DMABUF unconditionally costs performance on
+  the 9070). A bounded window watchdog restarts a *ready* window that crashes.
+  See `docs/m2.5-safe-mode.md`.
 
 ## Consequences
 
@@ -37,11 +39,16 @@ A black screen with no keyboard is unacceptable on a couch machine.
   confined to `crates/app`.
 - Positive: art is fetched over HTTP (not inlined), which also means a future
   native renderer serves the same bytes.
+- Positive: a GPU that cannot composite lands in safe mode instead of a black
+  screen, and a crashed window comes back on its own.
 - Negative: safe mode is a second startup path to keep tested, and the WebKit
   memory ceiling (~300 MB while a game runs) is a real constraint on the 8 GB
   machine — mitigated by hiding the window during play (ADR-0022).
-- Until safe mode ships, a webview init failure on an unsupported GPU has no
-  automatic recovery.
+- Negative: the supervisor re-execs the binary, so the GUI is always a child
+  process; the single-instance lock and the activation socket are split across the
+  two roles (the supervisor locks, the child listens).
+- Negative: only a *crashing* webview is detected. A renderer that initializes
+  but paints nothing (a silent failure) still needs `--safe-mode` by hand.
 
 ## Alternatives considered
 
@@ -49,6 +56,9 @@ A black screen with no keyboard is unacceptable on a couch machine.
   keeps it available.
 - **Disable DMABUF unconditionally.** Rejected — costs performance on the
   validated hardware.
+- **In-process retry (`catch_unwind` + `exec`).** Rejected — a failed GTK/WebKit
+  init can abort rather than unwind, and the crash watchdog needs a parent process
+  anyway, so the two share one supervisor.
 
 ## References
 

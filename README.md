@@ -10,7 +10,9 @@ Linux.
 ## Status
 
 **M0 vertical slice shipped and container-verified. M1 shipped; M2 (the other
-stores) feature-complete pending hardware; M2.5 (the console shell) started.**
+stores) feature-complete pending hardware; M2.5 (the console shell) well underway
+— the input layer, focus graphs, shells, home, on-screen keyboard, launch
+hand-off, overlay and safe mode ship.**
 
 The last M0 check — launching one real Steam game with `DXVK_HUD=fps` on the
 target hardware — is still blocked on machine access. Everything below the
@@ -38,6 +40,11 @@ hardware layer has been exercised in an `archlinux:latest` container.
   grid, each with an Install button; the list is cached in SQLite.
 - **Single-instance lock** — an `flock` on `pitagames.lock` stops a second
   launcher from racing over the database and Steam's config files.
+- **Safe mode and a window watchdog** — `--safe-mode` (or `[ui] safe_mode` in
+  `config.toml`) turns off WebKit's DMABUF renderer and all animation and blur.
+  The launcher runs the GUI as a supervised child: it retries once in safe mode
+  when the webview fails to initialize, and restarts a window that crashes
+  (bounded), so a broken GPU does not leave a black screen with no keyboard.
 - **Desktop integration** — a generated `.desktop` entry, a painted
   window/tray icon with Show/Quit, and an activation socket so a second launch
   raises the running window instead of looking ignored.
@@ -223,6 +230,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2.5-osk.md`](docs/m2.5-osk.md) — the in-app on-screen keyboard sheet.
 - [`docs/m2.5-handoff.md`](docs/m2.5-handoff.md) — the launch hand-off: hide the window while a game runs and come back when it ends.
 - [`docs/m2.5-overlay.md`](docs/m2.5-overlay.md) — the console overlay: the `Menu`/`Start` system menu.
+- [`docs/m2.5-safe-mode.md`](docs/m2.5-safe-mode.md) — safe mode and the window watchdog.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

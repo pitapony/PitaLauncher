@@ -66,43 +66,87 @@ mod overlay_view;
 mod persist;
 mod play;
 mod runtime;
+mod safe_mode;
 mod shell;
 mod steam_account;
 mod store_installs;
 mod store_sync;
 mod stores_view;
+mod supervisor;
 mod tray;
 mod wrappers;
 
 fn main() {
-    let args = shell::parse_args(std::env::args().skip(1));
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    let args = shell::parse_args(argv.iter().cloned());
+
     // `--version` and `-V` are for the package: a bug report or a support
     // question can name the build without opening a webview.
     if args.version {
         println!("pitagames {}", env!("CARGO_PKG_VERSION"));
         return;
     }
+
+    // The GUI child the supervisor spawned owns the window; it must not take
+    // the lock or spawn another supervisor.
+    if safe_mode::is_child() {
+        run_gui(&args);
+        return;
+    }
+
     for unknown in &args.unknown {
         eprintln!("[pitagames] ignoring unknown argument {unknown}");
     }
 
-    // The persisted preference: which shell opens and how each shell looks. A
-    // broken config is a warning and the shipped defaults, never a failure to
-    // start.
+    // The persisted preference is read here so the supervisor knows whether it
+    // starts in safe mode; the GUI child reads it again for the shell and CSS.
     let (preferences, warnings) = pitagames_core::ui::AppConfig::load_default();
     for warning in &warnings {
         eprintln!("[pitagames] config: {warning}");
     }
-    let shell = preferences.ui.resolve_start(args.shell);
-    let display = preferences.ui.display;
 
     // One launcher at a time. Two instances would scan the same libraries and
     // race over Steam's config files; the lock is held for the whole run and
     // released by the kernel when this process exits.
     let _lock = take_instance_lock();
 
-    // The socket a second launch connects to. Started after the lock so only
-    // the instance that owns the launcher listens on it.
+    // The supervisor runs the GUI as a child so it can retry into safe mode when
+    // the webview fails to initialize and restart it when it crashes.
+    let safe = safe_mode::enabled(args.safe_mode, preferences.ui.safe_mode);
+    std::process::exit(supervisor::run(safe, &argv));
+}
+
+/// Build the window and run the GUI.
+///
+/// This is the supervisor's child process ([`safe_mode::CHILD_ENV`]): it owns
+/// the activation socket and the webview, and writes the ready file once the
+/// first render is up so the supervisor can tell a real exit from a failed
+/// start.
+fn run_gui(args: &shell::ShellArgs) {
+    let (preferences, _warnings) = pitagames_core::ui::AppConfig::load_default();
+
+    // Safe mode: disable the DMABUF renderer before WebKit starts and drop
+    // animations and blur for the run. `--safe-mode`, `config.toml` and the
+    // supervisor's retry (the environment) all resolve here.
+    let safe = safe_mode::enabled(args.safe_mode, preferences.ui.safe_mode);
+    let shell = preferences.ui.resolve_start(args.shell);
+    let mut display = preferences.ui.display;
+    if safe {
+        safe_mode::apply_webkit_env();
+        display.reduce_animations = true;
+        eprintln!("[pitagames] safe mode: DMABUF renderer disabled, animations and blur off");
+    }
+
+    // A test hook for the smoke run: pretend the webview failed to initialize so
+    // the supervisor's safe-mode retry can be exercised without a broken GPU. It
+    // fires only when safe mode is off, so the retried run still succeeds.
+    if safe_mode::fake_webview_failure() && !safe {
+        eprintln!("[pitagames] test hook: simulating a webview init failure");
+        std::process::exit(70);
+    }
+
+    // The socket a second launch connects to. Started here, in the process that
+    // owns the window, so a request raises *this* window.
     activation::start();
     // A checkout has no packaged menu entry; write one that points here.
     desktop_entry::ensure();
@@ -128,6 +172,8 @@ fn main() {
         .with_context(shell::ShellStart {
             shell,
             display,
+            safe_mode: safe,
+            ready_path: safe_mode::ready_path(),
             config_path: pitagames_core::paths::config_file(),
         })
         .launch(App);
@@ -233,6 +279,16 @@ fn App() -> Element {
     // Record the live window so the game's worker thread can map it again when
     // a game ends (an unmapped window would freeze this virtualdom).
     use_hook(shell::install_window);
+    // Tell the supervisor the window is up. A webview that failed to initialize
+    // never reaches the first render, so a missing ready file makes the
+    // supervisor retry in safe mode instead of treating the crash as a normal
+    // exit.
+    let ready_path = start.ready_path.clone();
+    use_hook(move || {
+        if let Some(path) = ready_path {
+            let _ = std::fs::write(path, std::process::id().to_string());
+        }
+    });
     let mut library_state = use_signal(|| None::<Library>);
     let mut db_state = use_signal(|| None::<pitagames_db::Db>);
     let mut board = use_signal(Downloads::default);
@@ -1205,6 +1261,14 @@ fn App() -> Element {
     // The shell's CSS. Both branches name the same properties so the style
     // setter cannot keep a console-only value after a switch back.
     let mut root_style = shell::root_style(shell_state.shell(), &shell_state.display);
+    // Safe mode (or the reduced-motion preference) injects one global rule that
+    // kills animations, smooth scrolling and the backdrop blur — the three
+    // things WebKit composites on the GPU.
+    let motion_off = if shell_state.display.reduce_animations {
+        Some(shell::motion_off_css())
+    } else {
+        None
+    };
     // A hidden cursor is the whole-window answer to "the pad is driving": the
     // hint row shows the pad's glyphs and the pointer disappears until the next
     // mouse move. `cursor:none` is appended so the base style stays unchanged.
@@ -1574,6 +1638,12 @@ fn App() -> Element {
                 }
             },
 
+            // Safe mode's one global rule. An inline style on the root cannot
+            // reach descendants, so it is a real <style> element.
+            if let Some(css) = motion_off {
+                style { dangerous_inner_html: "{css}" }
+            }
+
             header {
                 style: "{header_style}",
                 h1 {
@@ -1588,6 +1658,13 @@ fn App() -> Element {
                     style: "font-size:inherit;text-transform:uppercase;letter-spacing:0.08em;color:#7a9ad6;",
                     title: "{shell_hint}",
                     "{shell_label}"
+                }
+                if start.safe_mode {
+                    span {
+                        style: "font-size:inherit;text-transform:uppercase;letter-spacing:0.08em;color:#e0b070;border:1px solid #5a4a2a;border-radius:999px;padding:1px 8px;",
+                        title: "the DMABUF renderer, animations and blur are off; start without --safe-mode to re-enable them",
+                        "Safe mode"
+                    }
                 }
                 if shell_state.shell().is_console() {
                     span {

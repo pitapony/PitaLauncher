@@ -31,6 +31,8 @@ pub const CONSOLE_BASE_PX: f32 = 20.0;
 pub struct ShellArgs {
     /// `--console` or `--desktop`; `None` means "use the preference".
     pub shell: Option<Shell>,
+    /// `--safe-mode`: the DMABUF renderer off, animations and blur off.
+    pub safe_mode: bool,
     /// `-V` / `--version`.
     pub version: bool,
     /// Flags the launcher does not recognise, so `main` can warn about them.
@@ -47,6 +49,7 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ShellArgs {
         match arg.as_str() {
             "--console" => parsed.shell = Some(Shell::Console),
             "--desktop" => parsed.shell = Some(Shell::Desktop),
+            "--safe-mode" => parsed.safe_mode = true,
             "-V" | "--version" => parsed.version = true,
             _ => parsed.unknown.push(arg),
         }
@@ -63,10 +66,27 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ShellArgs {
 pub struct ShellStart {
     /// Which shell the window was opened in.
     pub shell: Shell,
-    /// The display numbers both shells read.
+    /// The display numbers both shells read. Safe mode forces
+    /// `reduce_animations`, so a shell cannot re-enable motion by accident.
     pub display: DisplayConfig,
+    /// Whether this run is in safe mode (the header shows a badge).
+    pub safe_mode: bool,
+    /// Where the GUI writes a line once the window is up, so the supervisor can
+    /// tell a webview init failure from a normal exit. `None` when the process
+    /// is not supervised.
+    pub ready_path: Option<PathBuf>,
     /// Where the preference is remembered; `None` when `HOME` is unset.
     pub config_path: Option<PathBuf>,
+}
+
+/// The CSS a safe-mode (or reduced-motion) run injects once.
+///
+/// Animations, smooth scrolling and the frosted-glass backdrop are the three
+/// things WebKit composites on the GPU; turning them off is what makes safe
+/// mode safe. It is emitted as one `<style>` element because an inline style on
+/// the root cannot reach descendants.
+pub fn motion_off_css() -> &'static str {
+    "*{animation:none!important;transition:none!important;scroll-behavior:auto!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;}"
 }
 
 /// The window geometry and flags a shell asks for.
@@ -393,6 +413,31 @@ mod tests {
         let args = parse_args(["--nope".to_string(), "--console".to_string()]);
         assert_eq!(args.shell, Some(Shell::Console));
         assert_eq!(args.unknown, vec!["--nope".to_string()]);
+    }
+
+    #[test]
+    fn the_safe_mode_flag_is_recognised() {
+        let args = parse_args(["--safe-mode".to_string()]);
+        assert!(args.safe_mode);
+        assert!(!args.version);
+        assert!(args.unknown.is_empty());
+
+        let args = parse_args(["--console".to_string(), "--safe-mode".to_string()]);
+        assert_eq!(args.shell, Some(Shell::Console));
+        assert!(args.safe_mode);
+    }
+
+    #[test]
+    fn safe_mode_disables_motion_and_blur() {
+        let css = motion_off_css();
+        assert!(css.contains("animation:none"));
+        assert!(css.contains("transition:none"));
+        assert!(css.contains("scroll-behavior:auto"));
+        assert!(css.contains("backdrop-filter:none"));
+        // A blanket `filter:none` would fight image rendering; it is not used
+        // (the backdrop rule above must not be mistaken for one).
+        assert!(!css.contains(";filter:none"));
+        assert!(!css.contains("*{filter"));
     }
 
     #[test]

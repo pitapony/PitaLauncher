@@ -26,7 +26,7 @@ anything not covered here.
 | [0004](0004-validated-hardware-and-compatibility-claims.md) | Validated hardware and the compatibility-claim policy | Accepted |
 | [0005](0005-license-and-toolchain.md) | MIT license and the Rust 1.89 toolchain | Accepted |
 | [0006](0006-workspace-layout-and-framework-free-boundary.md) | Twelve-crate workspace and the framework-free boundary | Accepted |
-| [0007](0007-dioxus-webview-with-renderer-agnostic-boundary.md) | Dioxus webview with a renderer-agnostic boundary (and safe mode) | Accepted + Proposed |
+| [0007](0007-dioxus-webview-with-renderer-agnostic-boundary.md) | Dioxus webview with a renderer-agnostic boundary (and safe mode) | Accepted |
 | [0008](0008-storage-split-sqlite-and-files.md) | Storage split: SQLite for data, files for shipped/hand-edited config | Accepted |
 | [0009](0009-secret-handling-steam-api-key.md) | Secret handling: the Steam Web API key | Accepted |
 | [0010](0010-single-cli-driver-for-store-backends.md) | One CLI driver for every store backend | Accepted |

@@ -223,6 +223,11 @@ pub struct UiConfig {
     pub start_mode: StartMode,
     /// The shell the player last used, so `Remember` can restore it.
     pub last_shell: Shell,
+    /// Whether to start in safe mode: the DMABUF renderer off, animations and
+    /// blur off. `--safe-mode` forces it for one run; this makes it stick, so a
+    /// machine that cannot composite can still be rescued by hand-editing the
+    /// file (the Settings toggle is a later slice).
+    pub safe_mode: bool,
     /// The display numbers both shells read.
     pub display: DisplayConfig,
 }
@@ -409,6 +414,8 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.ui.start_mode, StartMode::Remember);
         assert_eq!(config.ui.last_shell, Shell::Desktop);
+        // Safe mode is off unless asked for.
+        assert!(!config.ui.safe_mode);
         // Nothing has been switched yet, so Remember opens the desktop shell.
         assert_eq!(config.ui.resolve_start(None), Shell::Desktop);
         assert!(config.ui.display.console_fullscreen);
@@ -528,6 +535,7 @@ mod tests {
         config.ui.display.safe_area_pct = 4.0;
         config.ui.display.monitor = Some("HDMI-A-1".to_string());
         config.ui.display.reduce_animations = true;
+        config.ui.safe_mode = true;
         config.save(&path).unwrap();
 
         let (loaded, warnings) = AppConfig::load(&path);
