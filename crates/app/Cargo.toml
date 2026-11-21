@@ -23,6 +23,7 @@ pitagames-stores.workspace = true
 dioxus.workspace = true
 futures-channel.workspace = true
 futures-util.workspace = true
+libc.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["time"] }
 

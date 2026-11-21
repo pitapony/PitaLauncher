@@ -159,6 +159,17 @@ pub fn steam_install(app_id: &str) -> LaunchSpec {
     spec
 }
 
+/// A `LaunchSpec` that opens an app's Steam store page.
+///
+/// The console overlay's "Store page" hands off to Steam for the same reason a
+/// launch does: Steam owns the store, the launcher only knows the appid.
+#[must_use]
+pub fn steam_store(app_id: &str) -> LaunchSpec {
+    let mut spec = LaunchSpec::new("steam");
+    spec.args.push(format!("steam://store/{app_id}"));
+    spec
+}
+
 /// The executable name Steam runs when a game is routed through the shim.
 pub const SHIM_PROGRAM: &str = "pitagames-shim";
 
@@ -512,6 +523,14 @@ mod tests {
         let spec = steam_install("620");
         assert_eq!(spec.program.to_str(), Some("steam"));
         assert_eq!(spec.argv(), ["steam", "steam://install/620"]);
+        assert!(spec.env.is_empty() && spec.cwd.is_none());
+    }
+
+    #[test]
+    fn steam_store_opens_the_store_page_without_a_shell() {
+        let spec = steam_store("620");
+        assert_eq!(spec.program.to_str(), Some("steam"));
+        assert_eq!(spec.argv(), ["steam", "steam://store/620"]);
         assert!(spec.env.is_empty() && spec.cwd.is_none());
     }
 

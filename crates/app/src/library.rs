@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pitagames_art::ArtRequest;
-use pitagames_core::launch::{steam_install, steam_run};
+use pitagames_core::launch::{steam_install, steam_run, steam_store};
 use pitagames_core::{Game, GameId, OwnedGame};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
@@ -540,6 +540,14 @@ pub fn spawn_steam(app_id: &str) -> std::io::Result<()> {
 /// Ask Steam to install or update an app; the caller then follows the manifest.
 pub fn spawn_install(app_id: &str) -> std::io::Result<()> {
     spawn(&steam_install(app_id))
+}
+
+/// Ask Steam to open an app's store page.
+///
+/// The console overlay's "Store page" action hands off to Steam the same way a
+/// launch does; the launcher never renders the store itself.
+pub fn spawn_store_page(app_id: &str) -> std::io::Result<()> {
+    spawn(&steam_store(app_id))
 }
 
 fn spawn(spec: &pitagames_core::LaunchSpec) -> std::io::Result<()> {

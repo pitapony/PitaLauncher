@@ -43,7 +43,8 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_input::{
-    ActionEvent, Binding, Device, DeviceId, GilrsSource, Input, InputMaps, InputSource, RawEvent,
+    ActionEvent, Battery, Binding, Device, DeviceId, GilrsSource, Input, InputMaps, InputSource,
+    RawEvent,
 };
 
 /// How often the worker polls the device backend.
@@ -69,6 +70,11 @@ pub enum GamepadEvent {
     /// The remap UI keys a controller's map by the GUID, so the app has to learn
     /// it; the same GUID also picks the right hint row for the last pad used.
     Device(Device),
+    /// A pad's power state changed, for the console overlay's controller line.
+    ///
+    /// `gilrs` has no battery event, so the worker polls and reports each change
+    /// once; the overlay pairs it with the pad's name.
+    Battery { device: DeviceId, state: Battery },
     /// The backend could not be opened; the launcher runs with the keyboard
     /// only. The message is display-ready but currently only logged.
     Unavailable(String),
@@ -141,6 +147,14 @@ impl Pump {
     /// The button presses the last [`Pump::step`] saw.
     pub fn controls(&self) -> &[Binding] {
         &self.controls
+    }
+
+    /// The last power state the machine recorded for a device, if any.
+    ///
+    /// The worker reports each change to the app; the overlay pairs it with the
+    /// pad's name.
+    pub fn battery(&self, id: DeviceId) -> Option<Battery> {
+        self.input.battery(id)
     }
 }
 
@@ -248,6 +262,9 @@ fn run(
     // The pads whose GUID the window has been told about, so a newly plugged
     // pad is named once. The session id is not stable, so the GUID is the key.
     let mut known: BTreeMap<DeviceId, String> = BTreeMap::new();
+    // The power state last reported per device, so a poll that changed nothing
+    // does not spam the channel.
+    let mut reported_battery: BTreeMap<DeviceId, Battery> = BTreeMap::new();
 
     loop {
         // A remap the window saved applies to the live machine.
@@ -275,6 +292,26 @@ fn run(
         for control in pump.controls() {
             if sender
                 .unbounded_send(GamepadEvent::Control(control.clone()))
+                .is_err()
+            {
+                return;
+            }
+        }
+        // A battery change is reported once; `gilrs` has no event for it, so the
+        // worker polls the state the machine recorded.
+        for device in source.devices() {
+            let Some(state) = pump.battery(device.id) else {
+                continue;
+            };
+            if reported_battery.get(&device.id) == Some(&state) {
+                continue;
+            }
+            reported_battery.insert(device.id, state);
+            if sender
+                .unbounded_send(GamepadEvent::Battery {
+                    device: device.id,
+                    state,
+                })
                 .is_err()
             {
                 return;
@@ -392,6 +429,26 @@ mod tests {
         let mut pump = Pump::new(InputMaps::new());
         pump.seed(&source);
         assert!(pump.step(&mut source, t0).is_empty());
+    }
+
+    #[test]
+    fn a_battery_change_is_readable_from_the_pump() {
+        let t0 = Instant::now();
+        let state = Battery::Discharging { percent: 42 };
+        let mut source = ReplaySource::with_devices(
+            vec![pad(1)],
+            [RawEvent::Battery {
+                device: DeviceId(1),
+                state,
+            }],
+        );
+        let mut pump = Pump::new(InputMaps::new());
+        pump.seed(&source);
+        assert_eq!(pump.battery(DeviceId(1)), None);
+
+        pump.step(&mut source, t0);
+        // The worker reports this to the overlay, which pairs it with the name.
+        assert_eq!(pump.battery(DeviceId(1)), Some(state));
     }
 
     #[test]

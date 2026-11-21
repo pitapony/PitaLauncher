@@ -121,6 +121,7 @@ pub fn key_label(key: Key) -> &'static str {
         Key::Q => "Q",
         Key::E => "E",
         Key::F => "F",
+        Key::M => "M",
         Key::F11 => "F11",
     }
 }
@@ -180,19 +181,26 @@ mod tests {
     }
 
     #[test]
-    fn the_keyboard_hint_row_skips_what_it_does_not_bind() {
+    fn the_keyboard_hint_row_names_the_menu_and_shell_keys() {
         let map = InputMap::keyboard();
         let row = hints(&map);
-        // The keyboard layout binds Confirm, Back, Search and Guide, but not
-        // Menu, so that one is absent rather than invented.
+        // The keyboard layout binds Confirm, Back, Search, Menu and Guide; each
+        // is named from its own key.
         assert_eq!(
             row.iter().map(|hint| hint.action).collect::<Vec<_>>(),
-            [Action::Confirm, Action::Back, Action::Search, Action::Guide]
+            [
+                Action::Confirm,
+                Action::Back,
+                Action::Search,
+                Action::Menu,
+                Action::Guide
+            ]
         );
         assert_eq!(row[0].label, "Enter");
         assert_eq!(row[1].label, "Esc");
         assert_eq!(row[2].label, "F");
-        assert_eq!(row[3].label, "F11");
+        assert_eq!(row[3].label, "M");
+        assert_eq!(row[4].label, "F11");
     }
 
     #[test]

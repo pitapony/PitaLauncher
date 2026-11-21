@@ -181,6 +181,78 @@ fn monitor(config: &WindowConfig) -> Option<MonitorHandle> {
         .find(|handle| handle.name().is_some_and(|attached| attached == name))
 }
 
+/// Hide the window while a supervised game runs.
+///
+/// The console shell's hand-off: the game owns the screen, so the launcher
+/// unmaps itself rather than sitting behind it. Best effort — a compositor that
+/// refuses costs nothing, since the game is in front anyway.
+///
+/// An unmapped WebKitGTK window stops running its render loop, which also
+/// freezes the Dioxus virtualdom, so the return trip cannot be a future: it is
+/// [`reveal_window`], called from the game's worker thread.
+pub fn hide_window() {
+    dioxus::desktop::window().set_visible(false);
+}
+
+/// The live window, installed once at startup so a worker thread can reach it.
+///
+/// One window per process, so one slot. [`reveal_window`] is the only reader.
+static WINDOW: std::sync::OnceLock<std::sync::Arc<dioxus::desktop::tao::window::Window>> =
+    std::sync::OnceLock::new();
+
+/// Record the live window so [`reveal_window`] can reach it from a worker.
+///
+/// Called once from `App` (where the Dioxus context is available).
+pub fn install_window() {
+    let _ = WINDOW.set(dioxus::desktop::window().window.clone());
+}
+
+/// Map the window again from any thread, for the hand-off's return trip.
+///
+/// tao turns every window call into a request queued to the event loop, so this
+/// is safe off the main thread (`tao::Window` is `Send + Sync` on Linux). It has
+/// to run off the main thread: an unmapped WebKitGTK window freezes the Dioxus
+/// virtualdom, so the drain future that would normally show the window cannot
+/// run until the window is mapped again — mapping it is what unfreezes it.
+///
+/// Returns whether a window was installed.
+pub fn reveal_window() -> bool {
+    let Some(window) = WINDOW.get() else {
+        return false;
+    };
+    if window.is_minimized() {
+        window.set_minimized(false);
+    }
+    window.set_visible(true);
+    window.set_focus();
+    true
+}
+
+/// Bring the window back and ask the compositor for focus.
+///
+/// Used to return from a game and to raise the window when a second launch asks
+/// for it. Best effort by design: a Wayland compositor may refuse (focus
+/// stealing prevention) and the window is still raised. The calls are cheap and
+/// idempotent, so they run every time rather than tracking window state.
+pub fn show_and_focus() {
+    let window = dioxus::desktop::window();
+    if window.is_minimized() {
+        window.set_minimized(false);
+    }
+    window.set_visible(true);
+    window.set_focus();
+}
+
+/// Nudge the user's attention to a window the compositor would not focus.
+///
+/// The hand-off's fallback: when focus is refused the window still has to be
+/// noticed, so the taskbar/dock entry is flagged critical. Harmless when it is
+/// already focused.
+pub fn request_attention() {
+    use dioxus::desktop::tao::window::UserAttentionType;
+    dioxus::desktop::window().request_user_attention(Some(UserAttentionType::Critical));
+}
+
 /// The live shell state the app toggles.
 ///
 /// Cheap to clone: the signal is `Copy`, the display numbers are behind an `Rc`,

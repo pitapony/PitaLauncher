@@ -4256,6 +4256,7 @@ dependencies = [
  "dioxus",
  "futures-channel",
  "futures-util",
+ "libc",
  "pitagames-art",
  "pitagames-core",
  "pitagames-db",

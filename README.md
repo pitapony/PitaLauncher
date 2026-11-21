@@ -219,6 +219,10 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2.5-shells.md`](docs/m2.5-shells.md) — the desktop/console shells, the start mode and the display config.
 - [`docs/m2.5-hints.md`](docs/m2.5-hints.md) — the glyph hint row and the auto-hidden cursor.
 - [`docs/m2.5-remap.md`](docs/m2.5-remap.md) — the controller remap UI and the `input.toml` writer.
+- [`docs/m2.5-home.md`](docs/m2.5-home.md) — the console home: Continue hero and horizontally-scrolled shelves.
+- [`docs/m2.5-osk.md`](docs/m2.5-osk.md) — the in-app on-screen keyboard sheet.
+- [`docs/m2.5-handoff.md`](docs/m2.5-handoff.md) — the launch hand-off: hide the window while a game runs and come back when it ends.
+- [`docs/m2.5-overlay.md`](docs/m2.5-overlay.md) — the console overlay: the `Menu`/`Start` system menu.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

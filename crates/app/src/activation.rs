@@ -144,16 +144,11 @@ fn take_from(slot: &OnceLock<Mutex<Option<UnboundedReceiver<Activation>>>>) -> O
 
 /// Bring the window to the front.
 ///
-/// Best effort by design: a Wayland compositor may refuse focus (focus stealing
-/// prevention) and the window is still raised. The calls are cheap and
-/// idempotent, so they run on every request rather than tracking window state.
+/// Delegates to [`crate::shell::show_and_focus`]; the hand-off uses the same
+/// call when a game ends, so a second launch and a game exit raise the window
+/// the same way.
 pub fn raise_window() {
-    let window = dioxus::desktop::window();
-    if window.is_minimized() {
-        window.set_minimized(false);
-    }
-    window.set_visible(true);
-    window.set_focus();
+    crate::shell::show_and_focus();
 }
 
 #[cfg(test)]

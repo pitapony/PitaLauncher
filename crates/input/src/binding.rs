@@ -130,6 +130,8 @@ pub enum Key {
     Q,
     E,
     F,
+    /// Opens the shell's menu/overlay (the pad's `Start`).
+    M,
     /// The keyboard's shell toggle. There is no `F11` gamepad equivalent; the
     /// pad's `Guide` button drives the same action.
     F11,

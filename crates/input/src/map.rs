@@ -110,9 +110,9 @@ impl InputMap {
     }
 
     /// The built-in keyboard layout: arrows *and* WASD move focus, `Enter`/`Space`
-    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs, `F11` switches
-    /// shells (the pad's `Guide`) and `F` opens the on-screen keyboard (the
-    /// pad's `Search`).
+    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs, `M` opens the
+    /// shell menu (the pad's `Start`), `F11` switches shells (the pad's `Guide`)
+    /// and `F` opens the on-screen keyboard (the pad's `Search`).
     pub fn keyboard() -> Self {
         let mut map = Self::new(KEYBOARD_DEVICE);
         map.bind(Action::NavigateUp, Binding::key(Key::ArrowUp));
@@ -133,6 +133,9 @@ impl InputMap {
         map.bind(Action::TabNext, Binding::key(Key::Tab));
         map.add_binding(Action::TabNext, Binding::key(Key::E));
         map.bind(Action::TabPrev, Binding::key(Key::Q));
+        // `M` opens the shell menu, the keyboard's answer to the pad's `Start`
+        // (the console overlay). A focused text field still gets the `m`.
+        map.bind(Action::Menu, Binding::key(Key::M));
         // `F11` switches shells, the keyboard's answer to the pad's `Guide`.
         map.bind(Action::Guide, Binding::key(Key::F11));
         map
@@ -471,8 +474,9 @@ mod tests {
             &[Binding::key(Key::Enter), Binding::key(Key::Space)]
         );
         assert_eq!(map.binding(Action::Back), &[Binding::key(Key::Escape)]);
-        // `F11` is the keyboard's shell toggle, the same action as the pad's
-        // `Guide`.
+        // `M` opens the shell menu and `F11` is the shell toggle: the keyboard's
+        // answers to the pad's `Start` and `Guide`.
+        assert_eq!(map.binding(Action::Menu), &[Binding::key(Key::M)]);
         assert_eq!(map.binding(Action::Guide), &[Binding::key(Key::F11)]);
         map.validate().unwrap();
     }
@@ -489,6 +493,7 @@ mod tests {
         assert_eq!(map.action_for_key(Key::Enter), Some(Action::Confirm));
         assert_eq!(map.action_for_key(Key::Space), Some(Action::Confirm));
         assert_eq!(map.action_for_key(Key::Escape), Some(Action::Back));
+        assert_eq!(map.action_for_key(Key::M), Some(Action::Menu));
         assert_eq!(map.action_for_key(Key::F11), Some(Action::Guide));
         assert_eq!(map.action_for_key(Key::F), Some(Action::Search));
         // A hand-edited duplicate is deterministic: the earliest action wins.

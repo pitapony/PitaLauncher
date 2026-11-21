@@ -31,7 +31,9 @@ use pitagames_stores::queue::{InstallJob, JobState, StartOutcome};
 use time::OffsetDateTime;
 
 use downloads::{DownloadEvent, Downloads};
+use handoff::{Handoff, WindowAction};
 use library::{Library, OWNED_METADATA_PER_RUN};
+use overlay::{Overlay, OverlayChoice, OverlayContext, OverlayGame};
 use play::{Play, PlayEvent};
 use steam_account::Account;
 use store_installs::{InstallEvent, InstallOutcome, Installs};
@@ -51,6 +53,7 @@ mod focus;
 mod format;
 mod gamepad;
 mod grid;
+mod handoff;
 mod history_view;
 mod home;
 mod home_view;
@@ -58,6 +61,8 @@ mod icon;
 mod library;
 mod log_view;
 mod osk;
+mod overlay;
+mod overlay_view;
 mod persist;
 mod play;
 mod runtime;
@@ -225,6 +230,9 @@ fn App() -> Element {
     // only toggles and remembers.
     let start = use_context::<shell::ShellStart>();
     let shell_state = use_hook(|| shell::ShellState::new(&start));
+    // Record the live window so the game's worker thread can map it again when
+    // a game ends (an unmapped window would freeze this virtualdom).
+    use_hook(shell::install_window);
     let mut library_state = use_signal(|| None::<Library>);
     let mut db_state = use_signal(|| None::<pitagames_db::Db>);
     let mut board = use_signal(Downloads::default);
@@ -272,6 +280,25 @@ fn App() -> Element {
     // Bumped whenever a session is written to the launch history, so the detail
     // page's card and the History screen reload without a restart.
     let mut history_revision = use_signal(|| 0u64);
+    // The launch hand-off: the console shell hides its window while a supervised
+    // non-Steam game runs and comes back when it ends. `handoff_deadline` is
+    // when the return trip stops waiting for focus and shows the fallback badge
+    // (a Wayland compositor may refuse to hand focus back).
+    let mut handoff = use_signal(Handoff::new);
+    let handoff_deadline = use_hook(|| Rc::new(Cell::new(None::<Instant>)));
+    // The console overlay: `None` is closed, `Some` is the open menu. It is a
+    // signal rather than a route, so the screen beneath keeps its focus and
+    // scroll. `M`/the pad's `Start` opens it, and every action is routed into it
+    // while it is open.
+    let mut overlay = use_signal(|| None::<Overlay>);
+    // The last power state per pad, for the overlay's controller line. `gilrs`
+    // has no battery event, so the gamepad worker polls and reports changes.
+    let battery_map =
+        std::collections::BTreeMap::<pitagames_input::DeviceId, pitagames_input::Battery>::new();
+    let mut batteries = use_signal(move || battery_map);
+    // The overlay's wall clock; refreshed by the timer below. Local time is read
+    // through `overlay::now_local`.
+    let clock = use_signal(|| crate::overlay::format_clock(crate::overlay::now_local()));
 
     // Activation: the socket thread forwards "focus" requests here, and this
     // future raises the window on the event-loop thread (tao window calls are
@@ -381,15 +408,23 @@ fn App() -> Element {
         controls_actions.clone(),
     );
     let pad_shell = shell_state.clone();
+    let pad_handoff = handoff;
     use_future(move || {
         let channel = pad_channel.clone();
         let actions = gamepad_actions.clone();
         let mut shell = pad_shell.clone();
         let mut pad_active = pad_active;
+        let pad_handoff = pad_handoff;
         async move {
             while let Some(event) = channel.next().await {
                 match event {
                     gamepad::GamepadEvent::Action(action) if action.is_press() => {
+                        // While the hand-off has the window hidden, the game owns
+                        // the pad: a stray press must not move a ring the player
+                        // cannot see or toggle a shell behind the game.
+                        if pad_handoff.read().hidden() {
+                            continue;
+                        }
                         // Any pad press makes the pad the last device: the hint
                         // row switches to its glyphs and the cursor may hide.
                         pad_active.set(true);
@@ -411,10 +446,34 @@ fn App() -> Element {
                             }
                             continue;
                         }
+                        // The overlay is modal: while it is open it owns every
+                        // action, so a direction walks its rows and `Confirm`
+                        // chooses them, never the screen underneath. `Back`,
+                        // `Menu` and `Guide` close it.
+                        if overlay.read().is_some() {
+                            apply_overlay(
+                                action.action,
+                                overlay,
+                                &mut shell,
+                                view,
+                                detail_back,
+                                selected_game,
+                                notice,
+                                play,
+                            );
+                            continue;
+                        }
+                        // `Menu` (the pad's `Start`, the keyboard's `M`) opens the
+                        // console overlay in either shell.
+                        if action.action == pitagames_input::Action::Menu {
+                            open_overlay(overlay, &shell, library_state, selected_game, play);
+                            continue;
+                        }
                         // `Guide` is the shell's own action, not the screen's:
-                        // it toggles the two shells wherever the player is.
+                        // it toggles the two shells wherever the player is (or
+                        // dismisses the hand-off's "game ended" badge).
                         if action.action == pitagames_input::Action::Guide {
-                            toggle_shell(&mut shell, view);
+                            guide_action(&mut shell, view, pad_handoff);
                             continue;
                         }
                         dispatch_action(
@@ -444,6 +503,9 @@ fn App() -> Element {
                         if !known.iter().any(|seen| seen.guid == device.guid) {
                             known.push(device);
                         }
+                    }
+                    gamepad::GamepadEvent::Battery { device, state } => {
+                        batteries.write().insert(device, state);
                     }
                     gamepad::GamepadEvent::Action(_) => {}
                     gamepad::GamepadEvent::Unavailable(message) => {
@@ -476,6 +538,77 @@ fn App() -> Element {
         });
     }
 
+    // The overlay's wall clock. It only ticks while the menu is open, so a
+    // closed overlay never re-renders the window for a minute change.
+    {
+        use_future(move || {
+            let mut clock = clock;
+            let overlay = overlay;
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(20)).await;
+                    if overlay.read().is_none() {
+                        continue;
+                    }
+                    let now = crate::overlay::format_clock(crate::overlay::now_local());
+                    if *clock.peek() != now {
+                        clock.set(now);
+                    }
+                }
+            }
+        });
+    }
+
+    // The hand-off's return trip. tao tells us when the window actually holds
+    // focus; that cancels the pending fallback and clears a badge already on
+    // screen (the user has the window back). A focus event when nothing is
+    // pending is ignored, so the first focus at startup is a no-op.
+    let mut focus_handoff = handoff;
+    let focus_deadline = Rc::clone(&handoff_deadline);
+    use_wry_event_handler(move |event, _| {
+        let dioxus::desktop::tao::event::Event::WindowEvent {
+            event: dioxus::desktop::tao::event::WindowEvent::Focused(true),
+            ..
+        } = event
+        else {
+            return;
+        };
+        let pending = {
+            let state = focus_handoff.read();
+            state.awaiting_focus() || state.badge().is_some()
+        };
+        if pending {
+            focus_handoff.write().focus_granted();
+            focus_deadline.set(None);
+        }
+    });
+
+    // The hand-off's fallback: if the window came back but the compositor never
+    // handed focus over within `FOCUS_GRACE`, flag the taskbar entry and show
+    // the "press Guide" badge. The deadline is a plain `Cell`, so waiting on it
+    // never re-renders the window.
+    {
+        let deadline = Rc::clone(&handoff_deadline);
+        use_future(move || {
+            let deadline = Rc::clone(&deadline);
+            let mut handoff = handoff;
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let Some(at) = deadline.get() else {
+                        continue;
+                    };
+                    if Instant::now() >= at && handoff.read().awaiting_focus() {
+                        handoff.write().focus_timeout();
+                        deadline.set(None);
+                        shell::request_attention();
+                        eprintln!("[pitagames] the window did not take focus; showing the badge");
+                    }
+                }
+            }
+        });
+    }
+
     // Window-level key pump: DOM focus is deliberately not part of navigation,
     // so the events are read from tao rather than from a focused element. The
     // handler lives in `App` so one pump serves every screen; the active
@@ -490,6 +623,7 @@ fn App() -> Element {
     );
     let mut key_shell = shell_state.clone();
     let mut key_pad_active = pad_active;
+    let key_handoff = handoff;
     // GTK/WebKit delivers one Escape as *two* identical `KeyboardInput`
     // presses (it reaches both the window and the webview), so a raw key that
     // repeats back-to-back with no other event is ignored. A held key repeats
@@ -522,6 +656,13 @@ fn App() -> Element {
             return;
         }
         last_press.set(Some((key_event.physical_key, now)));
+        // The console hand-off hides the window while a supervised game runs;
+        // the game owns the keyboard too, so a key must not steer a window
+        // nobody can see. (The de-dupe above still runs, so a held Escape
+        // cannot leak into the next screen once the window returns.)
+        if key_handoff.read().hidden() {
+            return;
+        }
         // Any key press makes the keyboard the last device: the hint row shows
         // its glyphs and the cursor stays visible.
         key_pad_active.set(false);
@@ -549,6 +690,25 @@ fn App() -> Element {
             }
             return;
         }
+        // The overlay is modal: while it is open it owns the keyboard, so an
+        // arrow walks its rows and `Enter` chooses. It is checked before the
+        // text-field yield, so a stray focus cannot half-trap the menu; an
+        // unbound key does nothing.
+        if overlay.read().is_some() {
+            if let Some(action) = action {
+                apply_overlay(
+                    action,
+                    overlay,
+                    &mut key_shell,
+                    view,
+                    detail_back,
+                    selected_game,
+                    notice,
+                    play,
+                );
+            }
+            return;
+        }
         let Some(action) = action else {
             return;
         };
@@ -561,10 +721,17 @@ fn App() -> Element {
         if key_event.repeat && !action.is_navigation() {
             return;
         }
+        // `M` opens the console overlay, the keyboard's answer to the pad's
+        // `Start`.
+        if action == pitagames_input::Action::Menu {
+            open_overlay(overlay, &key_shell, library_state, selected_game, play);
+            return;
+        }
         // `F11` maps to `Guide`: the shell's own action, handled here rather
-        // than by the screen, so it toggles wherever the player is.
+        // than by the screen, so it toggles wherever the player is (or dismisses
+        // the hand-off's "game ended" badge).
         if action == pitagames_input::Action::Guide {
-            toggle_shell(&mut key_shell, view);
+            guide_action(&mut key_shell, view, key_handoff);
             return;
         }
         dispatch_action(
@@ -636,10 +803,18 @@ fn App() -> Element {
     // A finished game writes its session into the row (playtime, last played),
     // appends it to the launch history, and moves the header strip from
     // "playing" to its verdict. The writes are SQLite, so they happen off the
-    // event loop.
+    // event loop. A *start* and an *end* also drive the launch hand-off: the
+    // console shell hides its window while a supervised game runs and brings it
+    // back when the game ends (`handoff`).
     let play_drain = play_channel.clone();
+    let play_shell = shell_state.clone();
+    let play_handoff = handoff;
+    let play_deadline = Rc::clone(&handoff_deadline);
     use_future(move || {
         let channel = play_drain.clone();
+        let mut shell = play_shell.clone();
+        let play_handoff = play_handoff;
+        let play_deadline = Rc::clone(&play_deadline);
         async move {
             while let Some(event) = channel.next().await {
                 // The session has to be read before `apply` frees the slot: it
@@ -648,62 +823,88 @@ fn App() -> Element {
                 let session = play.read().running().cloned();
                 play.write().apply(&event);
 
-                let PlayEvent::Finished { id, title, outcome } = event else {
-                    continue;
-                };
-                // A report for a game that no longer holds the slot is stale;
-                // another launch has already begun, so the slot is not ours.
-                let Some(session) = session.filter(|running| running.id == id) else {
-                    continue;
-                };
-
-                // History covers failures too: a launch that never started has
-                // no outcome, and "no Proton build" is the row worth keeping.
-                if let Some(db) = db_state.read().clone() {
-                    let record = session.record(&outcome, OffsetDateTime::now_utc());
-                    history_revision.set(history_revision() + 1);
-                    spawn(async move {
-                        if let Err(error) = persist::record_launch_session(&db, &record).await {
-                            eprintln!("[pitagames] {error}");
+                match event {
+                    PlayEvent::Started { id, .. } => {
+                        // Only the slot holder may move the window; a stale
+                        // `Started` (another launch already began) is ignored.
+                        if session.as_ref().is_some_and(|running| running.id == id) {
+                            // The overlay is the launcher's; a game owns the
+                            // screen now, so close it before the window steps
+                            // aside.
+                            overlay.set(None);
+                            begin_handoff(play_handoff, &mut shell, &id, &play_deadline);
                         }
-                    });
-                }
-
-                let Ok(outcome) = outcome else {
-                    continue;
-                };
-
-                // Playtime accumulates: a non-Steam game's number is the sum of
-                // its sessions, since no store counts it for us.
-                let now = OffsetDateTime::now_utc();
-                let total = {
-                    let mut guard = library_state.write();
-                    match guard.as_mut() {
-                        Some(library) => {
-                            let previous = library
-                                .games
-                                .iter()
-                                .find(|entry| entry.game.id == id)
-                                .map(|entry| entry.playtime())
-                                .unwrap_or_default();
-                            let total = previous + outcome.duration;
-                            let mut row = Game::new(id.clone(), title);
-                            row.playtime = total;
-                            row.last_played = Some(now);
-                            library.apply_stored(&[row]);
-                            total
-                        }
-                        None => outcome.duration,
                     }
-                };
+                    PlayEvent::Finished { id, title, outcome } => {
+                        // A report for a game that no longer holds the slot is
+                        // stale; another launch has already begun, so the slot
+                        // is not ours.
+                        let Some(session) = session.filter(|running| running.id == id) else {
+                            continue;
+                        };
 
-                if let Some(db) = db_state.read().clone() {
-                    let id = id.clone();
-                    spawn(async move {
-                        if let Err(error) = persist::record_playtime(&db, &id, total).await {
-                            eprintln!("[pitagames] {error}");
+                        // Bring the window back *before* the SQLite writes
+                        // below, so a slow database never delays the return trip.
+                        let summary = play
+                            .read()
+                            .last()
+                            .map(|last| last.summary.clone())
+                            .unwrap_or_default();
+                        end_handoff(play_handoff, &title, &summary, &play_deadline);
+
+                        // History covers failures too: a launch that never
+                        // started has no outcome, and "no Proton build" is the
+                        // row worth keeping.
+                        if let Some(db) = db_state.read().clone() {
+                            let record = session.record(&outcome, OffsetDateTime::now_utc());
+                            history_revision.set(history_revision() + 1);
+                            spawn(async move {
+                                if let Err(error) =
+                                    persist::record_launch_session(&db, &record).await
+                                {
+                                    eprintln!("[pitagames] {error}");
+                                }
+                            });
                         }
-                    });
+
+                        let Ok(outcome) = outcome else {
+                            continue;
+                        };
+
+                        // Playtime accumulates: a non-Steam game's number is the
+                        // sum of its sessions, since no store counts it for us.
+                        let now = OffsetDateTime::now_utc();
+                        let total = {
+                            let mut guard = library_state.write();
+                            match guard.as_mut() {
+                                Some(library) => {
+                                    let previous = library
+                                        .games
+                                        .iter()
+                                        .find(|entry| entry.game.id == id)
+                                        .map(|entry| entry.playtime())
+                                        .unwrap_or_default();
+                                    let total = previous + outcome.duration;
+                                    let mut row = Game::new(id.clone(), title);
+                                    row.playtime = total;
+                                    row.last_played = Some(now);
+                                    library.apply_stored(&[row]);
+                                    total
+                                }
+                                None => outcome.duration,
+                            }
+                        };
+
+                        if let Some(db) = db_state.read().clone() {
+                            let id = id.clone();
+                            spawn(async move {
+                                if let Err(error) = persist::record_playtime(&db, &id, total).await
+                                {
+                                    eprintln!("[pitagames] {error}");
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -962,6 +1163,16 @@ fn App() -> Element {
     let play_snapshot: Play = (*play.read()).clone();
     let running_play = play_snapshot.running().cloned();
     let last_play = play_snapshot.last().cloned();
+    // The hand-off's fallback: shown when a game ended but the compositor never
+    // gave the window focus back. Reading it here makes the badge appear and
+    // disappear as the model changes.
+    let handoff_badge = handoff.read().badge().map(str::to_string);
+    // The open overlay: its rows (already built by the model) and the controller
+    // line under them. The clock is a signal so the panel ticks on its own timer
+    // rather than the render cadence.
+    let overlay_snapshot = overlay.read().clone();
+    let overlay_clock = clock();
+    let overlay_status = overlay_status(&pads.read(), &batteries.read());
 
     let subtitle = match snapshot.as_ref() {
         None => "Scanning…".to_string(),
@@ -1345,6 +1556,10 @@ fn App() -> Element {
     let pointer_cell = Rc::clone(&last_pointer);
     let mut pointer_pad_active = pad_active;
     let mut pointer_cursor_hidden = cursor_hidden;
+    // A mutable shell clone for the overlay panel's pointer handler, which takes
+    // the same `apply_overlay_choice` path the d-pad does (the shell signal is
+    // shared, so toggling through the clone updates the window).
+    let mut overlay_shell = shell_state.clone();
 
     rsx! {
         div {
@@ -1509,6 +1724,25 @@ fn App() -> Element {
                 }
             }
 
+            // The hand-off's fallback: the game ended but the compositor did not
+            // give the window focus back, so a controller user could otherwise
+            // sit in front of a window nothing responds to. Guide (or a click)
+            // clears it.
+            if let Some(badge) = handoff_badge {
+                div {
+                    style: "display:flex;align-items:center;gap:12px;margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#262038;color:#c8b8e8;font-size:12px;",
+                    span {
+                        style: "font-weight:600;",
+                        "{badge}"
+                    }
+                    button {
+                        onclick: move |_| handoff.write().dismiss(),
+                        style: "margin-left:auto;padding:4px 10px;border-radius:8px;border:1px solid #3a3354;background:#1a1626;color:#a898c8;font-size:11px;cursor:pointer;",
+                        "Dismiss"
+                    }
+                }
+            }
+
             if current_view == View::Detail {
                 div {
                     style: "flex:1;min-height:0;overflow-y:auto;",
@@ -1620,6 +1854,38 @@ fn App() -> Element {
                             "{hint.label}"
                         }
                         span { "{pitagames_input::action_label(hint.action)}" }
+                    }
+                }
+            }
+
+            // The console overlay is a modal, so it is the last child and a
+            // fixed full-window backdrop: the screen beneath keeps its focus and
+            // scroll, and a pointer click takes the same `apply_overlay_choice`
+            // path the d-pad does.
+            if let Some(model) = overlay_snapshot {
+                {
+                    let entries = model.entries().to_vec();
+                    let focused = model.focused();
+                    rsx! {
+                        overlay_view::OverlayView {
+                            entries,
+                            focused,
+                            status: overlay_status.clone(),
+                            clock: overlay_clock.clone(),
+                            on_choose: move |choice: OverlayChoice| {
+                                apply_overlay_choice(
+                                    choice,
+                                    overlay,
+                                    &mut overlay_shell,
+                                    view,
+                                    detail_back,
+                                    selected_game,
+                                    notice,
+                                    play,
+                                );
+                            },
+                            on_close: move |_| overlay.set(None),
+                        }
                     }
                 }
             }
@@ -2190,6 +2456,57 @@ fn perform_action(
     }
 }
 
+/// Apply the console hand-off when a supervised game starts.
+///
+/// In the console shell the window hides while the game runs; in the desktop
+/// shell it stays, so a pointer user can keep browsing. The window call is
+/// best-effort (a compositor may ignore it) and a failed hide costs nothing.
+fn begin_handoff(
+    mut handoff: Signal<Handoff>,
+    shell: &mut shell::ShellState,
+    id: &GameId,
+    deadline: &Rc<Cell<Option<Instant>>>,
+) {
+    let action = handoff.write().started(id, shell.shell().is_console());
+    if action == WindowAction::Hide {
+        shell::hide_window();
+        deadline.set(None);
+        eprintln!("[pitagames] stepping aside while {} runs", id.store_id);
+    }
+}
+
+/// Apply the console hand-off when a supervised game ends.
+///
+/// The return trip arms the focus deadline; if no focus event arrives in time,
+/// the timer in `App` promotes the fallback badge. `title`/`summary` are the
+/// verdict the badge carries.
+fn end_handoff(
+    mut handoff: Signal<Handoff>,
+    title: &str,
+    summary: &str,
+    deadline: &Rc<Cell<Option<Instant>>>,
+) {
+    let action = handoff.write().ended(title, summary);
+    if action == WindowAction::Show {
+        shell::show_and_focus();
+        deadline.set(Some(Instant::now() + handoff::FOCUS_GRACE));
+        eprintln!("[pitagames] {title} ended; asking for focus");
+    }
+}
+
+/// `Guide`'s app-level job: dismiss the hand-off's badge, else toggle the shell.
+///
+/// While the "game ended — press Guide" badge is on screen, Guide means "take me
+/// back", not "switch shells", so the first press clears the badge instead.
+fn guide_action(shell: &mut shell::ShellState, view: Signal<View>, mut handoff: Signal<Handoff>) {
+    let showing = handoff.read().badge().is_some();
+    if showing {
+        handoff.write().dismiss();
+        return;
+    }
+    toggle_shell(shell, view);
+}
+
 /// Toggle the shell and land the player on the shell's home screen.
 ///
 /// Entering the console shell shows the couch home; leaving it returns to the
@@ -2203,6 +2520,171 @@ fn toggle_shell(shell: &mut shell::ShellState, view: Signal<View>) {
         view.set(View::Home);
     } else if view() == View::Home {
         view.set(View::Library);
+    }
+}
+
+/// The game the overlay is about: the running one, else the open detail page's.
+fn current_game_id(play: Signal<Play>, selected_game: Signal<Option<GameId>>) -> Option<GameId> {
+    play.read()
+        .running()
+        .map(|running| running.id.clone())
+        .or(selected_game())
+}
+
+/// Build the overlay's context from the running (or opened) game.
+fn overlay_context(
+    shell: pitagames_core::ui::Shell,
+    library: Signal<Option<Library>>,
+    selected_game: Signal<Option<GameId>>,
+    play: Signal<Play>,
+) -> OverlayContext {
+    let game = current_game_id(play, selected_game).and_then(|id| {
+        let guard = library.read();
+        let entry = guard
+            .as_ref()?
+            .games
+            .iter()
+            .find(|entry| entry.game.id == id)?;
+        Some(OverlayGame {
+            id: entry.game.id.clone(),
+            title: entry.title().to_string(),
+            steam: entry.is_steam(),
+        })
+    });
+    OverlayContext {
+        console: shell.is_console(),
+        game,
+    }
+}
+
+/// Open the console overlay, built for the current game and shell.
+///
+/// `Menu` opens it in either shell, so a desktop pointer that never touches a
+/// pad still has a place for the shell switch and the (v1.1) power rows.
+fn open_overlay(
+    mut overlay: Signal<Option<Overlay>>,
+    shell: &shell::ShellState,
+    library: Signal<Option<Library>>,
+    selected_game: Signal<Option<GameId>>,
+    play: Signal<Play>,
+) {
+    let context = overlay_context(shell.shell(), library, selected_game, play);
+    overlay.set(Some(Overlay::build(&context)));
+}
+
+/// Apply one action to the open overlay.
+///
+/// The overlay is modal, so this owns every action while it is open: navigation
+/// moves its ring, `Confirm` runs the focused row, and `Back`/`Menu`/`Guide`
+/// close it.
+#[allow(clippy::too_many_arguments)]
+fn apply_overlay(
+    action: pitagames_input::Action,
+    mut overlay: Signal<Option<Overlay>>,
+    shell: &mut shell::ShellState,
+    view: Signal<View>,
+    back: Signal<View>,
+    selected_game: Signal<Option<GameId>>,
+    notice: Signal<String>,
+    play: Signal<Play>,
+) {
+    use pitagames_input::Action as A;
+
+    // A menu is a toggle: any of the shell keys closes it.
+    if matches!(action, A::Back | A::Menu | A::Guide) {
+        overlay.set(None);
+        return;
+    }
+
+    let moved = {
+        let mut guard = overlay.write();
+        guard.as_mut().is_some_and(|model| model.move_focus(action))
+    };
+    if moved {
+        return;
+    }
+    if action != A::Confirm {
+        return;
+    }
+
+    let choice = overlay
+        .read()
+        .as_ref()
+        .and_then(|model| model.focused_choice());
+    let Some(choice) = choice else {
+        // A disabled row (a power placeholder): keep the menu open.
+        return;
+    };
+    apply_overlay_choice(
+        choice,
+        overlay,
+        shell,
+        view,
+        back,
+        selected_game,
+        notice,
+        play,
+    );
+}
+
+/// Perform an overlay choice, whether a controller or a pointer picked it.
+#[allow(clippy::too_many_arguments)]
+fn apply_overlay_choice(
+    choice: OverlayChoice,
+    mut overlay: Signal<Option<Overlay>>,
+    shell: &mut shell::ShellState,
+    mut view: Signal<View>,
+    mut back: Signal<View>,
+    mut selected_game: Signal<Option<GameId>>,
+    mut notice: Signal<String>,
+    play: Signal<Play>,
+) {
+    // Every choice closes the menu first, so the screen it lands on is visible.
+    overlay.set(None);
+    match choice {
+        OverlayChoice::Close => {}
+        OverlayChoice::Details => {
+            if let Some(id) = current_game_id(play, selected_game) {
+                // Back returns to whatever the overlay was opened over.
+                back.set(view());
+                selected_game.set(Some(id));
+                view.set(View::Detail);
+            }
+        }
+        OverlayChoice::StorePage => {
+            if let Some(id) = current_game_id(play, selected_game)
+                && id.store == Store::Steam
+                && let Err(error) = library::spawn_store_page(&id.store_id)
+            {
+                notice.set(format!("Could not open the Steam store page: {error}"));
+            }
+        }
+        OverlayChoice::ToggleShell => toggle_shell(shell, view),
+    }
+}
+
+/// The overlay's controller line: the last pad's name and battery, or keyboard.
+///
+/// `gilrs` has no battery event, so the worker reports each change and this reads
+/// the latest; a pad that has never reported power shows its name alone.
+fn overlay_status(
+    pads: &[pitagames_input::Device],
+    batteries: &std::collections::BTreeMap<pitagames_input::DeviceId, pitagames_input::Battery>,
+) -> String {
+    let Some(device) = pads.iter().rev().find(|device| device.is_gamepad) else {
+        return "Keyboard".to_string();
+    };
+    let battery = batteries.get(&device.id).copied().and_then(|state| {
+        state
+            .percent()
+            .map(|percent| (percent, state.is_charging()))
+    });
+    match battery {
+        Some((percent, charging)) => {
+            let suffix = if charging { " (charging)" } else { "" };
+            format!("{} · {percent}%{suffix}", device.name)
+        }
+        None => device.name.clone(),
     }
 }
 

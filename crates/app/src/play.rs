@@ -24,7 +24,7 @@ use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::{Game, GameId, ShimProfile};
 use pitagames_db::LaunchRecord;
-use pitagames_platform::launch::{self as handoff, DEFAULT_GRACE, LaunchMode, Outcome, RunOptions};
+use pitagames_platform::launch::{self as launch, DEFAULT_GRACE, LaunchMode, Outcome, RunOptions};
 use time::OffsetDateTime;
 
 use crate::runtime;
@@ -255,14 +255,14 @@ impl Play {
         let Some(pid) = running.pid else {
             return false;
         };
-        handoff::terminate(pid, DEFAULT_GRACE);
+        launch::terminate(pid, DEFAULT_GRACE);
         true
     }
 }
 
 /// Run one game on its own thread.
 ///
-/// The thread owns the [`handoff::Session`]; the window only keeps the pid, so a
+/// The thread owns the [`launch::Session`]; the window only keeps the pid, so a
 /// closed window leaves the game running and the OS reaps it with the process
 /// tree (`setsid`).
 pub fn spawn(game: Game, sender: UnboundedSender<PlayEvent>) {
@@ -274,6 +274,13 @@ pub fn spawn(game: Game, sender: UnboundedSender<PlayEvent>) {
     let (fallback_id, fallback_title) = (id.clone(), title.clone());
     let spawned = thread::Builder::new().name(thread_name).spawn(move || {
         let outcome = start_game(&game, &sender);
+        // The console hand-off unmaps the window while a game runs, and an
+        // unmapped WebKitGTK window freezes the Dioxus virtualdom — so the drain
+        // future that would show the window again cannot run until the window is
+        // mapped, and mapping it has to happen here, off the event loop. Doing
+        // it *before* the report also wakes the webview, which is what lets the
+        // drain see `Finished` at all.
+        let _ = crate::shell::reveal_window();
         let _ = sender.unbounded_send(PlayEvent::Finished { id, title, outcome });
     });
 
@@ -300,7 +307,7 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
         log_path: log.as_deref(),
         grace: DEFAULT_GRACE,
     };
-    let mut session = handoff::start(&prepared.spec, &options).map_err(|error| {
+    let mut session = launch::start(&prepared.spec, &options).map_err(|error| {
         // The two shapes fail on different missing programs: a Windows build
         // wants `umu-run`, a store client wants its own CLI on PATH.
         let hint = if prepared.mode == LaunchMode::StoreClient {
