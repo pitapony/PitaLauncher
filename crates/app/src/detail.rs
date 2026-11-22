@@ -46,16 +46,8 @@ impl PartialEq for DbHandle {
 pub struct DetailProps {
     pub entry: GameEntry,
     pub db: DbHandle,
-    /// Back button target; navigation stays in `main.rs`.
-    pub view: Signal<View>,
-    /// The screen that opened this page. Back returns here rather than always
-    /// to the library, so a game opened from the console home comes back to the
-    /// home shelves.
-    pub back: Signal<View>,
     /// The app's one input pump posts this screen's actions here.
     pub actions: ActionChannel,
-    /// True while a text field owns the keyboard; the profile name input sets it.
-    pub text_focused: Signal<bool>,
     /// Loopback URL for the header art, once it is on disk.
     pub hero: Option<String>,
     /// The Steam root the game came from; `None` disables the routing panel.
@@ -75,10 +67,8 @@ pub struct DetailProps {
 pub fn Detail(props: DetailProps) -> Element {
     let entry = props.entry;
     let db = props.db.0;
-    let mut view = props.view;
-    let back = props.back;
     let actions = props.actions;
-    let mut text_focused = props.text_focused;
+    let mut session = crate::context::use_session();
     let screen_focus = focus::use_focus();
     let game_id = entry.game.id.clone();
 
@@ -429,7 +419,7 @@ pub fn Detail(props: DetailProps) -> Element {
         let game = action_game.clone();
         async move {
             while let Some(action) = channel.next().await {
-                if view() != View::Detail {
+                if session.read().view() != View::Detail {
                     continue;
                 }
                 // While the on-screen keyboard is open it owns the keys: a
@@ -472,12 +462,18 @@ pub fn Detail(props: DetailProps) -> Element {
                 let playing = play_signal.read().label(&game).is_some();
                 let count = if play_wired && !playing { 2 } else { 1 };
                 match action {
-                    Action::Back => view.set(back()),
+                    Action::Back => {
+                        let to = session.read().back();
+                        session.write().set_view(to);
+                    }
                     action if action.is_navigation() => {
                         screen_focus.move_focus(action, count, 1);
                     }
                     Action::Confirm => match screen_focus.index() {
-                        Some(0) => view.set(back()),
+                        Some(0) => {
+                            let to = session.read().back();
+                            session.write().set_view(to);
+                        }
                         Some(1) if play_wired && !playing => {
                             start_play(error, play_signal, play_events, entry.clone(), db.clone());
                         }
@@ -496,10 +492,13 @@ pub fn Detail(props: DetailProps) -> Element {
             {
                 let focused = screen_focus.index() == Some(0);
                 let ring = focus::ring_style(focused);
-                let label = back_label(back());
+                let label = back_label(session.read().back());
                 rsx! {
                     button {
-                        onclick: move |_| view.set(back()),
+                        onclick: move |_| {
+                            let to = session.read().back();
+                            session.write().set_view(to);
+                        },
                         style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;{ring}",
                         "{label}"
                     }
@@ -764,8 +763,8 @@ pub fn Detail(props: DetailProps) -> Element {
                             placeholder: "New profile name",
                             value: "{name}",
                             oninput: move |event| new_name.set(event.value()),
-                            onfocus: move |_| text_focused.set(true),
-                            onblur: move |_| text_focused.set(false),
+                            onfocus: move |_| session.write().set_text_focused(true),
+                            onblur: move |_| session.write().set_text_focused(false),
                             style: "flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;outline:none;font-size:13px;",
                         }
                         button {
@@ -1317,7 +1316,7 @@ fn back_label(back: View) -> &'static str {
 ///
 /// The Play button and the focus graph's `Confirm` both call this, so a
 /// controller press and a pointer click cannot drift. The actual launch is
-/// [`crate::start_play`], shared with the library grid and the home hero, so the
+/// [`crate::launch_start::start_play`], shared with the library grid and the home hero, so the
 /// three surfaces always agree on how a Steam row and a store row start.
 fn start_play(
     error: Signal<String>,
@@ -1326,7 +1325,7 @@ fn start_play(
     entry: GameEntry,
     db: Option<Db>,
 ) {
-    crate::start_play(
+    crate::launch_start::start_play(
         &entry.game,
         entry.playtime(),
         play_signal,

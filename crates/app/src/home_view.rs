@@ -26,7 +26,6 @@ use dioxus::html::{MountedData, ScrollBehavior, ScrollLogicalPosition, ScrollToO
 use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 
-use pitagames_core::GameId;
 use pitagames_input::Action;
 
 use crate::View;
@@ -50,11 +49,6 @@ pub struct HomeViewProps {
     pub actions: ActionChannel,
     pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
     pub art_revision: Signal<u64>,
-    pub view: Signal<View>,
-    /// Where the detail page's Back returns to; the home records itself here
-    /// before opening a game, so the page comes back to the shelves.
-    pub back: Signal<View>,
-    pub selected_game: Signal<Option<GameId>>,
     pub notice: Signal<String>,
     pub board: Signal<Downloads>,
     pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
@@ -127,9 +121,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
     let library = props.library;
     let art_state = props.art_state;
     let art_revision = props.art_revision;
-    let mut view = props.view;
-    let mut back = props.back;
-    let mut selected_game = props.selected_game;
+    let mut session = crate::context::use_session();
     let notice = props.notice;
     let board = props.board;
     let events = props.events;
@@ -161,15 +153,13 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         let rows = Rc::clone(&action_rows);
         async move {
             while let Some(action) = channel.next().await {
-                if view() != View::Home {
+                if session.read().view() != View::Home {
                     continue;
                 }
                 perform_home_action(
                     action,
                     library,
-                    view,
-                    back,
-                    selected_game,
+                    session,
                     notice,
                     screen_focus,
                     viewport_width,
@@ -276,9 +266,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                 style: "position:relative;height:44vh;min-height:260px;margin-bottom:22px;overflow:hidden;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
                 onclick: move |_| {
                     screen_focus.set(Some(0));
-                    back.set(View::Home);
-                    selected_game.set(Some(open_id.clone()));
-                    view.set(View::Detail);
+                    session.write().open_detail(open_id.clone(), View::Home);
                 },
 
                 if let Some(url) = url {
@@ -337,7 +325,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                 disabled: !can_play,
                                 onclick: move |event| {
                                     event.stop_propagation();
-                                    crate::start_play(
+                                    crate::launch_start::start_play(
                                         &play_game,
                                         play_time,
                                         play,
@@ -354,7 +342,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                 disabled: !can_install,
                                 onclick: move |event| {
                                     event.stop_propagation();
-                                    crate::start_install(
+                                    crate::launch_start::start_install(
                                         &install_id,
                                         &install_title,
                                         installs,
@@ -363,7 +351,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                         board,
                                         &install_libraries,
                                         notice,
-                                        view,
+                                        session,
                                     );
                                 },
                                 style: "{install_style}",
@@ -379,9 +367,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                         button {
                             onclick: move |event| {
                                 event.stop_propagation();
-                                back.set(View::Home);
-                                selected_game.set(Some(detail_id.clone()));
-                                view.set(View::Detail);
+                                session.write().open_detail(detail_id.clone(), View::Home);
                             },
                             style: "padding:10px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:#c8c8d4;font-size:0.85rem;cursor:pointer;",
                             "Details"
@@ -501,9 +487,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                                         key: "{card_key}",
                                                         onclick: move |_| {
                                                             screen_focus.set(card_id);
-                                                            back.set(View::Home);
-                                                            selected_game.set(Some(open_id.clone()));
-                                                            view.set(View::Detail);
+                                                            session.write().open_detail(open_id.clone(), View::Home);
                                                         },
                                                         style: "width:{tile_w}px;flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding:10px;box-sizing:border-box;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
 
@@ -555,9 +539,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
 fn perform_home_action(
     action: Action,
     library: Signal<Option<Library>>,
-    mut view: Signal<View>,
-    mut back: Signal<View>,
-    mut selected_game: Signal<Option<GameId>>,
+    mut session: Signal<crate::session::Session>,
     notice: Signal<String>,
     screen_focus: focus::ScreenFocus,
     viewport_width: Signal<f64>,
@@ -581,7 +563,7 @@ fn perform_home_action(
     let model = Home::build(state);
 
     if action == Action::Back {
-        view.set(View::Library);
+        session.write().set_view(View::Library);
         return;
     }
 
@@ -660,7 +642,7 @@ fn perform_home_action(
             };
             let entry = &state.games[index];
             match primary_action(entry) {
-                Primary::Play => crate::start_play(
+                Primary::Play => crate::launch_start::start_play(
                     &entry.game,
                     entry.playtime(),
                     play,
@@ -668,7 +650,7 @@ fn perform_home_action(
                     notice,
                     db.read().clone(),
                 ),
-                Primary::Install => crate::start_install(
+                Primary::Install => crate::launch_start::start_install(
                     &entry.game.id,
                     entry.title(),
                     installs,
@@ -677,12 +659,12 @@ fn perform_home_action(
                     board,
                     &state.libraries,
                     notice,
-                    view,
+                    session,
                 ),
                 Primary::Open => {
-                    back.set(View::Home);
-                    selected_game.set(Some(entry.game.id.clone()));
-                    view.set(View::Detail);
+                    session
+                        .write()
+                        .open_detail(entry.game.id.clone(), View::Home);
                 }
             }
         }
@@ -690,9 +672,9 @@ fn perform_home_action(
             let Some(index) = model.game(cell) else {
                 return;
             };
-            back.set(View::Home);
-            selected_game.set(Some(state.games[index].game.id.clone()));
-            view.set(View::Detail);
+            session
+                .write()
+                .open_detail(state.games[index].game.id.clone(), View::Home);
         }
     }
 }
@@ -700,7 +682,7 @@ fn perform_home_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pitagames_core::{Game, Store};
+    use pitagames_core::{Game, GameId, Store};
 
     fn entry(store: Store, id: &str, installed: bool, exe: Option<&str>) -> GameEntry {
         let mut game = Game::new(GameId::new(store, id), "A Game");

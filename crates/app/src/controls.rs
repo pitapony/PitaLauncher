@@ -33,8 +33,6 @@ use crate::gamepad::MapReload;
 /// Props for the Controls screen.
 #[derive(Props, Clone, PartialEq)]
 pub struct ControlsViewProps {
-    /// The app's current view; Back leaves the Controls screen.
-    pub view: Signal<View>,
     /// The app's one input pump posts this screen's actions here.
     pub actions: ActionChannel,
     /// The persisted maps; Save replaces them and the hint row follows.
@@ -46,8 +44,6 @@ pub struct ControlsViewProps {
     pub pads: Signal<Vec<Device>>,
     /// A handle to push saved maps into the running gamepad worker.
     pub reload: Signal<MapReload>,
-    /// True while a number field owns the keyboard.
-    pub text_focused: Signal<bool>,
 }
 
 /// One focusable cell of the list level, in reading order.
@@ -193,13 +189,12 @@ fn save(
 /// The Controls screen.
 #[allow(non_snake_case)]
 pub fn ControlsView(props: ControlsViewProps) -> Element {
-    let view = props.view;
+    let nav = crate::context::use_session();
     let actions = props.actions;
     let maps = props.maps;
     let mut remap = props.remap;
     let pads = props.pads;
     let reload = props.reload;
-    let text_focused = props.text_focused;
 
     let screen_focus = focus::use_focus();
     // `None` is the list; `Some(action)` is that action's detail.
@@ -213,7 +208,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
         let channel = actions.clone();
         async move {
             while let Some(action) = channel.next().await {
-                if view() != View::Controls {
+                if nav.read().view() != View::Controls {
                     continue;
                 }
                 handle_action(
@@ -226,7 +221,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                     reload(),
                     status,
                     status_error,
-                    view,
+                    nav,
                 );
             }
         }
@@ -428,21 +423,21 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                         field: Tuning::Deadzone,
                         value: session.map().deadzone.to_string(),
                         remap,
-                        text_focused,
+                        session: nav,
                     }
                     TuningField {
                         label: "Repeat delay (ms)",
                         field: Tuning::RepeatDelay,
                         value: session.map().repeat_delay_ms.to_string(),
                         remap,
-                        text_focused,
+                        session: nav,
                     }
                     TuningField {
                         label: "Repeat every (ms)",
                         field: Tuning::RepeatInterval,
                         value: session.map().repeat_interval_ms.to_string(),
                         remap,
-                        text_focused,
+                        session: nav,
                     }
                 }
 
@@ -482,7 +477,7 @@ struct TuningFieldProps {
     field: Tuning,
     value: String,
     remap: Signal<Option<RemapSession>>,
-    text_focused: Signal<bool>,
+    session: Signal<crate::session::Session>,
 }
 
 /// One number field for the feel tuning.
@@ -495,7 +490,7 @@ fn TuningField(props: TuningFieldProps) -> Element {
     let field = props.field;
     let value = props.value;
     let mut remap = props.remap;
-    let mut text_focused = props.text_focused;
+    let mut session = props.session;
     rsx! {
         label {
             style: "display:flex;align-items:center;gap:6px;font-size:12px;color:#9a9aac;",
@@ -503,8 +498,8 @@ fn TuningField(props: TuningFieldProps) -> Element {
             input {
                 r#type: "number",
                 value: "{value}",
-                onfocus: move |_| text_focused.set(true),
-                onblur: move |_| text_focused.set(false),
+                onfocus: move |_| session.write().set_text_focused(true),
+                onblur: move |_| session.write().set_text_focused(false),
                 oninput: move |event| {
                     if let Ok(parsed) = event.value().parse::<f32>() {
                         let mut guard = remap.write();
@@ -539,14 +534,14 @@ fn handle_action(
     reload: MapReload,
     mut status: Signal<String>,
     status_error: Signal<bool>,
-    mut view: Signal<View>,
+    mut session: Signal<crate::session::Session>,
 ) {
     if action == Action::Back {
         if editing.read().is_some() {
             editing.set(None);
             screen_focus.set(None);
         } else {
-            view.set(View::Library);
+            session.write().set_view(View::Library);
         }
         return;
     }

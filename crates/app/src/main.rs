@@ -10,7 +10,6 @@
 //! profiles arrive in later milestones.
 
 use std::cell::{Cell, RefCell};
-use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -27,7 +26,7 @@ use futures_util::stream::{self, StreamExt};
 use pitagames_core::{Game, GameId, Store};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
-use pitagames_stores::queue::{InstallJob, JobState, StartOutcome};
+use pitagames_stores::queue::{InstallJob, JobState};
 use time::OffsetDateTime;
 
 use downloads::{DownloadEvent, Downloads};
@@ -43,6 +42,7 @@ mod activation;
 mod anticheat;
 mod art;
 mod auth;
+mod context;
 mod controls;
 mod copy;
 mod desktop_entry;
@@ -58,8 +58,10 @@ mod history_view;
 mod home;
 mod home_view;
 mod icon;
+mod launch_start;
 mod library;
 mod log_view;
+mod navigation;
 mod osk;
 mod overlay;
 mod overlay_view;
@@ -67,6 +69,7 @@ mod persist;
 mod play;
 mod runtime;
 mod safe_mode;
+mod session;
 mod shell;
 mod steam_account;
 mod store_installs;
@@ -212,19 +215,9 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
     }
 }
 
-/// Which top-level list the window shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum View {
-    Home,
-    Library,
-    Downloads,
-    History,
-    Stores,
-    Detail,
-    Account,
-    Controls,
-    Logs,
-}
+// `View` lives in `navigation` now; re-export it so existing `crate::View`
+// paths and `use crate::View` keep working (ADR-0027).
+pub(crate) use navigation::View;
 
 /// The handle every metadata enqueuer holds.
 ///
@@ -294,26 +287,13 @@ fn App() -> Element {
     let mut board = use_signal(Downloads::default);
     let mut events = use_signal(|| None::<UnboundedSender<DownloadEvent>>);
     // The console shell opens on its couch home; the desktop shell on the grid.
-    let mut view = use_signal(|| {
-        if start.shell.is_console() {
-            View::Home
-        } else {
-            View::Library
-        }
+    // The session handle owns navigation; `App` provides it in context and every
+    // screen below reads the same one (`context::use_session`).
+    let mut session = context::provide_session(if start.shell.is_console() {
+        View::Home
+    } else {
+        View::Library
     });
-    // The detail page follows the library by id, so cached metadata arriving
-    // after it opens shows up without a second copy of the game.
-    let mut selected_game = use_signal(|| None::<GameId>);
-    // Where the detail page's Back returns to. A game opens from the grid *and*
-    // from the console home, so Back cannot be hardcoded to the library: the
-    // screen that opens the page records itself here first. It defaults to the
-    // grid, which is the desktop shell's start screen.
-    let detail_back = use_signal(|| View::Library);
-    let mut query = use_signal(String::new);
-    // Whether a text field owns the keyboard. The window-level key pump must
-    // not steal arrows from a text field. The search field, the sign-in
-    // terminal's pasted line and the profile name all set this.
-    let mut text_focused = use_signal(|| false);
     let mut notice = use_signal(String::new);
     // Art is optional: until the cache/server is up, cards show placeholders.
     let mut art_state = use_signal(|| None::<std::sync::Arc<art::ArtContext>>);
@@ -489,7 +469,7 @@ fn App() -> Element {
                         // of navigating; `Back` cancels the capture. The capture
                         // flag is read into a local so its guard drops before the
                         // write below.
-                        let capturing = view() == View::Controls && {
+                        let capturing = session.read().view() == View::Controls && {
                             let guard = remap.read();
                             guard.as_ref().is_some_and(|session| session.is_capturing())
                         };
@@ -511,9 +491,7 @@ fn App() -> Element {
                                 action.action,
                                 overlay,
                                 &mut shell,
-                                view,
-                                detail_back,
-                                selected_game,
+                                session,
                                 notice,
                                 play,
                             );
@@ -522,19 +500,19 @@ fn App() -> Element {
                         // `Menu` (the pad's `Start`, the keyboard's `M`) opens the
                         // console overlay in either shell.
                         if action.action == pitagames_input::Action::Menu {
-                            open_overlay(overlay, &shell, library_state, selected_game, play);
+                            open_overlay(overlay, &shell, library_state, session, play);
                             continue;
                         }
                         // `Guide` is the shell's own action, not the screen's:
                         // it toggles the two shells wherever the player is (or
                         // dismisses the hand-off's "game ended" badge).
                         if action.action == pitagames_input::Action::Guide {
-                            guide_action(&mut shell, view, pad_handoff);
+                            guide_action(&mut shell, session, pad_handoff);
                             continue;
                         }
                         dispatch_action(
                             action.action,
-                            view,
+                            session,
                             &actions.0,
                             &actions.1,
                             &actions.2,
@@ -545,7 +523,7 @@ fn App() -> Element {
                     }
                     gamepad::GamepadEvent::Control(binding) => {
                         // A raw button press is only useful to a pending capture.
-                        if view() == View::Controls {
+                        if session.read().view() == View::Controls {
                             let mut guard = remap.write();
                             if let Some(session) = guard.as_mut()
                                 && session.is_capturing()
@@ -730,7 +708,7 @@ fn App() -> Element {
         // key pressed is bound to the action being edited, so it must not also
         // move the ring. `Escape` (the keyboard's Back) cancels the capture. The
         // capture flag is read into a local so its guard drops before the write.
-        let capturing = view() == View::Controls && {
+        let capturing = session.read().view() == View::Controls && {
             let guard = key_remap.read();
             guard.as_ref().is_some_and(|session| session.is_capturing())
         };
@@ -752,16 +730,7 @@ fn App() -> Element {
         // unbound key does nothing.
         if overlay.read().is_some() {
             if let Some(action) = action {
-                apply_overlay(
-                    action,
-                    overlay,
-                    &mut key_shell,
-                    view,
-                    detail_back,
-                    selected_game,
-                    notice,
-                    play,
-                );
+                apply_overlay(action, overlay, &mut key_shell, session, notice, play);
             }
             return;
         }
@@ -770,7 +739,7 @@ fn App() -> Element {
         };
         // A text field owns the arrows and typing; Back still leaves the field
         // (and its screen) so the keyboard is never trapped in a caret.
-        if text_focused() && action != pitagames_input::Action::Back {
+        if session.read().text_focused() && action != pitagames_input::Action::Back {
             return;
         }
         // Movement may repeat while a key is held; Confirm/Back must not.
@@ -780,19 +749,19 @@ fn App() -> Element {
         // `M` opens the console overlay, the keyboard's answer to the pad's
         // `Start`.
         if action == pitagames_input::Action::Menu {
-            open_overlay(overlay, &key_shell, library_state, selected_game, play);
+            open_overlay(overlay, &key_shell, library_state, session, play);
             return;
         }
         // `F11` maps to `Guide`: the shell's own action, handled here rather
         // than by the screen, so it toggles wherever the player is (or dismisses
         // the hand-off's "game ended" badge).
         if action == pitagames_input::Action::Guide {
-            guide_action(&mut key_shell, view, key_handoff);
+            guide_action(&mut key_shell, session, key_handoff);
             return;
         }
         dispatch_action(
             action,
-            view,
+            session,
             &key_actions.0,
             &key_actions.1,
             &key_actions.2,
@@ -808,7 +777,7 @@ fn App() -> Element {
         let channel = downloads_actions.clone();
         async move {
             while let Some(action) = channel.next().await {
-                if view() != View::Downloads {
+                if session.read().view() != View::Downloads {
                     continue;
                 }
                 handle_downloads_action(
@@ -816,7 +785,7 @@ fn App() -> Element {
                     downloads_focus,
                     installs,
                     install_events,
-                    view,
+                    session,
                     notice,
                 );
             }
@@ -850,7 +819,7 @@ fn App() -> Element {
                         // record and nothing to complain about.
                         (InstallOutcome::Done | InstallOutcome::Cancelled, _) => {}
                     }
-                    pump_installs(installs, install_events, notice);
+                    launch_start::pump_installs(installs, install_events, notice);
                 }
             }
         }
@@ -1141,7 +1110,7 @@ fn App() -> Element {
 
             // Steam may already be downloading: follow those without a click.
             for (app_id, title) in in_flight {
-                start_download(board, &sender, &libraries, &app_id, &title);
+                launch_start::start_download(board, &sender, &libraries, &app_id, &title);
             }
 
             while let Some(event) = receiver.next().await {
@@ -1162,7 +1131,7 @@ fn App() -> Element {
     let _ = art_revision();
     // Resolve the detail target from the current library on every render, so a
     // background metadata update reaches an open detail page.
-    let selected_id = selected_game.read().clone();
+    let selected_id = session.read().selected();
     let detail_entry = selected_id.as_ref().and_then(|id| {
         snapshot
             .as_ref()?
@@ -1209,7 +1178,7 @@ fn App() -> Element {
         && store_active.is_empty()
         && store_finished.is_empty();
     let has_finished = !finished_downloads.is_empty();
-    let current_view = view();
+    let current_view = session.read().view();
     let db_handle = (*db_state.read()).clone();
     let owned_summary = snapshot
         .as_ref()
@@ -1304,14 +1273,10 @@ fn App() -> Element {
     let library_body = rsx! {
         LibraryGrid {
             library: library_state,
-            query,
             actions: library_actions,
             art_state,
             art_revision,
             board,
-            view,
-            back: detail_back,
-            selected_game,
             notice,
             events,
             db: db_state,
@@ -1479,7 +1444,7 @@ fn App() -> Element {
                                         button {
                                             onclick: move |_| {
                                                 if installs.write().retry(index) {
-                                                    pump_installs(installs, install_events, notice);
+                                                    launch_start::pump_installs(installs, install_events, notice);
                                                 }
                                             },
                                             style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
@@ -1674,10 +1639,10 @@ fn App() -> Element {
                 }
                 input {
                     placeholder: "Search your library",
-                    value: "{query}",
-                    oninput: move |event| query.set(event.value()),
-                    onfocus: move |_| text_focused.set(true),
-                    onblur: move |_| text_focused.set(false),
+                    value: "{session.read().query()}",
+                    oninput: move |event| session.write().set_query(event.value()),
+                    onfocus: move |_| session.write().set_text_focused(true),
+                    onblur: move |_| session.write().set_text_focused(false),
                     style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;font-size:inherit;outline:none;",
                 }
             }
@@ -1686,24 +1651,21 @@ fn App() -> Element {
                 style: "display:flex;gap:8px;padding:0 32px 16px;",
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Home);
+                        session.write().go(View::Home);
                     },
                     style: nav_style(current_view == View::Home),
                     "Home"
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Library);
+                        session.write().go(View::Library);
                     },
                     style: nav_style(current_view == View::Library),
                     "Library"
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Downloads);
+                        session.write().go(View::Downloads);
                     },
                     style: nav_style(current_view == View::Downloads),
                     "Downloads"
@@ -1713,40 +1675,35 @@ fn App() -> Element {
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::History);
+                        session.write().go(View::History);
                     },
                     style: nav_style(current_view == View::History),
                     "History"
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Stores);
+                        session.write().go(View::Stores);
                     },
                     style: nav_style(current_view == View::Stores),
                     "Stores"
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Account);
+                        session.write().go(View::Account);
                     },
                     style: nav_style(current_view == View::Account),
                     "Account"
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Controls);
+                        session.write().go(View::Controls);
                     },
                     style: nav_style(current_view == View::Controls),
                     "Controls"
                 }
                 button {
                     onclick: move |_| {
-                        selected_game.set(None);
-                        view.set(View::Logs);
+                        session.write().go(View::Logs);
                     },
                     style: nav_style(current_view == View::Logs),
                     "Logs"
@@ -1828,10 +1785,7 @@ fn App() -> Element {
                             key: "{entry.store().as_str()}-{entry.app_id()}",
                             entry,
                             db: detail::DbHandle(db_handle.clone()),
-                            view,
-                            back: detail_back,
                             actions: detail_actions,
-                            text_focused,
                             hero: hero_url,
                             steam_root: steam_root.clone(),
                             proton: proton_report.clone(),
@@ -1852,9 +1806,7 @@ fn App() -> Element {
                     stores_view::StoresView {
                         library: library_state,
                         db: db_state,
-                        view,
                         actions: stores_actions,
-                        text_focused,
                     }
                 }
             } else if current_view == View::History {
@@ -1881,13 +1833,11 @@ fn App() -> Element {
                 div {
                     style: "flex:1;min-height:0;overflow-y:auto;",
                     controls::ControlsView {
-                        view,
                         actions: controls_actions,
                         maps: input_maps,
                         remap,
                         pads,
                         reload: map_reload,
-                        text_focused,
                     }
                 }
             } else if current_view == View::Logs {
@@ -1901,9 +1851,6 @@ fn App() -> Element {
                     actions: home_actions,
                     art_state,
                     art_revision,
-                    view,
-                    back: detail_back,
-                    selected_game,
                     notice,
                     board,
                     events,
@@ -1954,9 +1901,7 @@ fn App() -> Element {
                                     choice,
                                     overlay,
                                     &mut overlay_shell,
-                                    view,
-                                    detail_back,
-                                    selected_game,
+                                    session,
                                     notice,
                                     play,
                                 );
@@ -1977,18 +1922,11 @@ fn App() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct LibraryGridProps {
     pub library: Signal<Option<Library>>,
-    pub query: Signal<String>,
     /// The app's one input pump posts this screen's actions here.
     pub actions: focus::ActionChannel,
     pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
     pub art_revision: Signal<u64>,
     pub board: Signal<Downloads>,
-    pub view: Signal<View>,
-    /// Where the detail page's Back returns to; the grid records itself here
-    /// before opening a game, so a page opened from the console home still
-    /// returns to the home.
-    pub back: Signal<View>,
-    pub selected_game: Signal<Option<GameId>>,
     pub notice: Signal<String>,
     pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
     pub db: Signal<Option<pitagames_db::Db>>,
@@ -2012,15 +1950,12 @@ struct LibraryGridProps {
 #[allow(non_snake_case)]
 fn LibraryGrid(props: LibraryGridProps) -> Element {
     let library = props.library;
-    let query = props.query;
     let art_state = props.art_state;
     let art_revision = props.art_revision;
     let board = props.board;
-    // Signal setters need `&mut`; signals are Copy, so rebind locally and the
-    // `move` closures below each get their own mutable copy.
-    let mut view = props.view;
-    let mut back = props.back;
-    let mut selected_game = props.selected_game;
+    // The session handle owns navigation (ADR-0027): the grid reads the filter
+    // and opens a card through it instead of five separate props.
+    let mut session = crate::context::use_session();
     let notice = props.notice;
     let events = props.events;
     let db = props.db;
@@ -2063,7 +1998,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         let scroller = Rc::clone(&action_scroller);
         async move {
             while let Some(action) = channel.next().await {
-                if view() != View::Library {
+                if session.read().view() != View::Library {
                     continue;
                 }
                 // While the sheet is open it owns the keys: the typed text is
@@ -2073,7 +2008,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                     let press = osk.write().handle(action);
                     if press == pitagames_input::OskPress::Submit {
                         let text = osk.read().text().to_string();
-                        commit_search(query, screen_focus, osk_open, text);
+                        commit_search(session, screen_focus, osk_open, text);
                     } else if press == pitagames_input::OskPress::Cancel {
                         osk_open.set(false);
                     }
@@ -2083,7 +2018,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                 // with the current filter so editing never starts from nothing.
                 if action == pitagames_input::Action::Search {
                     osk.set(pitagames_input::OnScreenKeyboard::with_text(
-                        query.read().clone(),
+                        session.read().query(),
                     ));
                     osk_open.set(true);
                     continue;
@@ -2091,10 +2026,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                 perform_action(
                     action,
                     library,
-                    query,
-                    view,
-                    back,
-                    selected_game,
+                    session,
                     screen_focus,
                     viewport_width,
                     viewport_height,
@@ -2115,7 +2047,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         };
     };
 
-    let needle = query.read().to_string();
+    let needle = session.read().query();
     let matches: Vec<&library::GameEntry> = state.filtered(&needle);
     let geometry = grid::GridGeometry::for_width(viewport_width());
     let window = grid::window(
@@ -2294,9 +2226,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                         key: "{card_key}",
                                         onclick: move |_| {
                                             screen_focus.set(Some(card_index));
-                                            selected_game.set(Some(open_id.clone()));
-                                            back.set(View::Library);
-                                            view.set(View::Detail);
+                                            session.write().open_detail(open_id.clone(), View::Library);
                                         },
                                         style: "display:flex;flex-direction:column;gap:6px;padding:14px;box-sizing:border-box;height:{card_height}px;overflow:hidden;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
 
@@ -2347,7 +2277,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                         // page; the buttons only do their own
                                                         // action.
                                                         event.stop_propagation();
-                                                        start_play(
+                                                        launch_start::start_play(
                                                             &play_game,
                                                             playtime,
                                                             play,
@@ -2374,7 +2304,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                         // page; the buttons only do their own
                                                         // action.
                                                         event.stop_propagation();
-                                                        start_install(
+                                                        launch_start::start_install(
                                                             &install_game,
                                                             &install_title,
                                                             installs,
@@ -2383,7 +2313,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                             board,
                                                             &install_libraries,
                                                             notice,
-                                                            view,
+                                                            session,
                                                         );
                                                     },
                                                     style: button_style(install_enabled, "#243024", "#d8e8d0"),
@@ -2416,7 +2346,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
             osk::OskSheet {
                 title: "Search your library".to_string(),
                 keyboard: osk,
-                on_done: move |text| commit_search(query, screen_focus, osk_open, text),
+                on_done: move |text| commit_search(session, screen_focus, osk_open, text),
                 on_cancel: move |_| osk_open.set(false),
             }
         }
@@ -2430,12 +2360,12 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
 /// states. The focused card is cleared because the new filter may not contain
 /// it; the next navigation re-enters at the first match.
 fn commit_search(
-    mut query: Signal<String>,
+    mut session: Signal<crate::session::Session>,
     screen_focus: focus::ScreenFocus,
     mut osk_open: Signal<bool>,
     text: String,
 ) {
-    query.set(text);
+    session.write().set_query(text);
     screen_focus.set(None);
     osk_open.set(false);
 }
@@ -2452,10 +2382,7 @@ fn commit_search(
 fn perform_action(
     action: pitagames_input::Action,
     library: Signal<Option<Library>>,
-    mut query: Signal<String>,
-    mut view: Signal<View>,
-    mut back: Signal<View>,
-    mut selected_game: Signal<Option<GameId>>,
+    mut session: Signal<crate::session::Session>,
     screen_focus: focus::ScreenFocus,
     viewport_width: Signal<f64>,
     viewport_height: Signal<f64>,
@@ -2465,8 +2392,8 @@ fn perform_action(
     // Back on the library clears the search before it leaves the screen; the
     // grid is the root view, so there is nowhere else to go.
     if action == pitagames_input::Action::Back {
-        if !query.read().is_empty() {
-            query.set(String::new());
+        if !session.read().query().is_empty() {
+            session.write().set_query(String::new());
         }
         return;
     }
@@ -2476,7 +2403,7 @@ fn perform_action(
         let Some(state) = guard.as_ref() else {
             return;
         };
-        let needle = query.read().to_string();
+        let needle = session.read().query();
         let columns = grid::GridGeometry::for_width(viewport_width()).columns;
         (state.filtered(&needle).len(), columns)
     };
@@ -2517,7 +2444,7 @@ fn perform_action(
         let open = {
             let guard = library.read();
             guard.as_ref().and_then(|state| {
-                let needle = query.read().to_string();
+                let needle = session.read().query();
                 let matches = state.filtered(&needle);
                 screen_focus
                     .index()
@@ -2526,9 +2453,7 @@ fn perform_action(
             })
         };
         if let Some(id) = open {
-            selected_game.set(Some(id));
-            back.set(View::Library);
-            view.set(View::Detail);
+            session.write().open_detail(id, View::Library);
         }
     }
 }
@@ -2575,13 +2500,17 @@ fn end_handoff(
 ///
 /// While the "game ended — press Guide" badge is on screen, Guide means "take me
 /// back", not "switch shells", so the first press clears the badge instead.
-fn guide_action(shell: &mut shell::ShellState, view: Signal<View>, mut handoff: Signal<Handoff>) {
+fn guide_action(
+    shell: &mut shell::ShellState,
+    session: Signal<crate::session::Session>,
+    mut handoff: Signal<Handoff>,
+) {
     let showing = handoff.read().badge().is_some();
     if showing {
         handoff.write().dismiss();
         return;
     }
-    toggle_shell(shell, view);
+    toggle_shell(shell, session);
 }
 
 /// Toggle the shell and land the player on the shell's home screen.
@@ -2590,32 +2519,31 @@ fn guide_action(shell: &mut shell::ShellState, view: Signal<View>, mut handoff: 
 /// library grid. A screen other than the home is left alone when going back to
 /// the desktop, so a pointer user who opened Settings and pressed `F11` twice
 /// is not thrown out of it.
-fn toggle_shell(shell: &mut shell::ShellState, view: Signal<View>) {
-    let mut view = view;
+fn toggle_shell(shell: &mut shell::ShellState, mut session: Signal<crate::session::Session>) {
     shell.toggle();
     if shell.shell().is_console() {
-        view.set(View::Home);
-    } else if view() == View::Home {
-        view.set(View::Library);
+        session.write().set_view(View::Home);
+    } else if session.read().view() == View::Home {
+        session.write().set_view(View::Library);
     }
 }
 
 /// The game the overlay is about: the running one, else the open detail page's.
-fn current_game_id(play: Signal<Play>, selected_game: Signal<Option<GameId>>) -> Option<GameId> {
+fn current_game_id(play: Signal<Play>, session: Signal<crate::session::Session>) -> Option<GameId> {
     play.read()
         .running()
         .map(|running| running.id.clone())
-        .or(selected_game())
+        .or(session.read().selected())
 }
 
 /// Build the overlay's context from the running (or opened) game.
 fn overlay_context(
     shell: pitagames_core::ui::Shell,
     library: Signal<Option<Library>>,
-    selected_game: Signal<Option<GameId>>,
+    session: Signal<crate::session::Session>,
     play: Signal<Play>,
 ) -> OverlayContext {
-    let game = current_game_id(play, selected_game).and_then(|id| {
+    let game = current_game_id(play, session).and_then(|id| {
         let guard = library.read();
         let entry = guard
             .as_ref()?
@@ -2642,10 +2570,10 @@ fn open_overlay(
     mut overlay: Signal<Option<Overlay>>,
     shell: &shell::ShellState,
     library: Signal<Option<Library>>,
-    selected_game: Signal<Option<GameId>>,
+    session: Signal<crate::session::Session>,
     play: Signal<Play>,
 ) {
-    let context = overlay_context(shell.shell(), library, selected_game, play);
+    let context = overlay_context(shell.shell(), library, session, play);
     overlay.set(Some(Overlay::build(&context)));
 }
 
@@ -2659,9 +2587,7 @@ fn apply_overlay(
     action: pitagames_input::Action,
     mut overlay: Signal<Option<Overlay>>,
     shell: &mut shell::ShellState,
-    view: Signal<View>,
-    back: Signal<View>,
-    selected_game: Signal<Option<GameId>>,
+    session: Signal<crate::session::Session>,
     notice: Signal<String>,
     play: Signal<Play>,
 ) {
@@ -2692,16 +2618,7 @@ fn apply_overlay(
         // A disabled row (a power placeholder): keep the menu open.
         return;
     };
-    apply_overlay_choice(
-        choice,
-        overlay,
-        shell,
-        view,
-        back,
-        selected_game,
-        notice,
-        play,
-    );
+    apply_overlay_choice(choice, overlay, shell, session, notice, play);
 }
 
 /// Perform an overlay choice, whether a controller or a pointer picked it.
@@ -2710,9 +2627,7 @@ fn apply_overlay_choice(
     choice: OverlayChoice,
     mut overlay: Signal<Option<Overlay>>,
     shell: &mut shell::ShellState,
-    mut view: Signal<View>,
-    mut back: Signal<View>,
-    mut selected_game: Signal<Option<GameId>>,
+    mut session: Signal<crate::session::Session>,
     mut notice: Signal<String>,
     play: Signal<Play>,
 ) {
@@ -2721,22 +2636,21 @@ fn apply_overlay_choice(
     match choice {
         OverlayChoice::Close => {}
         OverlayChoice::Details => {
-            if let Some(id) = current_game_id(play, selected_game) {
+            if let Some(id) = current_game_id(play, session) {
                 // Back returns to whatever the overlay was opened over.
-                back.set(view());
-                selected_game.set(Some(id));
-                view.set(View::Detail);
+                let from = session.read().view();
+                session.write().open_detail(id, from);
             }
         }
         OverlayChoice::StorePage => {
-            if let Some(id) = current_game_id(play, selected_game)
+            if let Some(id) = current_game_id(play, session)
                 && id.store == Store::Steam
                 && let Err(error) = library::spawn_store_page(&id.store_id)
             {
                 notice.set(format!("Could not open the Steam store page: {error}"));
             }
         }
-        OverlayChoice::ToggleShell => toggle_shell(shell, view),
+        OverlayChoice::ToggleShell => toggle_shell(shell, session),
     }
 }
 
@@ -2775,7 +2689,7 @@ fn overlay_status(
 #[allow(clippy::too_many_arguments)]
 fn dispatch_action(
     action: pitagames_input::Action,
-    mut view: Signal<View>,
+    mut session: Signal<crate::session::Session>,
     home: &focus::ActionChannel,
     library: &focus::ActionChannel,
     downloads: &focus::ActionChannel,
@@ -2783,7 +2697,10 @@ fn dispatch_action(
     detail: &focus::ActionChannel,
     controls: &focus::ActionChannel,
 ) {
-    let channel = match view() {
+    // Read the current view first: the match scrutinee's guard would live for
+    // the whole match and clash with the `set_view` in the fallback arm.
+    let current = session.read().view();
+    let channel = match current {
         View::Home => home,
         View::Library => library,
         View::Downloads => downloads,
@@ -2794,7 +2711,7 @@ fn dispatch_action(
             // These screens have no graph yet; Back still leaves them so the
             // keyboard and a pad cannot trap the user.
             if action == pitagames_input::Action::Back {
-                view.set(View::Library);
+                session.write().set_view(View::Library);
             }
             return;
         }
@@ -2813,11 +2730,11 @@ fn handle_downloads_action(
     focus: focus::ScreenFocus,
     mut installs: Signal<Installs>,
     install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    mut view: Signal<View>,
+    mut session: Signal<crate::session::Session>,
     notice: Signal<String>,
 ) {
     if action == pitagames_input::Action::Back {
-        view.set(View::Library);
+        session.write().set_view(View::Library);
         return;
     }
 
@@ -2887,7 +2804,7 @@ fn handle_downloads_action(
     };
     if retry {
         if installs.write().retry(row_index) {
-            pump_installs(installs, install_events, notice);
+            launch_start::pump_installs(installs, install_events, notice);
         }
     } else {
         installs.write().remove(row_index);
@@ -2919,171 +2836,6 @@ fn button_style(enabled: bool, background: &str, color: &str) -> String {
     } else {
         "flex:1;padding:8px 0;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;"
             .to_string()
-    }
-}
-
-/// Start a game from a card, the home hero or the detail page.
-///
-/// One function so the grid's Play button, the home hero's Play and a
-/// controller's `Confirm` cannot drift: a Steam row asks Steam to launch itself
-/// (and records the playtime Steam will not), every other store starts the
-/// supervised hand-off. `notice` doubles as the error line the caller shows.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn start_play(
-    game: &Game,
-    playtime: Duration,
-    mut play: Signal<Play>,
-    play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
-    mut notice: Signal<String>,
-    db: Option<pitagames_db::Db>,
-) {
-    notice.set(String::new());
-
-    if game.id.store != Store::Steam {
-        let Some(sender) = play_events.read().clone() else {
-            notice.set("The launcher is still starting; try again in a moment.".to_string());
-            return;
-        };
-        if let Err(message) = play.write().begin(game) {
-            notice.set(message);
-            return;
-        }
-        play::spawn(game.clone(), sender);
-        return;
-    }
-
-    if let Err(error) = library::spawn_steam(&game.id.store_id) {
-        notice.set(format!(
-            "Could not ask Steam to run appid {}: {error}",
-            game.id.store_id
-        ));
-        return;
-    }
-    let Some(db) = db else {
-        return;
-    };
-    let id = game.id.clone();
-    spawn(async move {
-        if let Err(message) = persist::record_launch(&db, &id, playtime).await {
-            notice.set(message);
-        }
-    });
-}
-
-/// Install (or update) a game from a card or the home hero.
-///
-/// Steam installs through its own client and the board follows the manifest;
-/// the CLI stores run their own client on the serial queue. The two paths also
-/// live in the grid's card button, so both go through this one function.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn start_install(
-    id: &GameId,
-    title: &str,
-    mut installs: Signal<Installs>,
-    install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    events: Signal<Option<UnboundedSender<DownloadEvent>>>,
-    board: Signal<Downloads>,
-    libraries: &[PathBuf],
-    mut notice: Signal<String>,
-    mut view: Signal<View>,
-) {
-    notice.set(String::new());
-
-    if id.store != Store::Steam {
-        match pitagames_stores::installer::plan(id, title) {
-            Ok(plan) => {
-                if let Err(error) = installs.write().enqueue(plan.job()) {
-                    notice.set(error.to_string());
-                    return;
-                }
-                pump_installs(installs, install_events, notice);
-                view.set(View::Downloads);
-            }
-            Err(error) => notice.set(error.to_string()),
-        }
-        return;
-    }
-
-    if let Err(error) = library::spawn_install(&id.store_id) {
-        notice.set(format!(
-            "Could not ask Steam to install appid {}: {error}",
-            id.store_id
-        ));
-        return;
-    }
-    match events.read().clone() {
-        Some(sender) => {
-            start_download(board, &sender, libraries, &id.store_id, title);
-            view.set(View::Downloads);
-        }
-        None => notice.set("Downloads are not ready yet; try again in a moment.".to_string()),
-    }
-}
-
-/// Track an install: register the row, then start the polling thread.
-///
-/// Returns `false` when the appid is already being tracked, so a double click
-/// does not spawn a second thread.
-fn start_download(
-    mut board: Signal<Downloads>,
-    events: &UnboundedSender<DownloadEvent>,
-    libraries: &[PathBuf],
-    app_id: &str,
-    title: &str,
-) -> bool {
-    if !board.write().start(app_id, title) {
-        return false;
-    }
-
-    let sender = events.clone();
-    downloads::track(app_id, libraries, move |event| {
-        sender.unbounded_send(event).is_ok()
-    });
-
-    true
-}
-
-/// Start the next queued CLI-store install, if any, on a worker thread.
-///
-/// The queue is serial: `start_next` refuses while a job is running, so this
-/// only ever hands one job to a worker. A job the disk pre-check refused is
-/// already `Failed` (and its row says why), so the loop keeps looking for one
-/// it can start.
-fn pump_installs(
-    mut installs: Signal<Installs>,
-    install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    mut notice: Signal<String>,
-) {
-    let Some(sender) = (*install_events.read()).clone() else {
-        return;
-    };
-
-    loop {
-        // The write guard must not outlive the call: `start_next` takes it, and
-        // the `Started` arm reads the job back through a second borrow.
-        let outcome = installs.write().start_next();
-        match outcome {
-            StartOutcome::Started { index } => {
-                let job = installs.read().job(index).cloned();
-                // The token is registered before the thread starts, so a Cancel
-                // click during the CLI's startup still reaches it.
-                let control = installs.write().control(index);
-                if let (Some(job), Some(control)) = (job, control) {
-                    store_installs::spawn(job, sender.clone(), control);
-                }
-                return;
-            }
-            StartOutcome::Skipped {
-                available,
-                required,
-                ..
-            } => notice.set(format!(
-                "Not enough free space for one queued install: {} needed, {} available.",
-                format::human_bytes(required),
-                format::human_bytes(available)
-            )),
-            StartOutcome::Busy | StartOutcome::Empty => return,
-        }
     }
 }
 

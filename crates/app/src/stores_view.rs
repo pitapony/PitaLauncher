@@ -132,12 +132,8 @@ pub struct StoresViewProps {
     pub library: Signal<Option<Library>>,
     /// Where the synced rows are written.
     pub db: Signal<Option<pitagames_db::Db>>,
-    /// The app's current view; Back leaves the Stores screen.
-    pub view: Signal<View>,
     /// The app's one input pump posts this screen's actions here.
     pub actions: ActionChannel,
-    /// True while a text field owns the keyboard; the sign-in terminal sets it.
-    pub text_focused: Signal<bool>,
 }
 
 /// The Stores screen.
@@ -155,9 +151,8 @@ pub fn StoresView(props: StoresViewProps) -> Element {
     let mut auth_inputs = use_signal(|| None::<AuthInputs>);
     let mut auth_text = use_signal(String::new);
 
-    let mut view = props.view;
+    let mut session = crate::context::use_session();
     let actions = props.actions;
-    let mut text_focused = props.text_focused;
     let screen_focus = focus::use_focus();
 
     let probes = use_hook(Channel::<ProbeReply>::new);
@@ -293,7 +288,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
         let syncs = action_syncs.clone();
         async move {
             while let Some(action) = channel.next().await {
-                if view() != View::Stores {
+                if session.read().view() != View::Stores {
                     continue;
                 }
                 let modal_open = auth_state.read().is_some();
@@ -302,7 +297,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                     let count = if running { 2 } else { 1 };
                     match action {
                         Action::Back => {
-                            text_focused.set(false);
+                            session.write().set_text_focused(false);
                             cancel_or_close_auth(auth_state, auth_inputs, auth_text);
                         }
                         action if action.is_navigation() => {
@@ -310,7 +305,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         }
                         Action::Confirm => match screen_focus.index() {
                             Some(0) => {
-                                text_focused.set(false);
+                                session.write().set_text_focused(false);
                                 cancel_or_close_auth(auth_state, auth_inputs, auth_text);
                             }
                             Some(1) if running => submit_auth_line(auth_inputs, auth_text),
@@ -324,7 +319,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                 let reports = (*rows.read()).clone().unwrap_or_default();
                 let count = 3 + reports.len();
                 match action {
-                    Action::Back => view.set(View::Library),
+                    Action::Back => session.write().set_view(View::Library),
                     action if action.is_navigation() => {
                         screen_focus.move_focus(action, count, 1);
                     }
@@ -495,7 +490,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                             inputs.cancel();
                                         }
                                     } else {
-                                        text_focused.set(false);
+                                        session.write().set_text_focused(false);
                                         auth_inputs.set(None);
                                         auth_state.set(None);
                                         auth_text.set(String::new());
@@ -533,8 +528,8 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                     placeholder: "{placeholder}",
                                     value: "{typed}",
                                     oninput: move |event| auth_text.set(event.value()),
-                                    onfocus: move |_| text_focused.set(true),
-                                    onblur: move |_| text_focused.set(false),
+                                    onfocus: move |_| session.write().set_text_focused(true),
+                                    onblur: move |_| session.write().set_text_focused(false),
                                     onkeydown: move |event| {
                                         if event.key() != Key::Enter {
                                             return;

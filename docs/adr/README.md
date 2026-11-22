@@ -46,6 +46,7 @@ anything not covered here.
 | [0024](0024-run-upstream-installers-never-redistribute.md) | Run upstream installers; never redistribute artifacts | Accepted |
 | [0025](0025-compat-db-and-anticheat-are-read-only-data.md) | Compat DB and anti-cheat are read-only curated data | Accepted + Proposed |
 | [0026](0026-open-questions.md) | Open questions | Proposed |
+| [0027](0027-app-shell-session-model.md) | The app shell session model and the screen seam | Accepted |
 
 ## See also
 
