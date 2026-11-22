@@ -23,19 +23,19 @@ use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::stream::{self, StreamExt};
-use pitagames_core::{Game, GameId, Store};
+use pitagames_core::{GameId, Store};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_stores::queue::{InstallJob, JobState};
 use time::OffsetDateTime;
 
 use downloads::{DownloadEvent, Downloads};
-use handoff::{Handoff, WindowAction};
+use handoff::Handoff;
 use library::{Library, OWNED_METADATA_PER_RUN};
 use overlay::{Overlay, OverlayChoice, OverlayContext, OverlayGame};
 use play::{Play, PlayEvent};
 use steam_account::Account;
-use store_installs::{InstallEvent, InstallOutcome, Installs};
+use store_installs::{InstallEvent, Installs};
 
 mod account;
 mod activation;
@@ -67,6 +67,7 @@ mod overlay;
 mod overlay_view;
 mod persist;
 mod play;
+mod pumps;
 mod runtime;
 mod safe_mode;
 mod session;
@@ -315,7 +316,7 @@ fn App() -> Element {
     let mut play_events = use_signal(|| None::<UnboundedSender<PlayEvent>>);
     // Bumped whenever a session is written to the launch history, so the detail
     // page's card and the History screen reload without a restart.
-    let mut history_revision = use_signal(|| 0u64);
+    let history_revision = use_signal(|| 0u64);
     // The launch hand-off: the console shell hides its window while a supervised
     // non-Steam game runs and comes back when it ends. `handoff_deadline` is
     // when the return trip stops waiting for focus and shows the fallback badge
@@ -341,20 +342,9 @@ fn App() -> Element {
     // only safe there). With no socket the receiver is `None` and the future
     // returns immediately.
     let requests = use_hook(activation::Requests::take);
-    use_future(move || {
-        let requests = requests.clone();
-        async move {
-            let Some(requests) = requests else {
-                return;
-            };
-            while let Some(request) = requests.next().await {
-                if request == pitagames_core::activation::Activation::Focus {
-                    activation::raise_window();
-                    eprintln!("[pitagames] raised the window for a second launch");
-                }
-            }
-        }
-    });
+    // A second launch asks this instance to come to the front; the pump
+    // lives with the other drains.
+    pumps::activation_requests(requests);
 
     // The CLI-store install queue's channel: one future owns the receiver, and
     // the grid holds a sender once the window is up.
@@ -773,57 +763,27 @@ fn App() -> Element {
 
     // The Downloads screen's action drain. Its body is inline in `App`, so its
     // focus graph is too; the future only runs while that view is showing.
-    use_future(move || {
-        let channel = downloads_actions.clone();
-        async move {
-            while let Some(action) = channel.next().await {
-                if session.read().view() != View::Downloads {
-                    continue;
-                }
-                handle_downloads_action(
-                    action,
-                    downloads_focus,
-                    installs,
-                    install_events,
-                    session,
-                    notice,
-                );
-            }
-        }
-    });
+    pumps::downloads_actions(
+        downloads_actions.clone(),
+        downloads_focus,
+        installs,
+        install_events,
+        session,
+        notice,
+    );
 
     // Drive the install queue: fold each worker report in, flip the row a
     // finished install turned into a real directory, and hand the next queued
     // job to a thread. The queue is serial by design, so this is the only place
     // that starts work.
-    let install_drain = install_channel.clone();
-    use_future(move || {
-        let channel = install_drain.clone();
-        async move {
-            while let Some(event) = channel.next().await {
-                let finished = match &event {
-                    InstallEvent::Finished { id, outcome } => Some((id.clone(), outcome.clone())),
-                    InstallEvent::Progress { .. } => None,
-                };
-
-                installs.write().apply(&event);
-
-                if let Some((id, outcome)) = finished {
-                    let job = installs.read().job_by_id(&id).cloned();
-                    match (outcome, job) {
-                        (InstallOutcome::Done, Some(job)) => {
-                            record_store_install(job, library_state, db_state, notice)
-                        }
-                        (InstallOutcome::Failed(message), _) => notice.set(message),
-                        // A cancelled run leaves the row `cancelled`; nothing to
-                        // record and nothing to complain about.
-                        (InstallOutcome::Done | InstallOutcome::Cancelled, _) => {}
-                    }
-                    launch_start::pump_installs(installs, install_events, notice);
-                }
-            }
-        }
-    });
+    pumps::install_events(
+        install_channel.clone(),
+        installs,
+        install_events,
+        library_state,
+        db_state,
+        notice,
+    );
 
     // A finished game writes its session into the row (playtime, last played),
     // appends it to the launch history, and moves the header strip from
@@ -831,109 +791,17 @@ fn App() -> Element {
     // event loop. A *start* and an *end* also drive the launch hand-off: the
     // console shell hides its window while a supervised game runs and brings it
     // back when the game ends (`handoff`).
-    let play_drain = play_channel.clone();
-    let play_shell = shell_state.clone();
-    let play_handoff = handoff;
-    let play_deadline = Rc::clone(&handoff_deadline);
-    use_future(move || {
-        let channel = play_drain.clone();
-        let mut shell = play_shell.clone();
-        let play_handoff = play_handoff;
-        let play_deadline = Rc::clone(&play_deadline);
-        async move {
-            while let Some(event) = channel.next().await {
-                // The session has to be read before `apply` frees the slot: it
-                // carries the start time and the launch shape the history row
-                // needs, and `Finished` deliberately repeats neither.
-                let session = play.read().running().cloned();
-                play.write().apply(&event);
-
-                match event {
-                    PlayEvent::Started { id, .. } => {
-                        // Only the slot holder may move the window; a stale
-                        // `Started` (another launch already began) is ignored.
-                        if session.as_ref().is_some_and(|running| running.id == id) {
-                            // The overlay is the launcher's; a game owns the
-                            // screen now, so close it before the window steps
-                            // aside.
-                            overlay.set(None);
-                            begin_handoff(play_handoff, &mut shell, &id, &play_deadline);
-                        }
-                    }
-                    PlayEvent::Finished { id, title, outcome } => {
-                        // A report for a game that no longer holds the slot is
-                        // stale; another launch has already begun, so the slot
-                        // is not ours.
-                        let Some(session) = session.filter(|running| running.id == id) else {
-                            continue;
-                        };
-
-                        // Bring the window back *before* the SQLite writes
-                        // below, so a slow database never delays the return trip.
-                        let summary = play
-                            .read()
-                            .last()
-                            .map(|last| last.summary.clone())
-                            .unwrap_or_default();
-                        end_handoff(play_handoff, &title, &summary, &play_deadline);
-
-                        // History covers failures too: a launch that never
-                        // started has no outcome, and "no Proton build" is the
-                        // row worth keeping.
-                        if let Some(db) = db_state.read().clone() {
-                            let record = session.record(&outcome, OffsetDateTime::now_utc());
-                            history_revision.set(history_revision() + 1);
-                            spawn(async move {
-                                if let Err(error) =
-                                    persist::record_launch_session(&db, &record).await
-                                {
-                                    eprintln!("[pitagames] {error}");
-                                }
-                            });
-                        }
-
-                        let Ok(outcome) = outcome else {
-                            continue;
-                        };
-
-                        // Playtime accumulates: a non-Steam game's number is the
-                        // sum of its sessions, since no store counts it for us.
-                        let now = OffsetDateTime::now_utc();
-                        let total = {
-                            let mut guard = library_state.write();
-                            match guard.as_mut() {
-                                Some(library) => {
-                                    let previous = library
-                                        .games
-                                        .iter()
-                                        .find(|entry| entry.game.id == id)
-                                        .map(|entry| entry.playtime())
-                                        .unwrap_or_default();
-                                    let total = previous + outcome.duration;
-                                    let mut row = Game::new(id.clone(), title);
-                                    row.playtime = total;
-                                    row.last_played = Some(now);
-                                    library.apply_stored(&[row]);
-                                    total
-                                }
-                                None => outcome.duration,
-                            }
-                        };
-
-                        if let Some(db) = db_state.read().clone() {
-                            let id = id.clone();
-                            spawn(async move {
-                                if let Err(error) = persist::record_playtime(&db, &id, total).await
-                                {
-                                    eprintln!("[pitagames] {error}");
-                                }
-                            });
-                        }
-                    }
-                }
-            }
-        }
-    });
+    pumps::play_events(
+        play_channel.clone(),
+        shell_state.clone(),
+        handoff,
+        Rc::clone(&handoff_deadline),
+        play,
+        overlay,
+        library_state,
+        db_state,
+        history_revision,
+    );
 
     // The tray icon is optional: a missing status-notifier host costs the icon,
     // never the window. The menu handler is registered unconditionally because
@@ -2458,44 +2326,6 @@ fn perform_action(
     }
 }
 
-/// Apply the console hand-off when a supervised game starts.
-///
-/// In the console shell the window hides while the game runs; in the desktop
-/// shell it stays, so a pointer user can keep browsing. The window call is
-/// best-effort (a compositor may ignore it) and a failed hide costs nothing.
-fn begin_handoff(
-    mut handoff: Signal<Handoff>,
-    shell: &mut shell::ShellState,
-    id: &GameId,
-    deadline: &Rc<Cell<Option<Instant>>>,
-) {
-    let action = handoff.write().started(id, shell.shell().is_console());
-    if action == WindowAction::Hide {
-        shell::hide_window();
-        deadline.set(None);
-        eprintln!("[pitagames] stepping aside while {} runs", id.store_id);
-    }
-}
-
-/// Apply the console hand-off when a supervised game ends.
-///
-/// The return trip arms the focus deadline; if no focus event arrives in time,
-/// the timer in `App` promotes the fallback badge. `title`/`summary` are the
-/// verdict the badge carries.
-fn end_handoff(
-    mut handoff: Signal<Handoff>,
-    title: &str,
-    summary: &str,
-    deadline: &Rc<Cell<Option<Instant>>>,
-) {
-    let action = handoff.write().ended(title, summary);
-    if action == WindowAction::Show {
-        shell::show_and_focus();
-        deadline.set(Some(Instant::now() + handoff::FOCUS_GRACE));
-        eprintln!("[pitagames] {title} ended; asking for focus");
-    }
-}
-
 /// `Guide`'s app-level job: dismiss the hand-off's badge, else toggle the shell.
 ///
 /// While the "game ended — press Guide" badge is on screen, Guide means "take me
@@ -2719,98 +2549,6 @@ fn dispatch_action(
     let _ = channel.send(action);
 }
 
-/// Apply one action to the Downloads screen's inline focus graph.
-///
-/// The cells are the actionable store-install rows: the "Clear finished" row
-/// first when there is one, then each active job (Cancel), then each finished
-/// job (Retry when it failed, Remove otherwise). Steam's own download rows are
-/// informational and stay pointer-only for now.
-fn handle_downloads_action(
-    action: pitagames_input::Action,
-    focus: focus::ScreenFocus,
-    mut installs: Signal<Installs>,
-    install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    mut session: Signal<crate::session::Session>,
-    notice: Signal<String>,
-) {
-    if action == pitagames_input::Action::Back {
-        session.write().set_view(View::Library);
-        return;
-    }
-
-    let (count, clear_cell, active_len, finished_len) = {
-        let snapshot = installs.read();
-        let active_len = snapshot.active().len();
-        let finished_len = snapshot.finished().len();
-        let clear_cell = usize::from(finished_len > 0);
-        (
-            clear_cell + active_len + finished_len,
-            clear_cell,
-            active_len,
-            finished_len,
-        )
-    };
-
-    if action.is_navigation() {
-        focus.move_focus(action, count, 1);
-        return;
-    }
-
-    if action != pitagames_input::Action::Confirm {
-        return;
-    }
-
-    let Some(index) = focus.index() else {
-        return;
-    };
-    if clear_cell == 1 && index == 0 {
-        installs.write().clear_finished();
-        return;
-    }
-
-    let row = index.saturating_sub(clear_cell);
-    if row < active_len {
-        let row_index = {
-            let snapshot = installs.read();
-            snapshot.active().get(row).map(|(index, _)| *index)
-        };
-        if let Some(row_index) = row_index {
-            installs.write().cancel(row_index);
-        }
-        return;
-    }
-
-    let finished_index = row - active_len;
-    if finished_index >= finished_len {
-        return;
-    }
-    let row_index = {
-        let snapshot = installs.read();
-        snapshot
-            .finished()
-            .get(finished_index)
-            .map(|(index, _)| *index)
-    };
-    let Some(row_index) = row_index else {
-        return;
-    };
-    let retry = {
-        let snapshot = installs.read();
-        snapshot
-            .finished()
-            .get(finished_index)
-            .map(|(_, job)| matches!(job.state, JobState::Failed { .. } | JobState::Cancelled))
-            .unwrap_or(false)
-    };
-    if retry {
-        if installs.write().retry(row_index) {
-            launch_start::pump_installs(installs, install_events, notice);
-        }
-    } else {
-        installs.write().remove(row_index);
-    }
-}
-
 fn nav_style(active: bool) -> String {
     // The type scales with the shell's `--ui-scale`, so the console shell's
     // navigation reads from a couch without every screen's sizes being revisited.
@@ -2837,33 +2575,6 @@ fn button_style(enabled: bool, background: &str, color: &str) -> String {
         "flex:1;padding:8px 0;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;"
             .to_string()
     }
-}
-
-/// A store install finished: flip the row and remember it.
-///
-/// The store CLI created the directory, so the row is installed from now on;
-/// the write is what keeps it installed after a restart without another sync.
-fn record_store_install(
-    job: InstallJob,
-    mut library_state: Signal<Option<Library>>,
-    db_state: Signal<Option<pitagames_db::Db>>,
-    mut notice: Signal<String>,
-) {
-    if let Some(library) = library_state.write().as_mut() {
-        library.apply_install(&job.id, &job.target);
-    }
-
-    let Some(db) = (*db_state.read()).clone() else {
-        return;
-    };
-    let mut game = Game::new(job.id, job.title);
-    game.installed = true;
-    game.install_dir = Some(job.target);
-    spawn(async move {
-        if let Err(error) = persist::record_install(&db, &game).await {
-            notice.set(error);
-        }
-    });
 }
 
 /// The single metadata worker: one client, one rate budget, many batches.
