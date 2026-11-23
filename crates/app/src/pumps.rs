@@ -12,22 +12,26 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use dioxus::prelude::*;
-use futures_channel::mpsc::UnboundedSender;
+use futures_channel::mpsc::{UnboundedSender, unbounded};
+use futures_util::StreamExt as _;
 use pitagames_core::{Game, GameId};
 use pitagames_input::{Battery, Device, DeviceId, RemapSession};
+use pitagames_metadata::CachePolicy;
 use pitagames_stores::queue::{InstallJob, JobState};
 use time::OffsetDateTime;
 
+use crate::downloads::{DownloadEvent, Downloads};
 use crate::focus;
 use crate::gamepad;
 use crate::handoff;
 use crate::handoff::{Handoff, WindowAction};
 use crate::library::Library;
+use crate::library::OWNED_METADATA_PER_RUN;
 use crate::play::{Play, PlayEvent};
 use crate::session::Session;
 use crate::store_installs;
 use crate::store_installs::{InstallEvent, InstallOutcome, Installs};
-use crate::{View, activation, launch_start, persist, shell};
+use crate::{View, activation, art, launch_start, persist, runtime, shell, steam_account};
 
 /// Come to the front when a second launch asks this instance to.
 pub(crate) fn activation_requests(requests: Option<activation::Requests>) {
@@ -511,6 +515,183 @@ pub(crate) fn gamepad_actions(
                         eprintln!("[pitagames] {message}");
                     }
                 }
+            }
+        }
+    });
+}
+
+/// The startup bootstrap: scan, persist, publish the channels, then keep
+/// draining download events for the window's lifetime.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn bootstrap(
+    channel: store_installs::InstallChannel,
+    play_channel: crate::play::PlayChannel,
+    mut proton_state: Signal<Option<pitagames_platform::proton::DiscoveryReport>>,
+    mut db_state: Signal<Option<pitagames_db::Db>>,
+    mut account_state: Signal<Option<crate::steam_account::Account>>,
+    mut metadata_queue: Signal<Option<crate::MetadataQueue>>,
+    mut art_state: Signal<Option<std::sync::Arc<crate::art::ArtContext>>>,
+    mut events: Signal<Option<UnboundedSender<DownloadEvent>>>,
+    mut install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    mut play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
+    mut library_state: Signal<Option<Library>>,
+    art_revision: Signal<u64>,
+    mut board: Signal<Downloads>,
+) {
+    use_future(move || {
+        let channel = channel.clone();
+        let play_channel = play_channel.clone();
+        async move {
+            let mut library = Library::load();
+            let mut metadata_db = None;
+            let mut owned_stale = false;
+            // Read-only and fast; the detail page needs it as soon as a game opens.
+            proton_state.set(Some(runtime::discover_proton()));
+
+            match persist::open_default().await {
+                Ok(db) => {
+                    let games = library.snapshot_games();
+                    match persist::sync(&db, &games).await {
+                        Ok(stored) => library.apply_stored(&stored),
+                        Err(error) => library.warnings.push(error),
+                    }
+                    match persist::load_metadata(&db).await {
+                        Ok(rows) => library.apply_metadata(&rows),
+                        Err(error) => library.metadata_warnings.push(error),
+                    }
+                    // The owned cache is optional; a read failure is a warning.
+                    match persist::load_owned(&db).await {
+                        Ok((owned, fetched_at)) => {
+                            if let Some(fetched_at) = fetched_at {
+                                let total = owned.len();
+                                library.apply_owned(&owned, total, fetched_at);
+                                owned_stale = steam_account::is_stale(
+                                    Some(fetched_at),
+                                    OffsetDateTime::now_utc(),
+                                );
+                            } else {
+                                owned_stale = true;
+                            }
+                        }
+                        Err(error) => library.metadata_warnings.push(error),
+                    }
+                    // The CLI stores' cached rows (a previous sync or a finished
+                    // install here). They are never scanned, so a store whose CLI
+                    // is missing simply keeps what the cache holds.
+                    match persist::load_store_rows(&db).await {
+                        Ok(rows) => library.apply_store_rows(&rows),
+                        Err(error) => library.metadata_warnings.push(error),
+                    }
+                    metadata_db = Some(db.clone());
+                    db_state.set(Some(db));
+                }
+                Err(error) => library
+                    .warnings
+                    .push(format!("Playtime will not be saved: {error}")),
+            }
+
+            // The key and SteamID need the Steam root for `userdata`, so read them
+            // after the scan; the library renders either way.
+            let account = crate::steam_account::Account::load(library.steam_root.as_deref());
+            let account_ready = account.is_ready();
+            if account.is_configured() {
+                library.owned.pending = owned_stale;
+            }
+            account_state.set(Some(account));
+
+            // Only ask the store for ids the cache cannot answer; this is what the
+            // 200-requests-per-five-minutes budget in `pitagames-metadata` gates.
+            // Installed games are refreshed in full; owned ones are capped per run.
+            let metadata_targets = library.metadata_candidates(
+                CachePolicy::DEFAULT,
+                OffsetDateTime::now_utc(),
+                OWNED_METADATA_PER_RUN,
+            );
+            library.metadata_pending = !metadata_targets.is_empty();
+
+            // Art is decorative: if the cache, server or HTTP client cannot start,
+            // the library still renders with placeholders.
+            let art_context = match art::ArtContext::start().await {
+                Ok(context) => {
+                    art_state.set(Some(context.clone()));
+                    Some(context)
+                }
+                Err(error) => {
+                    library.metadata_warnings.push(error);
+                    None
+                }
+            };
+
+            // Publish the channels before the library: once the grid is on screen,
+            // every button must find a sender.
+            let (sender, mut receiver) = unbounded::<DownloadEvent>();
+            events.set(Some(sender.clone()));
+            install_events.set(Some(channel.sender()));
+            play_events.set(Some(play_channel.sender()));
+
+            // Images for metadata that was already cached need no store request.
+            let art_requests = library.art_requests();
+            let libraries = library.libraries.clone();
+            let in_flight: Vec<(String, String)> = library
+                .in_flight()
+                .iter()
+                .map(|entry| (entry.app_id().to_string(), entry.title().to_string()))
+                .collect();
+            library_state.set(Some(library));
+
+            if let Some(context) = art_context.clone()
+                && !art_requests.is_empty()
+            {
+                spawn(crate::warm_art(context, art_requests, art_revision));
+            }
+
+            // Metadata is fetched after the first paint: a slow or offline store
+            // must never hold up the library. One worker owns the client and the
+            // budget; the owned refresh and later scans enqueue into it.
+            let metadata_db_worker = metadata_db.clone();
+            if let Some(db) = metadata_db_worker {
+                let (metadata_sender, metadata_receiver) = unbounded::<Vec<u32>>();
+                let queue = crate::MetadataQueue {
+                    sender: Some(metadata_sender),
+                    queued: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                };
+                metadata_queue.set(Some(queue.clone()));
+                spawn(crate::metadata_worker(
+                    db,
+                    library_state,
+                    metadata_receiver,
+                    queue.counter(),
+                    art_context.clone(),
+                    art_revision,
+                ));
+                queue.enqueue(metadata_targets);
+            }
+
+            // Refresh the account's owned list after the first paint: one request
+            // for the whole library, only when a key is configured and the cache
+            // has aged out.
+            if account_ready
+                && owned_stale
+                && let Some(account) = account_state.read().clone()
+                && let (Some(key), Some(steam_id)) = (account.key().cloned(), account.steam_id)
+            {
+                let queue = (*metadata_queue.read()).clone();
+                spawn(crate::refresh_owned(
+                    key,
+                    steam_id,
+                    library_state,
+                    metadata_db.clone(),
+                    queue,
+                ));
+            }
+
+            // Steam may already be downloading: follow those without a click.
+            for (app_id, title) in in_flight {
+                launch_start::start_download(board, &sender, &libraries, &app_id, &title);
+            }
+
+            while let Some(event) = receiver.next().await {
+                board.write().apply(&event);
             }
         }
     });
