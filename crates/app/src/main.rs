@@ -332,7 +332,7 @@ fn App() -> Element {
     // has no battery event, so the gamepad worker polls and reports changes.
     let battery_map =
         std::collections::BTreeMap::<pitagames_input::DeviceId, pitagames_input::Battery>::new();
-    let mut batteries = use_signal(move || battery_map);
+    let batteries = use_signal(move || battery_map);
     // The overlay's wall clock; refreshed by the timer below. Local time is read
     // through `overlay::now_local`.
     let clock = use_signal(|| crate::overlay::format_clock(crate::overlay::now_local()));
@@ -383,7 +383,7 @@ fn App() -> Element {
     });
     // The one remap session the Controls screen edits and the input pumps
     // consult. It starts on the keyboard; the screen switches device.
-    let mut remap = use_signal({
+    let remap = use_signal({
         let seed = seed_maps.clone();
         move || {
             Some(pitagames_input::RemapSession::new(
@@ -393,7 +393,7 @@ fn App() -> Element {
         }
     });
     // The pads the worker has named, for the Controls screen's target list.
-    let mut pads = use_signal(Vec::<pitagames_input::Device>::new);
+    let pads = use_signal(Vec::<pitagames_input::Device>::new);
 
     // The last device that produced input, for glyph hints and cursor hiding.
     // The keyboard and gamepad pumps set it; a pointer move counts as the
@@ -422,123 +422,29 @@ fn App() -> Element {
     // into as many event handlers as it needs; a `MapReload` is `Clone` but not
     // `Copy`, and a `Signal` is `Copy`.
     let map_reload = use_signal(move || pad_reload);
-    // The gamepad pump and the keyboard pump are long-lived closures, so each
-    // gets its own clones; the originals stay with the screens that drain them.
-    // An `ActionChannel` is not `Copy`, and `dispatch_action` only borrows.
-    let gamepad_actions = (
-        home_actions.clone(),
-        library_actions.clone(),
-        downloads_actions.clone(),
-        stores_actions.clone(),
-        detail_actions.clone(),
-        controls_actions.clone(),
+    // The pad pump lives with the other drains (`pumps`).
+    pumps::gamepad_actions(
+        pad_channel.clone(),
+        (
+            home_actions.clone(),
+            library_actions.clone(),
+            downloads_actions.clone(),
+            stores_actions.clone(),
+            detail_actions.clone(),
+            controls_actions.clone(),
+        ),
+        shell_state.clone(),
+        pad_active,
+        handoff,
+        overlay,
+        session,
+        remap,
+        pads,
+        batteries,
+        library_state,
+        notice,
+        play,
     );
-    let pad_shell = shell_state.clone();
-    let pad_handoff = handoff;
-    use_future(move || {
-        let channel = pad_channel.clone();
-        let actions = gamepad_actions.clone();
-        let mut shell = pad_shell.clone();
-        let mut pad_active = pad_active;
-        let pad_handoff = pad_handoff;
-        async move {
-            while let Some(event) = channel.next().await {
-                match event {
-                    gamepad::GamepadEvent::Action(action) if action.is_press() => {
-                        // While the hand-off has the window hidden, the game owns
-                        // the pad: a stray press must not move a ring the player
-                        // cannot see or toggle a shell behind the game.
-                        if pad_handoff.read().hidden() {
-                            continue;
-                        }
-                        // Any pad press makes the pad the last device: the hint
-                        // row switches to its glyphs and the cursor may hide.
-                        pad_active.set(true);
-                        // While a remap capture is pending, the pad's actions are
-                        // swallowed so the pressed control can be bound instead
-                        // of navigating; `Back` cancels the capture. The capture
-                        // flag is read into a local so its guard drops before the
-                        // write below.
-                        let capturing = session.read().view() == View::Controls && {
-                            let guard = remap.read();
-                            guard.as_ref().is_some_and(|session| session.is_capturing())
-                        };
-                        if capturing {
-                            if action.action == pitagames_input::Action::Back {
-                                let mut guard = remap.write();
-                                if let Some(session) = guard.as_mut() {
-                                    session.cancel_capture();
-                                }
-                            }
-                            continue;
-                        }
-                        // The overlay is modal: while it is open it owns every
-                        // action, so a direction walks its rows and `Confirm`
-                        // chooses them, never the screen underneath. `Back`,
-                        // `Menu` and `Guide` close it.
-                        if overlay.read().is_some() {
-                            apply_overlay(
-                                action.action,
-                                overlay,
-                                &mut shell,
-                                session,
-                                notice,
-                                play,
-                            );
-                            continue;
-                        }
-                        // `Menu` (the pad's `Start`, the keyboard's `M`) opens the
-                        // console overlay in either shell.
-                        if action.action == pitagames_input::Action::Menu {
-                            open_overlay(overlay, &shell, library_state, session, play);
-                            continue;
-                        }
-                        // `Guide` is the shell's own action, not the screen's:
-                        // it toggles the two shells wherever the player is (or
-                        // dismisses the hand-off's "game ended" badge).
-                        if action.action == pitagames_input::Action::Guide {
-                            guide_action(&mut shell, session, pad_handoff);
-                            continue;
-                        }
-                        dispatch_action(
-                            action.action,
-                            session,
-                            &actions.0,
-                            &actions.1,
-                            &actions.2,
-                            &actions.3,
-                            &actions.4,
-                            &actions.5,
-                        );
-                    }
-                    gamepad::GamepadEvent::Control(binding) => {
-                        // A raw button press is only useful to a pending capture.
-                        if session.read().view() == View::Controls {
-                            let mut guard = remap.write();
-                            if let Some(session) = guard.as_mut()
-                                && session.is_capturing()
-                            {
-                                session.capture_control(binding);
-                            }
-                        }
-                    }
-                    gamepad::GamepadEvent::Device(device) => {
-                        let mut known = pads.write();
-                        if !known.iter().any(|seen| seen.guid == device.guid) {
-                            known.push(device);
-                        }
-                    }
-                    gamepad::GamepadEvent::Battery { device, state } => {
-                        batteries.write().insert(device, state);
-                    }
-                    gamepad::GamepadEvent::Action(_) => {}
-                    gamepad::GamepadEvent::Unavailable(message) => {
-                        eprintln!("[pitagames] {message}");
-                    }
-                }
-            }
-        }
-    });
 
     // Hide the cursor when the pad is the last input and the pointer has been
     // idle for 2 s. The timer polls a plain `Cell`, so a pointer move never
@@ -2330,7 +2236,7 @@ fn perform_action(
 ///
 /// While the "game ended — press Guide" badge is on screen, Guide means "take me
 /// back", not "switch shells", so the first press clears the badge instead.
-fn guide_action(
+pub(crate) fn guide_action(
     shell: &mut shell::ShellState,
     session: Signal<crate::session::Session>,
     mut handoff: Signal<Handoff>,
@@ -2396,7 +2302,7 @@ fn overlay_context(
 ///
 /// `Menu` opens it in either shell, so a desktop pointer that never touches a
 /// pad still has a place for the shell switch and the (v1.1) power rows.
-fn open_overlay(
+pub(crate) fn open_overlay(
     mut overlay: Signal<Option<Overlay>>,
     shell: &shell::ShellState,
     library: Signal<Option<Library>>,
@@ -2413,7 +2319,7 @@ fn open_overlay(
 /// moves its ring, `Confirm` runs the focused row, and `Back`/`Menu`/`Guide`
 /// close it.
 #[allow(clippy::too_many_arguments)]
-fn apply_overlay(
+pub(crate) fn apply_overlay(
     action: pitagames_input::Action,
     mut overlay: Signal<Option<Overlay>>,
     shell: &mut shell::ShellState,
@@ -2517,7 +2423,7 @@ fn overlay_status(
 /// one parameter per screen, which keeps the match readable; the call sites
 /// pass the same tuple shape the two pumps own.
 #[allow(clippy::too_many_arguments)]
-fn dispatch_action(
+pub(crate) fn dispatch_action(
     action: pitagames_input::Action,
     mut session: Signal<crate::session::Session>,
     home: &focus::ActionChannel,

@@ -14,10 +14,12 @@ use std::time::Instant;
 use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 use pitagames_core::{Game, GameId};
+use pitagames_input::{Battery, Device, DeviceId, RemapSession};
 use pitagames_stores::queue::{InstallJob, JobState};
 use time::OffsetDateTime;
 
 use crate::focus;
+use crate::gamepad;
 use crate::handoff;
 use crate::handoff::{Handoff, WindowAction};
 use crate::library::Library;
@@ -380,6 +382,136 @@ fn record_store_install(
     spawn(async move {
         if let Err(error) = persist::record_install(&db, &game).await {
             notice.set(error);
+        }
+    });
+}
+
+/// The gamepad pump's drain: actions, remap captures, devices and battery.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn gamepad_actions(
+    channel: gamepad::GamepadChannel,
+    actions: (
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+    ),
+    pad_shell: shell::ShellState,
+    pad_active: Signal<bool>,
+    pad_handoff: Signal<Handoff>,
+    overlay: Signal<Option<crate::overlay::Overlay>>,
+    session: Signal<Session>,
+    mut remap: Signal<Option<RemapSession>>,
+    mut pads: Signal<Vec<Device>>,
+    mut batteries: Signal<std::collections::BTreeMap<DeviceId, Battery>>,
+    library_state: Signal<Option<Library>>,
+    notice: Signal<String>,
+    play: Signal<Play>,
+) {
+    use_future(move || {
+        let channel = channel.clone();
+        let actions = actions.clone();
+        let mut shell = pad_shell.clone();
+        let mut pad_active = pad_active;
+        let pad_handoff = pad_handoff;
+        async move {
+            while let Some(event) = channel.next().await {
+                match event {
+                    gamepad::GamepadEvent::Action(action) if action.is_press() => {
+                        // While the hand-off has the window hidden, the game owns
+                        // the pad: a stray press must not move a ring the player
+                        // cannot see or toggle a shell behind the game.
+                        if pad_handoff.read().hidden() {
+                            continue;
+                        }
+                        // Any pad press makes the pad the last device: the hint
+                        // row switches to its glyphs and the cursor may hide.
+                        pad_active.set(true);
+                        // While a remap capture is pending, the pad's actions are
+                        // swallowed so the pressed control can be bound instead
+                        // of navigating; `Back` cancels the capture. The capture
+                        // flag is read into a local so its guard drops before the
+                        // write below.
+                        let capturing = session.read().view() == View::Controls && {
+                            let guard = remap.read();
+                            guard.as_ref().is_some_and(|session| session.is_capturing())
+                        };
+                        if capturing {
+                            if action.action == pitagames_input::Action::Back {
+                                let mut guard = remap.write();
+                                if let Some(session) = guard.as_mut() {
+                                    session.cancel_capture();
+                                }
+                            }
+                            continue;
+                        }
+                        // The overlay is modal: while it is open it owns every
+                        // action, so a direction walks its rows and `Confirm`
+                        // chooses them, never the screen underneath. `Back`,
+                        // `Menu` and `Guide` close it.
+                        if overlay.read().is_some() {
+                            crate::apply_overlay(
+                                action.action,
+                                overlay,
+                                &mut shell,
+                                session,
+                                notice,
+                                play,
+                            );
+                            continue;
+                        }
+                        // `Menu` (the pad's `Start`, the keyboard's `M`) opens the
+                        // console overlay in either shell.
+                        if action.action == pitagames_input::Action::Menu {
+                            crate::open_overlay(overlay, &shell, library_state, session, play);
+                            continue;
+                        }
+                        // `Guide` is the shell's own action, not the screen's:
+                        // it toggles the two shells wherever the player is (or
+                        // dismisses the hand-off's "game ended" badge).
+                        if action.action == pitagames_input::Action::Guide {
+                            crate::guide_action(&mut shell, session, pad_handoff);
+                            continue;
+                        }
+                        crate::dispatch_action(
+                            action.action,
+                            session,
+                            &actions.0,
+                            &actions.1,
+                            &actions.2,
+                            &actions.3,
+                            &actions.4,
+                            &actions.5,
+                        );
+                    }
+                    gamepad::GamepadEvent::Control(binding) => {
+                        // A raw button press is only useful to a pending capture.
+                        if session.read().view() == View::Controls {
+                            let mut guard = remap.write();
+                            if let Some(session) = guard.as_mut()
+                                && session.is_capturing()
+                            {
+                                session.capture_control(binding);
+                            }
+                        }
+                    }
+                    gamepad::GamepadEvent::Device(device) => {
+                        let mut known = pads.write();
+                        if !known.iter().any(|seen| seen.guid == device.guid) {
+                            known.push(device);
+                        }
+                    }
+                    gamepad::GamepadEvent::Battery { device, state } => {
+                        batteries.write().insert(device, state);
+                    }
+                    gamepad::GamepadEvent::Action(_) => {}
+                    gamepad::GamepadEvent::Unavailable(message) => {
+                        eprintln!("[pitagames] {message}");
+                    }
+                }
+            }
         }
     });
 }
