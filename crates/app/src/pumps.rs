@@ -9,8 +9,11 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
+use dioxus::desktop::tao::event::ElementState;
+use dioxus::desktop::tao::keyboard::KeyCode;
+use dioxus::desktop::use_wry_event_handler;
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
@@ -694,5 +697,137 @@ pub(crate) fn bootstrap(
                 board.write().apply(&event);
             }
         }
+    });
+}
+
+/// The window key pump: tao key events into the shared action set.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn keyboard(
+    key_actions: (
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+        focus::ActionChannel,
+    ),
+    mut key_shell: shell::ShellState,
+    mut key_pad_active: Signal<bool>,
+    key_handoff: Signal<Handoff>,
+    key_maps: Signal<pitagames_input::InputMaps>,
+    mut key_remap: Signal<Option<RemapSession>>,
+    overlay: Signal<Option<crate::overlay::Overlay>>,
+    session: Signal<Session>,
+    notice: Signal<String>,
+    play: Signal<Play>,
+    library_state: Signal<Option<Library>>,
+) {
+    // GTK/WebKit delivers one Escape as *two* identical `KeyboardInput` presses
+    // (it reaches both the window and the webview), so a raw key that repeats
+    // back-to-back with no other event is ignored. A held key repeats far more
+    // slowly than this window, so normal auto-repeat is untouched; without the
+    // guard a single Back press pops two screens.
+    let last_press = use_hook(|| Rc::new(Cell::new(None::<(KeyCode, Instant)>)));
+    use_wry_event_handler(move |event, _| {
+        let dioxus::desktop::tao::event::Event::WindowEvent {
+            event:
+                dioxus::desktop::tao::event::WindowEvent::KeyboardInput {
+                    event: key_event, ..
+                },
+            ..
+        } = event
+        else {
+            return;
+        };
+        if key_event.state != ElementState::Pressed {
+            return;
+        }
+        let now = Instant::now();
+        if let Some((last, at)) = last_press.get()
+            && last == key_event.physical_key
+            && now.duration_since(at) < Duration::from_millis(50)
+        {
+            return;
+        }
+        last_press.set(Some((key_event.physical_key, now)));
+        // The console hand-off hides the window while a supervised game runs;
+        // the game owns the keyboard too, so a key must not steer a window
+        // nobody can see. (The de-dupe above still runs, so a held Escape
+        // cannot leak into the next screen once the window returns.)
+        if key_handoff.read().hidden() {
+            return;
+        }
+        // Any key press makes the keyboard the last device: the hint row shows
+        // its glyphs and the cursor stays visible.
+        key_pad_active.set(false);
+        let Some(key) = focus::key_from_tao(key_event.physical_key) else {
+            return;
+        };
+        let action = key_maps.peek().keyboard().action_for_key(key);
+        // A pending remap capture takes the key instead of navigating: the next
+        // key pressed is bound to the action being edited, so it must not also
+        // move the ring. `Escape` (the keyboard's Back) cancels the capture. The
+        // capture flag is read into a local so its guard drops before the write.
+        let capturing = session.read().view() == View::Controls && {
+            let guard = key_remap.read();
+            guard.as_ref().is_some_and(|session| session.is_capturing())
+        };
+        if capturing {
+            let cancelling = action == Some(pitagames_input::Action::Back);
+            let mut guard = key_remap.write();
+            if let Some(session) = guard.as_mut() {
+                if cancelling {
+                    session.cancel_capture();
+                } else {
+                    session.capture_control(pitagames_input::Binding::key(key));
+                }
+            }
+            return;
+        }
+        // The overlay is modal: while it is open it owns the keyboard, so an
+        // arrow walks its rows and `Enter` chooses. It is checked before the
+        // text-field yield, so a stray focus cannot half-trap the menu; an
+        // unbound key does nothing.
+        if overlay.read().is_some() {
+            if let Some(action) = action {
+                crate::apply_overlay(action, overlay, &mut key_shell, session, notice, play);
+            }
+            return;
+        }
+        let Some(action) = action else {
+            return;
+        };
+        // A text field owns the arrows and typing; Back still leaves the field
+        // (and its screen) so the keyboard is never trapped in a caret.
+        if session.read().text_focused() && action != pitagames_input::Action::Back {
+            return;
+        }
+        // Movement may repeat while a key is held; Confirm/Back must not.
+        if key_event.repeat && !action.is_navigation() {
+            return;
+        }
+        // `M` opens the console overlay, the keyboard's answer to the pad's
+        // `Start`.
+        if action == pitagames_input::Action::Menu {
+            crate::open_overlay(overlay, &key_shell, library_state, session, play);
+            return;
+        }
+        // `F11` maps to `Guide`: the shell's own action, handled here rather
+        // than by the screen, so it toggles wherever the player is (or dismisses
+        // the hand-off's "game ended" badge).
+        if action == pitagames_input::Action::Guide {
+            crate::guide_action(&mut key_shell, session, key_handoff);
+            return;
+        }
+        crate::dispatch_action(
+            action,
+            session,
+            &key_actions.0,
+            &key_actions.1,
+            &key_actions.2,
+            &key_actions.3,
+            &key_actions.4,
+            &key_actions.5,
+        );
     });
 }

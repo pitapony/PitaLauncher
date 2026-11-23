@@ -15,8 +15,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use dioxus::desktop::tao::event::ElementState;
-use dioxus::desktop::tao::keyboard::KeyCode;
 use dioxus::desktop::use_wry_event_handler;
 use dioxus::html::geometry::PixelsVector2D;
 use dioxus::html::{MountedData, ScrollBehavior};
@@ -539,133 +537,27 @@ fn App() -> Element {
         });
     }
 
-    // Window-level key pump: DOM focus is deliberately not part of navigation,
-    // so the events are read from tao rather than from a focused element. The
-    // handler lives in `App` so one pump serves every screen; the active
-    // screen's action channel does the navigation.
-    let key_actions = (
-        home_actions.clone(),
-        library_actions.clone(),
-        downloads_actions.clone(),
-        stores_actions.clone(),
-        detail_actions.clone(),
-        controls_actions.clone(),
+    // The window key pump lives with the other drains (`pumps`).
+    pumps::keyboard(
+        (
+            home_actions.clone(),
+            library_actions.clone(),
+            downloads_actions.clone(),
+            stores_actions.clone(),
+            detail_actions.clone(),
+            controls_actions.clone(),
+        ),
+        shell_state.clone(),
+        pad_active,
+        handoff,
+        input_maps,
+        remap,
+        overlay,
+        session,
+        notice,
+        play,
+        library_state,
     );
-    let mut key_shell = shell_state.clone();
-    let mut key_pad_active = pad_active;
-    let key_handoff = handoff;
-    // GTK/WebKit delivers one Escape as *two* identical `KeyboardInput`
-    // presses (it reaches both the window and the webview), so a raw key that
-    // repeats back-to-back with no other event is ignored. A held key repeats
-    // far more slowly than this window, so normal auto-repeat is untouched;
-    // without the guard a single Back press pops two screens.
-    let last_press = use_hook(|| Rc::new(Cell::new(None::<(KeyCode, Instant)>)));
-    // The keyboard pump reads the maps signal per event so a remap of
-    // `Enter`/`Escape` (or a shell toggle) takes effect without a restart.
-    let key_maps = input_maps;
-    let mut key_remap = remap;
-    use_wry_event_handler(move |event, _| {
-        let dioxus::desktop::tao::event::Event::WindowEvent {
-            event:
-                dioxus::desktop::tao::event::WindowEvent::KeyboardInput {
-                    event: key_event, ..
-                },
-            ..
-        } = event
-        else {
-            return;
-        };
-        if key_event.state != ElementState::Pressed {
-            return;
-        }
-        let now = Instant::now();
-        if let Some((last, at)) = last_press.get()
-            && last == key_event.physical_key
-            && now.duration_since(at) < Duration::from_millis(50)
-        {
-            return;
-        }
-        last_press.set(Some((key_event.physical_key, now)));
-        // The console hand-off hides the window while a supervised game runs;
-        // the game owns the keyboard too, so a key must not steer a window
-        // nobody can see. (The de-dupe above still runs, so a held Escape
-        // cannot leak into the next screen once the window returns.)
-        if key_handoff.read().hidden() {
-            return;
-        }
-        // Any key press makes the keyboard the last device: the hint row shows
-        // its glyphs and the cursor stays visible.
-        key_pad_active.set(false);
-        let Some(key) = focus::key_from_tao(key_event.physical_key) else {
-            return;
-        };
-        let action = key_maps.peek().keyboard().action_for_key(key);
-        // A pending remap capture takes the key instead of navigating: the next
-        // key pressed is bound to the action being edited, so it must not also
-        // move the ring. `Escape` (the keyboard's Back) cancels the capture. The
-        // capture flag is read into a local so its guard drops before the write.
-        let capturing = session.read().view() == View::Controls && {
-            let guard = key_remap.read();
-            guard.as_ref().is_some_and(|session| session.is_capturing())
-        };
-        if capturing {
-            let cancelling = action == Some(pitagames_input::Action::Back);
-            let mut guard = key_remap.write();
-            if let Some(session) = guard.as_mut() {
-                if cancelling {
-                    session.cancel_capture();
-                } else {
-                    session.capture_control(pitagames_input::Binding::key(key));
-                }
-            }
-            return;
-        }
-        // The overlay is modal: while it is open it owns the keyboard, so an
-        // arrow walks its rows and `Enter` chooses. It is checked before the
-        // text-field yield, so a stray focus cannot half-trap the menu; an
-        // unbound key does nothing.
-        if overlay.read().is_some() {
-            if let Some(action) = action {
-                apply_overlay(action, overlay, &mut key_shell, session, notice, play);
-            }
-            return;
-        }
-        let Some(action) = action else {
-            return;
-        };
-        // A text field owns the arrows and typing; Back still leaves the field
-        // (and its screen) so the keyboard is never trapped in a caret.
-        if session.read().text_focused() && action != pitagames_input::Action::Back {
-            return;
-        }
-        // Movement may repeat while a key is held; Confirm/Back must not.
-        if key_event.repeat && !action.is_navigation() {
-            return;
-        }
-        // `M` opens the console overlay, the keyboard's answer to the pad's
-        // `Start`.
-        if action == pitagames_input::Action::Menu {
-            open_overlay(overlay, &key_shell, library_state, session, play);
-            return;
-        }
-        // `F11` maps to `Guide`: the shell's own action, handled here rather
-        // than by the screen, so it toggles wherever the player is (or dismisses
-        // the hand-off's "game ended" badge).
-        if action == pitagames_input::Action::Guide {
-            guide_action(&mut key_shell, session, key_handoff);
-            return;
-        }
-        dispatch_action(
-            action,
-            session,
-            &key_actions.0,
-            &key_actions.1,
-            &key_actions.2,
-            &key_actions.3,
-            &key_actions.4,
-            &key_actions.5,
-        );
-    });
 
     // The Downloads screen's action drain. Its body is inline in `App`, so its
     // focus graph is too; the future only runs while that view is showing.
