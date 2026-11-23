@@ -1,6 +1,24 @@
 # AGENTS.md
 
-## Agent Skills & Workflow Integration (Matt Pocock's Framework)
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live as GitHub issues in `pitapony/PitaLauncher`, driven with the
+`gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five canonical triage roles, each label string equal to its name
+(`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`).
+See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `AGENTS.md` (this file) is the vocabulary source and `docs/adr/`
+holds the decisions. See `docs/agents/domain.md`.
+
+### Workflow integration
 
 This project uses Matt Pocock's engineering workflow. When processing feature requests, bug fixes, or architectural changes, map user intent to these lifecycle skills:
 
