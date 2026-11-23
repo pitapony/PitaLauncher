@@ -108,10 +108,10 @@ fn primary_action(entry: &GameEntry) -> Primary {
 fn hero_button_style(enabled: bool, background: &str, color: &str) -> String {
     if enabled {
         format!(
-            "padding:10px 22px;border-radius:8px;border:1px solid #3a3a4c;background:{background};color:{color};font-size:0.9rem;font-weight:600;cursor:pointer;"
+            "padding:10px 22px;border-radius:8px;border:1px solid #3a3a4c;background:{background};color:{color};font-size:var(--text-body);font-weight:600;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
         )
     } else {
-        "padding:10px 22px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:0.9rem;font-weight:600;cursor:default;"
+        "padding:10px 22px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);font-weight:600;cursor:default;"
             .to_string()
     }
 }
@@ -182,7 +182,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
     let Some(state) = library_guard.as_ref() else {
         return rsx! {
             div {
-                style: "flex:1;padding:32px;color:#78788a;",
+                style: "flex:1;padding:32px;color:var(--text-muted);",
                 "Scanning libraries…"
             }
         };
@@ -191,7 +191,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
     if model.is_empty() {
         return rsx! {
             div {
-                style: "flex:1;padding:48px 32px;color:#78788a;",
+                style: "flex:1;padding:48px 32px;color:var(--text-muted);",
                 "No games yet. Publish a library from the Stores screen, then play through this couch home."
             }
         };
@@ -263,7 +263,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
 
         rsx! {
             div {
-                style: "position:relative;height:44vh;min-height:260px;margin-bottom:22px;overflow:hidden;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
+                style: "position:relative;height:44vh;min-height:260px;margin-bottom:22px;overflow:hidden;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
                 onclick: move |_| {
                     screen_focus.set(Some(0));
                     session.write().open_detail(open_id.clone(), View::Home);
@@ -290,19 +290,19 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                     style: "position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:10px;padding:28px 40px;",
 
                     span {
-                        style: "font-size:0.8rem;font-weight:600;text-transform:uppercase;letter-spacing:0.14em;color:#8fb0e8;",
+                        style: "font-size:var(--text-caption);font-weight:600;text-transform:uppercase;letter-spacing:0.14em;color:#8fb0e8;",
                         "Continue"
                     }
                     h2 {
-                        style: "margin:0;font-size:2rem;font-weight:700;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                        style: "margin:0;font-size:var(--text-title);font-weight:700;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                         "{title}"
                     }
                     div {
-                        style: "display:flex;align-items:baseline;gap:12px;font-size:0.9rem;color:#c8c8d4;",
+                        style: "display:flex;align-items:baseline;gap:12px;font-size:var(--text-body);color:var(--text-secondary);",
                         span { "{meta}" }
                         if !status.is_empty() {
                             span {
-                                style: "font-size:0.72rem;text-transform:uppercase;letter-spacing:0.06em;color:#d8b070;",
+                                style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--warning);",
                                 "{status}"
                             }
                         }
@@ -312,12 +312,12 @@ pub fn HomeView(props: HomeViewProps) -> Element {
 
                         if let Some(label) = playing {
                             span {
-                                style: "padding:10px 16px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:#b8dcc4;font-size:0.85rem;",
+                                style: "padding:10px 16px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:var(--success);font-size:var(--text-body);",
                                 "{label}"
                             }
                         } else if let Some(label) = queued {
                             span {
-                                style: "padding:10px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:#9ab0e8;font-size:0.85rem;",
+                                style: "padding:10px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:#9ab0e8;font-size:var(--text-body);",
                                 "{label}"
                             }
                         } else if is_play {
@@ -359,7 +359,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                             }
                         } else {
                             span {
-                                style: "padding:10px 16px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#9a9aac;font-size:0.85rem;",
+                                style: "padding:10px 16px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-muted);font-size:var(--text-body);",
                                 "Installed · open for details"
                             }
                         }
@@ -369,7 +369,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                 event.stop_propagation();
                                 session.write().open_detail(detail_id.clone(), View::Home);
                             },
-                            style: "padding:10px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:#c8c8d4;font-size:0.85rem;cursor:pointer;",
+                            style: "padding:10px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
                             "Details"
                         }
                     }
@@ -413,7 +413,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                             style: "display:flex;flex-direction:column;gap:10px;padding:0 32px 22px;",
 
                             h3 {
-                                style: "margin:0;font-size:0.95rem;font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:#9a9aac;",
+                                style: "margin:0;font-size:var(--text-body);font-weight:600;text-transform:uppercase;letter-spacing:0.08em;color:var(--text-muted);",
                                 "{title}"
                             }
 
@@ -489,7 +489,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                                             screen_focus.set(card_id);
                                                             session.write().open_detail(open_id.clone(), View::Home);
                                                         },
-                                                        style: "width:{tile_w}px;flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding:10px;box-sizing:border-box;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;{ring}",
+                                                        style: "width:{tile_w}px;flex:0 0 auto;display:flex;flex-direction:column;gap:6px;padding:10px;box-sizing:border-box;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
 
                                                         if let Some(url) = url {
                                                             img {
@@ -504,12 +504,12 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                                             }
                                                         }
                                                         div {
-                                                            style: "font-size:13px;font-weight:600;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                                            style: "font-size:var(--text-body);font-weight:600;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                                             title: "{card_title}",
                                                             "{card_title}"
                                                         }
                                                         div {
-                                                            style: "font-size:11px;color:#78788a;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                                            style: "font-size:var(--text-micro);color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                                             "{meta}"
                                                         }
                                                     }

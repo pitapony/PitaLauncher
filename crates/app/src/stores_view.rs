@@ -370,11 +370,11 @@ pub fn StoresView(props: StoresViewProps) -> Element {
             div {
                 style: "display:flex;flex-direction:column;gap:6px;",
                 span {
-                    style: "font-size:16px;font-weight:600;color:#ffffff;",
+                    style: "font-size:var(--text-heading);font-weight:600;color:#ffffff;",
                     "Stores"
                 }
                 span {
-                    style: "font-size:12px;color:#78788a;line-height:1.5;",
+                    style: "font-size:var(--text-caption);color:var(--text-muted);line-height:1.5;",
                     "PitaGames drives the Epic, Amazon and GOG stores through their command-line clients. A store whose client is missing or signed out is listed here with what it needs; the launcher keeps working for the stores that are ready."
                 }
             }
@@ -413,13 +413,13 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                 }
                 if is_pending {
                     span {
-                        style: "font-size:11px;color:#7a9ad6;",
+                        style: "font-size:var(--text-micro);color:var(--accent);",
                         "checking…"
                     }
                 }
                 if is_syncing {
                     span {
-                        style: "font-size:11px;color:#7a9ad6;",
+                        style: "font-size:var(--text-micro);color:var(--accent);",
                         "syncing…"
                     }
                 }
@@ -427,7 +427,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
 
             if !message.is_empty() {
                 div {
-                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;",
+                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:var(--text-caption);",
                     span { "{message}" }
                 }
             }
@@ -435,7 +435,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
             for problem in problems.iter().take(3) {
                 div {
                     key: "{problem}",
-                    style: "padding:8px 12px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:11px;overflow-wrap:anywhere;",
+                    style: "padding:8px 12px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:var(--text-micro);overflow-wrap:anywhere;",
                     "{problem}"
                 }
             }
@@ -453,12 +453,12 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                     }
                 }
                 span {
-                    style: "font-size:11px;color:#78788a;line-height:1.5;",
+                    style: "font-size:var(--text-micro);color:var(--text-muted);line-height:1.5;",
                     "Signing in runs the store's own client: the page opens in your browser and PitaGames only passes on the one line it asks for. Nothing on this screen writes to a game or a store account. See docs/m2-auth-terminal.md."
                 }
             } else {
                 div {
-                    style: "padding:40px 0;color:#78788a;font-size:13px;",
+                    style: "padding:40px 0;color:var(--text-muted);font-size:var(--text-body);",
                     "Checking each store's command-line client…"
                 }
             }
@@ -473,11 +473,11 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         div {
                             style: "display:flex;align-items:center;gap:10px;",
                             span {
-                                style: "font-size:15px;font-weight:600;color:#ffffff;",
+                                style: "font-size:var(--text-heading);font-weight:600;color:#ffffff;",
                                 "Sign in to {store_label(terminal.store())}"
                             }
                             span {
-                                style: "padding:2px 8px;border-radius:999px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;background:{status_background(terminal.status())};color:#e8e8ee;",
+                                style: "padding:2px 8px;border-radius:999px;font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;background:{status_background(terminal.status())};color:var(--text);",
                                 "{status_label(terminal.status())}"
                             }
                             button {
@@ -496,13 +496,13 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                         auth_text.set(String::new());
                                     }
                                 },
-                                style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:11px;cursor:pointer;{cancel_ring}",
+                                style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{cancel_ring}",
                                 if terminal.running() { "Cancel" } else { "Close" }
                             }
                         }
 
                         div {
-                            style: "height:240px;overflow-y:auto;display:flex;flex-direction:column-reverse;gap:3px;padding:10px 12px;border-radius:8px;background:#0d0d13;border:1px solid #26262f;font-family:monospace;font-size:11px;line-height:1.5;color:#c8c8d4;user-select:text;",
+                            style: "height:240px;overflow-y:auto;display:flex;flex-direction:column-reverse;gap:3px;padding:10px 12px;border-radius:8px;background:#0d0d13;border:1px solid #26262f;font-family:monospace;font-size:var(--text-micro);line-height:1.5;color:var(--text-secondary);user-select:text;",
                             // Newest first inside a reversed column: the last
                             // line sits at the bottom and stays in view.
                             for (index, line) in terminal.lines().iter().rev().enumerate() {
@@ -516,7 +516,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
 
                         if let Some(hint) = terminal.prompt() {
                             span {
-                                style: "font-size:12px;color:#e0c090;line-height:1.5;",
+                                style: "font-size:var(--text-caption);color:#e0c090;line-height:1.5;",
                                 "{hint}"
                             }
                         }
@@ -536,7 +536,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                         }
                                         submit_auth_line(auth_inputs, auth_text);
                                     },
-                                    style: "flex:1;padding:8px 11px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;font-family:monospace;font-size:12px;outline:none;",
+                                    style: "flex:1;padding:8px 11px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-family:monospace;font-size:var(--text-caption);outline:none;",
                                 }
                                 button {
                                     onclick: move |_| submit_auth_line(auth_inputs, auth_text),
@@ -547,7 +547,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         }
 
                         div {
-                            style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:11px;color:#78788a;",
+                            style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:var(--text-micro);color:var(--text-muted);",
                             if let Some(log) = terminal.log() {
                                 span { "transcript: {log.display()}" }
                             }
@@ -738,11 +738,11 @@ fn StoreRow(props: StoreRowProps) -> Element {
             div {
                 style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
                 span {
-                    style: "font-size:14px;font-weight:600;color:#ffffff;text-transform:capitalize;",
+                    style: "font-size:var(--text-body);font-weight:600;color:#ffffff;text-transform:capitalize;",
                     "{report.store.as_str()}"
                 }
                 span {
-                    style: "padding:2px 8px;border-radius:999px;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;background:{badge_background};color:#e8e8ee;",
+                    style: "padding:2px 8px;border-radius:999px;font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;background:{badge_background};color:var(--text);",
                     "{badge}"
                 }
                 if login_cli_ready {
@@ -769,7 +769,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
             for (index, (line, ok)) in tool_lines.into_iter().enumerate() {
                 span {
                     key: "{index}",
-                    style: if ok { "font-size:12px;color:#c8c8d4;overflow-wrap:anywhere;" } else { "font-size:12px;color:#e0a890;overflow-wrap:anywhere;" },
+                    style: if ok { "font-size:var(--text-caption);color:var(--text-secondary);overflow-wrap:anywhere;" } else { "font-size:var(--text-caption);color:#e0a890;overflow-wrap:anywhere;" },
                     "{line}"
                 }
             }
@@ -777,12 +777,12 @@ fn StoreRow(props: StoreRowProps) -> Element {
             div {
                 style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;",
                 span {
-                    style: "font-size:12px;color:#a8a8b8;",
+                    style: "font-size:var(--text-caption);color:var(--text-secondary);",
                     "{session_line}"
                 }
                 if let Some(counts) = counts_line {
                     span {
-                        style: "font-size:11px;color:#78788a;",
+                        style: "font-size:var(--text-micro);color:var(--text-muted);",
                         "{counts}"
                     }
                 }
@@ -790,7 +790,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
 
             if let Some(hint) = install_hint {
                 span {
-                    style: "font-size:12px;color:#e0c090;line-height:1.5;",
+                    style: "font-size:var(--text-caption);color:#e0c090;line-height:1.5;",
                     "{hint}"
                 }
             }
@@ -799,7 +799,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
                 div {
                     style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                     code {
-                        style: "padding:5px 8px;border-radius:7px;background:#14141b;border:1px solid #26262f;color:#c8c8d4;font-size:11px;overflow-wrap:anywhere;user-select:text;",
+                        style: "padding:5px 8px;border-radius:7px;background:#14141b;border:1px solid #26262f;color:var(--text-secondary);font-size:var(--text-micro);overflow-wrap:anywhere;user-select:text;",
                         "pitagames-cli {report.store.as_str()} auth"
                     }
                     CopyButton { text: format!("pitagames-cli {} auth", report.store.as_str()) }
@@ -809,7 +809,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
             for problem in report.problems.clone() {
                 div {
                     key: "{problem}",
-                    style: "padding:8px 12px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:11px;overflow-wrap:anywhere;",
+                    style: "padding:8px 12px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:var(--text-micro);overflow-wrap:anywhere;",
                     "{problem}"
                 }
             }
@@ -835,8 +835,8 @@ fn install_hint(store: Store) -> String {
 
 fn action_style(enabled: bool) -> &'static str {
     if enabled {
-        "padding:6px 12px;border-radius:7px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:11px;cursor:pointer;"
+        "padding:6px 12px;border-radius:7px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     } else {
-        "padding:6px 12px;border-radius:7px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:11px;cursor:default;"
+        "padding:6px 12px;border-radius:7px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-micro);cursor:default;"
     }
 }

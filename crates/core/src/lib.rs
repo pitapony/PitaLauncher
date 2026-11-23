@@ -9,6 +9,7 @@
 
 #[cfg(unix)]
 pub mod activation;
+pub mod design;
 pub mod desktop;
 pub mod launch;
 pub mod lock;

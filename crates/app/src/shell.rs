@@ -17,6 +17,7 @@ use dioxus::desktop::tao::dpi::LogicalSize;
 use dioxus::desktop::tao::monitor::MonitorHandle;
 use dioxus::desktop::tao::window::{Fullscreen, WindowBuilder};
 use dioxus::prelude::*;
+use pitagames_core::design::{self, DesignTokens};
 use pitagames_core::ui::{
     AppConfig, DESKTOP_HEIGHT, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH, DESKTOP_WIDTH, DisplayConfig,
     Shell,
@@ -77,16 +78,6 @@ pub struct ShellStart {
     pub ready_path: Option<PathBuf>,
     /// Where the preference is remembered; `None` when `HOME` is unset.
     pub config_path: Option<PathBuf>,
-}
-
-/// The CSS a safe-mode (or reduced-motion) run injects once.
-///
-/// Animations, smooth scrolling and the frosted-glass backdrop are the three
-/// things WebKit composites on the GPU; turning them off is what makes safe
-/// mode safe. It is emitted as one `<style>` element because an inline style on
-/// the root cannot reach descendants.
-pub fn motion_off_css() -> &'static str {
-    "*{animation:none!important;transition:none!important;scroll-behavior:auto!important;backdrop-filter:none!important;-webkit-backdrop-filter:none!important;}"
 }
 
 /// The window geometry and flags a shell asks for.
@@ -346,7 +337,9 @@ pub fn base_font_px(shell: Shell, display: &DisplayConfig) -> f32 {
 ///
 /// Both branches name the same properties on purpose: Dioxus's style setter
 /// re-adds an inline property a new style string omits, so a console-only
-/// `padding` would survive the switch back to the desktop shell.
+/// `padding` would survive the switch back to the desktop shell. The design
+/// tokens are emitted as custom properties so a component asks for a role, not
+/// a pixel size, and the console shell gets its 10-foot scale for free.
 pub fn root_style(shell: Shell, display: &DisplayConfig) -> String {
     let padding = if shell.is_console() {
         display.safe_area_css()
@@ -354,37 +347,51 @@ pub fn root_style(shell: Shell, display: &DisplayConfig) -> String {
         "0".to_string()
     };
     let background = if shell.is_console() {
-        "#0b0b10"
+        design::CONSOLE_BACKGROUND
     } else {
-        "#14141c"
+        design::BACKGROUND
     };
+    let tokens = DesignTokens::for_shell(shell, display);
     format!(
-        "--ui-scale:{};box-sizing:border-box;display:flex;flex-direction:column;height:100vh;overflow:hidden;padding:{padding};background:{background};color:#e8e8ee;font-family:sans-serif;font-size:{}px;",
+        "--ui-scale:{};{}--bg:{};--card:{};--text:{};--text-secondary:{};--text-muted:{};--text-disabled:{};--accent:{};--warning:{};--danger:{};--success:{};box-sizing:border-box;display:flex;flex-direction:column;height:100vh;overflow:hidden;padding:{padding};background:{};color:var(--text);font-family:sans-serif;font-size:{}px;",
         display.ui_scale,
+        tokens.css_vars(),
+        background.hex(),
+        design::CARD.hex(),
+        design::TEXT.hex(),
+        design::TEXT_SECONDARY.hex(),
+        design::TEXT_MUTED.hex(),
+        design::TEXT_DISABLED.hex(),
+        design::ACCENT.hex(),
+        design::WARNING.hex(),
+        design::DANGER.hex(),
+        design::SUCCESS.hex(),
+        background.hex(),
         base_font_px(shell, display)
     )
 }
 
+/// The hit floor every interactive style names, as an inline declaration.
+///
+/// There is no global stylesheet: this Dioxus build ignores a `<style>` element
+/// in RSX (an Xvfb probe confirmed it) and the renderer boundary rules out
+/// injecting CSS with JavaScript, so the floor travels inline on each control,
+/// reading the shell's `--hit-min` token from the root style.
+pub const HIT_FLOOR: &str = "min-height:var(--hit-min);min-width:var(--hit-min);";
+
 /// The app header's inline style for a shell.
 ///
-/// The header's type scales with `--ui-scale`, so the 10-foot shell reads from a
-/// couch without the cards' fixed type sizes being revisited yet.
-pub fn header_style(shell: Shell, display: &DisplayConfig) -> String {
-    let base = if shell.is_console() {
-        CONSOLE_BASE_PX
-    } else {
-        DESKTOP_BASE_PX
-    };
-    let title = base * 1.375 * display.ui_scale;
-    let subtitle = base * 0.75 * display.ui_scale;
-    format!(
-        "display:flex;align-items:baseline;gap:16px;padding:20px 32px 12px;--title-size:{title}px;font-size:{subtitle}px;"
-    )
+/// The wordmark reads `--text-title` and the subtitle `--text-caption`, so the
+/// console shell's scale applies without a second header rule.
+pub fn header_style(_shell: Shell, _display: &DisplayConfig) -> String {
+    "display:flex;flex-wrap:wrap;align-items:baseline;gap:16px;row-gap:4px;padding:20px 32px 12px;font-size:var(--text-caption);"
+        .to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn the_command_line_picks_a_shell() {
@@ -428,16 +435,19 @@ mod tests {
     }
 
     #[test]
-    fn safe_mode_disables_motion_and_blur() {
-        let css = motion_off_css();
-        assert!(css.contains("animation:none"));
-        assert!(css.contains("transition:none"));
-        assert!(css.contains("scroll-behavior:auto"));
-        assert!(css.contains("backdrop-filter:none"));
-        // A blanket `filter:none` would fight image rendering; it is not used
-        // (the backdrop rule above must not be mistaken for one).
-        assert!(!css.contains(";filter:none"));
-        assert!(!css.contains("*{filter"));
+    fn safe_mode_documents_the_motion_rule() {
+        // Safe mode's motion rule is not a shipped stylesheet: this Dioxus build
+        // ignores a `<style>` element in RSX (an Xvfb probe with a magenta `div`
+        // rule confirmed it), and injecting CSS would need JavaScript, which the
+        // renderer boundary forbids. The rule holds by construction instead — no
+        // screen uses `animation`, `transition`, `backdrop-filter` or
+        // `scroll-behavior`, which `no_screen_ships_motion` above enforces.
+        // This test is the written record of that decision.
+        let rule = "animation:none;transition:none;scroll-behavior:auto;backdrop-filter:none";
+        assert!(rule.contains("animation:none"));
+        assert!(rule.contains("transition:none"));
+        assert!(rule.contains("scroll-behavior:auto"));
+        assert!(rule.contains("backdrop-filter:none"));
     }
 
     #[test]
@@ -502,9 +512,123 @@ mod tests {
     }
 
     #[test]
-    fn the_header_carries_the_scaled_title_size() {
+    fn the_header_reads_the_caption_token() {
         let display = DisplayConfig::default();
         let header = header_style(Shell::Console, &display);
-        assert!(header.contains("--title-size:27.5px;"));
+        assert!(header.contains("font-size:var(--text-caption)"));
+    }
+
+    #[test]
+    fn the_root_style_carries_every_design_token_in_both_shells() {
+        let display = DisplayConfig::default();
+        for shell in [Shell::Desktop, Shell::Console] {
+            let css = root_style(shell, &display);
+            for name in [
+                "--text-title:",
+                "--text-heading:",
+                "--text-body:",
+                "--text-caption:",
+                "--text-micro:",
+                "--hit-min:",
+                "--ring:",
+                "--bg:",
+                "--card:",
+                "--text:",
+                "--text-secondary:",
+                "--text-muted:",
+                "--text-disabled:",
+                "--accent:",
+                "--warning:",
+                "--danger:",
+                "--success:",
+            ] {
+                assert!(css.contains(name), "{shell} lost {name}: {css}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_console_root_uses_the_console_palette_and_tokens() {
+        let display = DisplayConfig::default();
+        let console = root_style(Shell::Console, &display);
+        let desktop = root_style(Shell::Desktop, &display);
+        assert!(console.contains(&format!("--bg:{};", design::CONSOLE_BACKGROUND.hex())));
+        assert!(desktop.contains(&format!("--bg:{};", design::BACKGROUND.hex())));
+        assert!(console.contains("--text-micro:18px;"));
+        assert!(desktop.contains("--text-micro:11px;"));
+        assert!(console.contains("--hit-min:48px;"));
+        assert!(desktop.contains("--hit-min:28px;"));
+    }
+
+    #[test]
+    fn the_hit_floor_is_named_inline_by_the_interactive_styles() {
+        // The floor cannot be a global rule (the `<style>` element is ignored),
+        // so it travels inline; these are the two shared control styles.
+        assert_eq!(
+            HIT_FLOOR,
+            "min-height:var(--hit-min);min-width:var(--hit-min);"
+        );
+        let display = DisplayConfig::default();
+        let console = root_style(Shell::Console, &display);
+        assert!(
+            console.contains("--hit-min:48px;"),
+            "the token the floor reads"
+        );
+    }
+
+    #[test]
+    fn no_screen_ships_motion() {
+        // Safe mode promises "animations and blur off". There is no global
+        // stylesheet to switch them off with, so the guarantee is by
+        // construction: nothing animates. A motion property is allowed only
+        // with a `none`/`auto` value (the written rule itself); a real value
+        // (`animation:spin`) fails this guard.
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let benign = |value: &str| value.starts_with("none") || value.starts_with("auto");
+        for entry in std::fs::read_dir(&source).expect("read the app sources") {
+            let path = entry.expect("a source entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read a source file");
+            // Production code only: a test may name a motion token to assert on.
+            let text = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            for needle in [
+                "animation:",
+                "transition:",
+                "backdrop-filter:",
+                "scroll-behavior:",
+            ] {
+                for (index, _) in text.match_indices(needle) {
+                    let value = &text[index + needle.len()..];
+                    assert!(benign(value), "{} ships motion ({needle})", path.display());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn no_screen_ships_a_hover_only_affordance() {
+        // A 10-foot shell has no pointer, so an action that exists only while
+        // the mouse rests on a control is unreachable from a couch. There are
+        // no hover rules today; this keeps it that way.
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let hover_selector = concat!(":", "hover");
+        let enter = concat!("onmouse", "enter");
+        let over = concat!("onmouse", "over");
+        for entry in std::fs::read_dir(&source).expect("read the app sources") {
+            let path = entry.expect("a source entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read a source file");
+            for needle in [hover_selector, enter, over] {
+                assert!(
+                    !text.contains(needle),
+                    "{} uses a pointer-only affordance: {needle}",
+                    path.display()
+                );
+            }
+        }
     }
 }

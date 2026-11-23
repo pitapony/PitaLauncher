@@ -35,11 +35,11 @@ pub fn DiagnosticsEditor(props: DiagnosticsEditorProps) -> Element {
             div {
                 style: "display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;",
                 span {
-                    style: "font-size:12px;font-weight:600;color:#e8e8ee;",
+                    style: "font-size:var(--text-caption);font-weight:600;color:var(--text);",
                     "Diagnostics"
                 }
                 span {
-                    style: "font-size:11px;color:#78788a;",
+                    style: "font-size:var(--text-micro);color:var(--text-muted);",
                     "overlays, logs and indicators, applied at launch"
                 }
             }
@@ -54,11 +54,11 @@ pub fn DiagnosticsEditor(props: DiagnosticsEditorProps) -> Element {
                         div {
                             style: "display:flex;flex-direction:column;gap:2px;align-items:flex-start;text-align:left;",
                             span {
-                                style: "font-size:12px;color:#e8e8ee;",
+                                style: "font-size:var(--text-caption);color:var(--text);",
                                 "{toggle.label()}"
                             }
                             code {
-                                style: "font-size:10px;color:#8a8a9c;",
+                                style: "font-size:var(--text-micro);color:#8a8a9c;",
                                 "{toggle.env_hint()}"
                             }
                         }
@@ -67,7 +67,7 @@ pub fn DiagnosticsEditor(props: DiagnosticsEditorProps) -> Element {
             }
 
             span {
-                style: "font-size:11px;color:#78788a;",
+                style: "font-size:var(--text-micro);color:var(--text-muted);",
                 "{summary}"
             }
         }
@@ -76,8 +76,8 @@ pub fn DiagnosticsEditor(props: DiagnosticsEditorProps) -> Element {
 
 fn toggle_style(active: bool) -> &'static str {
     if active {
-        "padding:6px 10px;border-radius:8px;border:1px solid #3f5c8c;background:#243044;cursor:pointer;"
+        "padding:6px 10px;border-radius:8px;border:1px solid #3f5c8c;background:#243044;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     } else {
-        "padding:6px 10px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;cursor:pointer;"
+        "padding:6px 10px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     }
 }

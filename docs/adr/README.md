@@ -47,6 +47,7 @@ anything not covered here.
 | [0025](0025-compat-db-and-anticheat-are-read-only-data.md) | Compat DB and anti-cheat are read-only curated data | Accepted + Proposed |
 | [0026](0026-open-questions.md) | Open questions | Proposed |
 | [0027](0027-app-shell-session-model.md) | The app shell session model and the screen seam | Accepted |
+| [0028](0028-design-tokens-and-legibility-floor.md) | Design tokens and the legibility floor | Accepted |
 
 ## See also
 

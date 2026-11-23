@@ -236,7 +236,7 @@ pub fn Detail(props: DetailProps) -> Element {
             rsx! {
                 if let Some(description) = description {
                     p {
-                        style: "margin:0;font-size:13px;line-height:1.5;color:#c8c8d4;max-width:80ch;",
+                        style: "margin:0;font-size:var(--text-body);line-height:1.5;color:var(--text-secondary);max-width:80ch;",
                         "{description}"
                     }
                 }
@@ -247,7 +247,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         for genre in genres {
                             span {
                                 key: "{genre}",
-                                style: "padding:3px 10px;border-radius:999px;border:1px solid #2c2c38;background:#1e1e28;color:#a8a8b8;font-size:11px;",
+                                style: "padding:3px 10px;border-radius:999px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-micro);",
                                 "{genre}"
                             }
                         }
@@ -270,7 +270,7 @@ pub fn Detail(props: DetailProps) -> Element {
             };
             rsx! {
                 p {
-                    style: "margin:0;font-size:12px;color:#78788a;",
+                    style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
                     "{message}"
                 }
             }
@@ -499,7 +499,7 @@ pub fn Detail(props: DetailProps) -> Element {
                             let to = session.read().back();
                             session.write().set_view(to);
                         },
-                        style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:12px;cursor:pointer;{ring}",
+                        style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
                         "{label}"
                     }
                 }
@@ -519,24 +519,24 @@ pub fn Detail(props: DetailProps) -> Element {
             div {
                 style: "display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;",
                 h2 {
-                    style: "margin:0;font-size:24px;font-weight:600;color:#ffffff;",
+                    style: "margin:0;font-size:var(--text-title);font-weight:600;color:#ffffff;",
                     "{title}"
                 }
                 if let Some(kind) = app_kind.clone() {
                     span {
-                        style: "padding:2px 8px;border-radius:999px;border:1px solid #3a3a4c;color:#a8a8b8;font-size:10px;text-transform:uppercase;letter-spacing:0.06em;",
+                        style: "padding:2px 8px;border-radius:999px;border:1px solid #3a3a4c;color:var(--text-secondary);font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;",
                         "{kind}"
                     }
                 }
                 if let Some(status) = status {
                     span {
-                        style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#d8b070;",
+                        style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--warning);",
                         "{status}"
                     }
                 }
                 if let Some(label) = playing {
                     span {
-                        style: "padding:8px 12px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:#b8dcc4;font-size:12px;",
+                        style: "padding:8px 12px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:var(--success);font-size:var(--text-caption);",
                         "{label}"
                     }
                 } else if play_wired {
@@ -564,7 +564,7 @@ pub fn Detail(props: DetailProps) -> Element {
                     // A button that cannot launch is worse than a sentence that
                     // says so; the grid's Install action is the way forward here.
                     span {
-                        style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:#78788a;font-size:12px;",
+                        style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:var(--text-muted);font-size:var(--text-caption);",
                         "{reason}"
                     }
                 }
@@ -572,7 +572,7 @@ pub fn Detail(props: DetailProps) -> Element {
 
             if !error_text.is_empty() {
                 div {
-                    style: "padding:10px 14px;border-radius:8px;background:#3a1e1e;color:#e8a0a0;font-size:12px;",
+                    style: "padding:10px 14px;border-radius:8px;background:#3a1e1e;color:var(--danger);font-size:var(--text-caption);",
                     "{error_text}"
                 }
             }
@@ -589,7 +589,7 @@ pub fn Detail(props: DetailProps) -> Element {
 
             if let Some(warning) = anticheat_warning.clone() {
                 div {
-                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#3a2e1e;color:#e8c890;font-size:12px;",
+                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#3a2e1e;color:#e8c890;font-size:var(--text-caption);",
                     span {
                         style: "font-weight:600;",
                         "Anti-cheat injection warning"
@@ -597,7 +597,7 @@ pub fn Detail(props: DetailProps) -> Element {
                     span { "{warning}" }
                     for item in anticheat_evidence {
                         span {
-                            style: "font-family:monospace;font-size:11px;color:#c8a870;overflow-wrap:anywhere;",
+                            style: "font-family:monospace;font-size:var(--text-micro);color:#c8a870;overflow-wrap:anywhere;",
                             "{item}"
                         }
                     }
@@ -609,12 +609,12 @@ pub fn Detail(props: DetailProps) -> Element {
                 div {
                     style: "display:flex;align-items:baseline;gap:12px;",
                     h3 {
-                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                        style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
                         "About"
                     }
                     if let Some(age) = metadata_age.clone() {
                         span {
-                            style: "font-size:11px;color:#78788a;",
+                            style: "font-size:var(--text-micro);color:var(--text-muted);",
                             "store data updated {age}"
                         }
                     }
@@ -627,22 +627,22 @@ pub fn Detail(props: DetailProps) -> Element {
                 div {
                     style: "display:flex;align-items:baseline;gap:12px;",
                     h3 {
-                        style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                        style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
                         "Recent launches"
                     }
                     span {
-                        style: "font-size:11px;color:#78788a;",
+                        style: "font-size:var(--text-micro);color:var(--text-muted);",
                         "the sessions PitaGames started"
                     }
                 }
                 if is_steam {
                     p {
-                        style: "margin:0;font-size:12px;color:#78788a;",
+                        style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
                         "Steam starts this game itself, so its sessions belong to Steam. PitaGames records only the launches it supervises: the games it starts through umu, a native executable or a store client."
                     }
                 } else if sessions.is_empty() {
                     p {
-                        style: "margin:0;font-size:12px;color:#78788a;",
+                        style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
                         "No sessions yet. Press Play and the outcome lands here — including a launch that could not start, with the reason."
                     }
                 } else {
@@ -651,24 +651,24 @@ pub fn Detail(props: DetailProps) -> Element {
                             key: "{row.key}",
                             style: "display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;",
                             span {
-                                style: "font-size:12px;color:#a8a8b8;min-width:88px;",
+                                style: "font-size:var(--text-caption);color:var(--text-secondary);min-width:88px;",
                                 "{row.when}"
                             }
                             span {
-                                style: "font-family:monospace;font-size:11px;color:#7a9ad6;min-width:76px;",
+                                style: "font-family:monospace;font-size:var(--text-micro);color:var(--accent);min-width:76px;",
                                 "{row.mode}"
                             }
                             span {
                                 style: if row.ok {
-                                    "font-size:12px;color:#b8dcc4;flex:1;"
+                                    "font-size:var(--text-caption);color:var(--success);flex:1;"
                                 } else {
-                                    "font-size:12px;color:#e8c890;flex:1;"
+                                    "font-size:var(--text-caption);color:#e8c890;flex:1;"
                                 },
                                 "{row.verdict}"
                             }
                             if let Some(log) = row.log.clone() {
                                 span {
-                                    style: "font-family:monospace;font-size:10px;color:#5a5a68;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                                    style: "font-family:monospace;font-size:var(--text-micro);color:var(--text-disabled);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                     "{log}"
                                 }
                                 CopyButton { text: log, label: "Copy log path".to_string() }
@@ -681,17 +681,17 @@ pub fn Detail(props: DetailProps) -> Element {
             div {
                 style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
                 h3 {
-                    style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                    style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
                     "Profiles"
                 }
                     p {
-                        style: "margin:0;font-size:12px;color:#78788a;",
+                        style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
                         "A profile picks the Proton build and graphics settings this game launches with. New profiles start from the safe defaults."
                     }
 
                     if !has_profiles {
                         div {
-                            style: "padding:16px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
+                            style: "padding:16px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:var(--text-muted);font-size:var(--text-caption);",
                             "No profiles yet."
                         }
                     }
@@ -713,12 +713,12 @@ pub fn Detail(props: DetailProps) -> Element {
                                     key: "{profile_name}",
                                     style: "display:flex;align-items:center;gap:12px;padding:12px 14px;border-radius:10px;background:#1e1e28;border:1px solid #2c2c38;",
                                     span {
-                                        style: "font-size:13px;color:#e8e8ee;",
+                                        style: "font-size:var(--text-body);color:var(--text);",
                                         "{profile_name}"
                                     }
                                     if is_active {
                                         span {
-                                            style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#7a9ad6;",
+                                            style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);",
                                             "active"
                                         }
                                     }
@@ -730,7 +730,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                             diagnostics_draft
                                                 .set(DiagnosticsDraft::from_diagnostics(&pick_diagnostics));
                                         },
-                                        style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
+                                        style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
                                         "Use"
                                     }
                                     button {
@@ -749,7 +749,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                                 }
                                             });
                                         },
-                                        style: "padding:6px 12px;border-radius:8px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:12px;cursor:pointer;",
+                                        style: "padding:6px 12px;border-radius:8px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
                                         "Delete"
                                     }
                                 }
@@ -765,7 +765,7 @@ pub fn Detail(props: DetailProps) -> Element {
                             oninput: move |event| new_name.set(event.value()),
                             onfocus: move |_| session.write().set_text_focused(true),
                             onblur: move |_| session.write().set_text_focused(false),
-                            style: "flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;outline:none;font-size:13px;",
+                            style: "flex:1;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);outline:none;font-size:var(--text-body);",
                         }
                         button {
                             disabled: name.trim().is_empty(),
@@ -796,11 +796,11 @@ pub fn Detail(props: DetailProps) -> Element {
             div {
                 style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
                 h3 {
-                    style: "margin:0;font-size:14px;font-weight:600;color:#ffffff;",
+                    style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
                     "Runtime"
                 }
                 p {
-                    style: "margin:0;font-size:12px;color:#78788a;",
+                    style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
                     if is_steam {
                         "PitaGames launches this game through pitagames-shim. Pick the Proton build and wrapper chain for the active profile, then route the game through the shim in Steam's launch options."
                     } else {
@@ -810,14 +810,14 @@ pub fn Detail(props: DetailProps) -> Element {
 
                     if let Some(profile) = selected_profile.clone() {
                         div {
-                            style: "font-size:11px;color:#78788a;",
+                            style: "font-size:var(--text-micro);color:var(--text-muted);",
                             "Editing the active profile "
-                            span { style: "color:#a8a8b8;", "{profile.name}" }
+                            span { style: "color:var(--text-secondary);", "{profile.name}" }
                             "."
                         }
                     } else {
                         div {
-                            style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
+                            style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:var(--text-muted);font-size:var(--text-caption);",
                             "Create and select a profile to pick a Proton build."
                         }
                     }
@@ -836,11 +836,11 @@ pub fn Detail(props: DetailProps) -> Element {
                                         onclick: move |_| proton_choice.set(reference.clone()),
                                         style: choice_style(chosen),
                                         span {
-                                            style: "font-size:13px;font-weight:600;color:#e8e8ee;",
+                                            style: "font-size:var(--text-body);font-weight:600;color:var(--text);",
                                             "{label}"
                                         }
                                         span {
-                                            style: "font-size:11px;color:#9a9aac;overflow-wrap:anywhere;",
+                                            style: "font-size:var(--text-micro);color:var(--text-muted);overflow-wrap:anywhere;",
                                             "{detail}"
                                         }
                                     }
@@ -1054,7 +1054,7 @@ pub fn Detail(props: DetailProps) -> Element {
 
                     if let Some(status) = routing_status.clone().filter(|_| is_steam) {
                         div {
-                            style: "display:flex;flex-direction:column;gap:2px;font-size:11px;color:#78788a;",
+                            style: "display:flex;flex-direction:column;gap:2px;font-size:var(--text-micro);color:var(--text-muted);",
                             span { "Steam: {status.steam.describe()}" }
                             if let Some(value) = status.launch_options.clone() {
                                 span { "Launch options: {value}" }
@@ -1062,11 +1062,11 @@ pub fn Detail(props: DetailProps) -> Element {
                                 span { "Launch options: (not set)" }
                             }
                             if status.shim_installed {
-                                span { style: "color:#7a9ad6;", "Routed through pitagames-shim." }
+                                span { style: "color:var(--accent);", "Routed through pitagames-shim." }
                             }
                             span { "{compat_label}" }
                             if let Some(warning) = status.warning.clone() {
-                                span { style: "color:#d8b070;", "{warning}" }
+                                span { style: "color:var(--warning);", "{warning}" }
                             }
                         }
                     }
@@ -1076,12 +1076,12 @@ pub fn Detail(props: DetailProps) -> Element {
                         div {
                             style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                             span {
-                                style: "font-size:12px;font-weight:600;color:#e8e8ee;",
+                                style: "font-size:var(--text-caption);font-weight:600;color:var(--text);",
                                 "Command"
                             }
                             CopyButton { text: command_text.clone() }
                             span {
-                                style: "font-size:11px;color:#78788a;",
+                                style: "font-size:var(--text-micro);color:var(--text-muted);",
                                 if is_steam {
                                     "what pitagames-shim will run (the same line as --explain)"
                                 } else {
@@ -1091,18 +1091,18 @@ pub fn Detail(props: DetailProps) -> Element {
                         }
                         if let Some(message) = command_error.clone() {
                             span {
-                                style: "padding:8px 12px;border-radius:8px;background:#3a2a1e;color:#e0c090;font-size:12px;overflow-wrap:anywhere;",
+                                style: "padding:8px 12px;border-radius:8px;background:#3a2a1e;color:#e0c090;font-size:var(--text-caption);overflow-wrap:anywhere;",
                                 "{message}"
                             }
                         } else {
                             code {
-                                style: "display:block;padding:10px 12px;border-radius:8px;background:#14141b;border:1px solid #26262f;color:#b8c8e8;font-family:monospace;font-size:11px;overflow-wrap:anywhere;white-space:pre-wrap;user-select:text;",
+                                style: "display:block;padding:10px 12px;border-radius:8px;background:#14141b;border:1px solid #26262f;color:#b8c8e8;font-family:monospace;font-size:var(--text-micro);overflow-wrap:anywhere;white-space:pre-wrap;user-select:text;",
                                 "{command_text}"
                             }
                         }
                         if let Some(note) = handoff_note.clone() {
                             span {
-                                style: "font-size:11px;color:#78788a;",
+                                style: "font-size:var(--text-micro);color:var(--text-muted);",
                                 "launch shape: {note}"
                             }
                         }
@@ -1110,7 +1110,7 @@ pub fn Detail(props: DetailProps) -> Element {
 
                     if !runtime_note.is_empty() {
                         div {
-                            style: "padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:12px;overflow-wrap:anywhere;",
+                            style: "padding:10px 14px;border-radius:8px;background:#1e2430;color:#9ab0d8;font-size:var(--text-caption);overflow-wrap:anywhere;",
                             "{runtime_note}"
                         }
                     }
@@ -1271,11 +1271,11 @@ fn info_card(label: &str, value: String) -> Element {
         div {
             style: "display:flex;flex-direction:column;gap:4px;padding:12px 14px;border-radius:10px;background:#1e1e28;border:1px solid #2c2c38;",
             span {
-                style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#78788a;",
+                style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
                 "{label}"
             }
             span {
-                style: "font-size:13px;color:#e8e8ee;overflow-wrap:anywhere;",
+                style: "font-size:var(--text-body);color:var(--text);overflow-wrap:anywhere;",
                 "{value}"
             }
         }
@@ -1337,17 +1337,17 @@ fn start_play(
 
 fn play_style(enabled: bool) -> &'static str {
     if enabled {
-        "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:13px;cursor:pointer;"
+        "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     } else {
-        "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;"
+        "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);cursor:default;"
     }
 }
 
 fn create_style(disabled: bool) -> &'static str {
     if disabled {
-        "padding:8px 16px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;"
+        "padding:8px 16px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);cursor:default;"
     } else {
-        "padding:8px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#243024;color:#d8e8d0;font-size:13px;cursor:pointer;"
+        "padding:8px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#243024;color:#d8e8d0;font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     }
 }
 
@@ -1410,17 +1410,17 @@ fn install_detail(install: &ProtonInstall) -> String {
 
 fn choice_style(chosen: bool) -> &'static str {
     if chosen {
-        "display:flex;flex-direction:column;gap:2px;align-items:flex-start;text-align:left;padding:10px 14px;border-radius:10px;border:1px solid #3f5c8c;background:#243044;cursor:pointer;"
+        "display:flex;flex-direction:column;gap:2px;align-items:flex-start;text-align:left;padding:10px 14px;border-radius:10px;border:1px solid #3f5c8c;background:#243044;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     } else {
-        "display:flex;flex-direction:column;gap:2px;align-items:flex-start;text-align:left;padding:10px 14px;border-radius:10px;border:1px solid #2c2c38;background:#1e1e28;cursor:pointer;"
+        "display:flex;flex-direction:column;gap:2px;align-items:flex-start;text-align:left;padding:10px 14px;border-radius:10px;border:1px solid #2c2c38;background:#1e1e28;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     }
 }
 
 fn action_style(enabled: bool) -> String {
     if enabled {
-        "padding:8px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:13px;cursor:pointer;".to_string()
+        "padding:8px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);".to_string()
     } else {
-        "padding:8px 16px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:13px;cursor:default;".to_string()
+        "padding:8px 16px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);cursor:default;".to_string()
     }
 }
 

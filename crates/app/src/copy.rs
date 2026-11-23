@@ -96,8 +96,8 @@ pub fn CopyButton(props: CopyButtonProps) -> Element {
 
 fn copy_style(disabled: bool) -> &'static str {
     if disabled {
-        "padding:5px 12px;border-radius:7px;border:1px solid #26262f;background:#1a1a22;color:#5a5a68;font-size:11px;cursor:default;"
+        "padding:5px 12px;border-radius:7px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-micro);cursor:default;"
     } else {
-        "padding:5px 12px;border-radius:7px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:11px;cursor:pointer;"
+        "padding:5px 12px;border-radius:7px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
     }
 }

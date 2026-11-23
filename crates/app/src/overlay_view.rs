@@ -52,11 +52,11 @@ pub fn OverlayView(props: OverlayViewProps) -> Element {
                 div {
                     style: "display:flex;align-items:baseline;gap:12px;margin-bottom:6px;",
                     span {
-                        style: "font-size:1.1rem;font-weight:700;color:#ffffff;",
+                        style: "font-size:var(--text-heading);font-weight:700;color:#ffffff;",
                         "Menu"
                     }
                     span {
-                        style: "margin-left:auto;font-size:1.05rem;color:#c8c8d4;",
+                        style: "margin-left:auto;font-size:var(--text-heading);color:var(--text-secondary);",
                         "{clock}"
                     }
                 }
@@ -80,13 +80,13 @@ pub fn OverlayView(props: OverlayViewProps) -> Element {
                                         on_choose.call(choice);
                                     }
                                 },
-                                style: "display:flex;flex-direction:column;gap:2px;padding:12px 16px;border-radius:10px;background:{background};border:1px solid #2c2c38;cursor:{cursor};{ring}",
+                                style: "display:flex;flex-direction:column;justify-content:center;gap:2px;min-height:var(--hit-min);padding:12px 16px;border-radius:10px;background:{background};border:1px solid #2c2c38;cursor:{cursor};{ring}",
                                 span {
-                                    style: "font-size:1rem;font-weight:600;color:{label_color};",
+                                    style: "font-size:var(--text-heading);font-weight:600;color:{label_color};",
                                     "{label}"
                                 }
                                 span {
-                                    style: "font-size:0.8rem;color:{detail_color};",
+                                    style: "font-size:var(--text-caption);color:{detail_color};",
                                     "{detail}"
                                 }
                             }
@@ -95,7 +95,7 @@ pub fn OverlayView(props: OverlayViewProps) -> Element {
                 }
 
                 div {
-                    style: "display:flex;align-items:center;gap:10px;margin-top:8px;padding-top:10px;border-top:1px solid #26262f;font-size:0.8rem;color:#9a9aac;",
+                    style: "display:flex;align-items:center;gap:10px;margin-top:8px;padding-top:10px;border-top:1px solid #26262f;font-size:var(--text-caption);color:var(--text-muted);",
                     span { "Controller: {status}" }
                     span {
                         style: "margin-left:auto;",

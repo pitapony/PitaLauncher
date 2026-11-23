@@ -91,20 +91,20 @@ pub fn OskSheet(props: OskSheetProps) -> Element {
                 div {
                     style: "display:flex;align-items:baseline;gap:12px;",
                     span {
-                        style: "font-size:12px;text-transform:uppercase;letter-spacing:0.08em;color:#7a9ad6;",
+                        style: "font-size:var(--text-caption);text-transform:uppercase;letter-spacing:0.08em;color:var(--accent);",
                         "{title}"
                     }
                     span {
-                        style: "margin-left:auto;font-size:11px;color:#78788a;",
+                        style: "margin-left:auto;font-size:var(--text-micro);color:var(--text-muted);",
                         "A types · B cancels"
                     }
                 }
 
                 div {
-                    style: "min-height:30px;padding:9px 12px;border-radius:10px;background:#1e1e28;border:1px solid #2c2c38;color:#e8e8ee;font-size:20px;font-family:monospace;white-space:pre-wrap;word-break:break-word;",
+                    style: "min-height:30px;padding:9px 12px;border-radius:10px;background:#1e1e28;border:1px solid #2c2c38;color:var(--text);font-size:var(--text-heading);font-family:monospace;white-space:pre-wrap;word-break:break-word;",
                     span { "{before}" }
                     span {
-                        style: "color:#7a9ad6;",
+                        style: "color:var(--accent);",
                         "▏"
                     }
                     span { "{after}" }
@@ -134,7 +134,7 @@ pub fn OskSheet(props: OskSheetProps) -> Element {
                                     OskKey::Shift if keyboard.read().shift() => {
                                         "background:#2e3a56;color:#ffffff;"
                                     }
-                                    _ => "background:#1e1e28;color:#e8e8ee;",
+                                    _ => "background:#1e1e28;color:var(--text);",
                                 };
                                 rsx! {
                                     button {
@@ -150,7 +150,7 @@ pub fn OskSheet(props: OskSheetProps) -> Element {
                                                 OskPress::Idle | OskPress::Edited => {}
                                             }
                                         },
-                                        style: "{grow}min-width:40px;height:46px;border-radius:10px;border:1px solid #2c2c38;font-size:16px;font-weight:600;cursor:pointer;{accent}{ring}",
+                                        style: "{grow}min-width:var(--hit-min);min-height:var(--hit-min);height:46px;border-radius:10px;border:1px solid #2c2c38;font-size:var(--text-heading);font-weight:600;cursor:pointer;{accent}{ring}",
                                         "{caption}"
                                     }
                                 }
@@ -162,12 +162,12 @@ pub fn OskSheet(props: OskSheetProps) -> Element {
                 div {
                     style: "display:flex;gap:10px;align-items:center;",
                     span {
-                        style: "font-size:11px;color:#78788a;",
+                        style: "font-size:var(--text-micro);color:var(--text-muted);",
                         "D-pad moves · A types · B cancels"
                     }
                     button {
                         onclick: move |_| on_cancel.call(()),
-                        style: "margin-left:auto;padding:8px 16px;border-radius:10px;border:1px solid #2c2c38;background:#1e1e28;color:#c8c8d4;font-size:13px;cursor:pointer;",
+                        style: "margin-left:auto;padding:8px 16px;border-radius:10px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
                         "Cancel"
                     }
                 }
