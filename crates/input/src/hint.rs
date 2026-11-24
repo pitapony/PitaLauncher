@@ -21,12 +21,40 @@ pub struct Hint {
     pub action: Action,
     /// The short label printed before the action's name, e.g. `A` or `Enter`.
     pub label: String,
+    /// The word the footer prints for the action *on this screen*.
+    ///
+    /// The default row uses the action's own name (`Confirm`); a screen that
+    /// renames an action for what it does there (the game page's `Confirm` is
+    /// "Play") supplies its own via [`ScreenHint`].
+    pub name: String,
+}
+
+/// One action a screen advertises, with the word that screen gives it.
+///
+/// The action's own name (`Confirm`) is the generic one; a screen names what the
+/// action *does there* — the console game page's `Confirm` is "Play" and its
+/// `Menu` is "Overlay". Keeping the name beside the action means a screen's row
+/// and the action it names cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenHint {
+    /// The action the screen exposes.
+    pub action: Action,
+    /// The word the footer prints for it on this screen.
+    pub name: &'static str,
+}
+
+impl ScreenHint {
+    /// A screen's name for one action.
+    pub const fn new(action: Action, name: &'static str) -> Self {
+        Self { action, name }
+    }
 }
 
 /// The actions a footer names, in the order they read.
 ///
 /// A screen that hides some of them (a dialog with no `Menu`) filters this list
-/// rather than inventing its own order.
+/// rather than inventing its own order; [`hints_for`] takes a screen's own
+/// subset.
 pub const HINT_ACTIONS: [Action; 5] = [
     Action::Confirm,
     Action::Back,
@@ -35,19 +63,49 @@ pub const HINT_ACTIONS: [Action; 5] = [
     Action::Guide,
 ];
 
-/// The hint row for a map: each action's first binding, labelled.
+/// The console game page's cheat-sheet: Play, Overlay, Back.
+///
+/// The page's `Confirm` starts (or installs) the game and its `Menu` opens the
+/// overlay, so it names both for what they do here rather than `Confirm`/`Menu`.
+pub const GAME_PAGE_HINTS: [ScreenHint; 3] = [
+    ScreenHint::new(Action::Confirm, "Play"),
+    ScreenHint::new(Action::Menu, "Overlay"),
+    ScreenHint::new(Action::Back, "Back"),
+];
+
+/// The default hint row for a map: each action's first binding, labelled.
 ///
 /// An action the map leaves unbound is skipped, so a row never claims a key a
 /// remap removed. A binding with no short label (none in the built-in layouts)
 /// is skipped too.
 pub fn hints(map: &InputMap) -> Vec<Hint> {
-    HINT_ACTIONS
+    let default: Vec<ScreenHint> = HINT_ACTIONS
         .iter()
-        .filter_map(|&action| {
-            map.binding(action)
+        .map(|&action| ScreenHint::new(action, action_label(action)))
+        .collect();
+    hints_for(map, &default)
+}
+
+/// The hint row for a screen's own subset of actions.
+///
+/// The screen names the actions it exposes, in the order they read, and the word
+/// it prints for each. Every row is built the same way as [`hints`]: the action's
+/// *first* binding supplies the glyph, an action the map leaves unbound is
+/// skipped, and a binding with no short label is skipped. So a remap changes the
+/// glyph with no second table, and a screen can advertise `[Play, Overlay, Back]`
+/// without the default row's `Search`/`Shell`.
+pub fn hints_for(map: &InputMap, screen: &[ScreenHint]) -> Vec<Hint> {
+    screen
+        .iter()
+        .filter_map(|request| {
+            map.binding(request.action)
                 .first()
                 .and_then(binding_label)
-                .map(|label| Hint { action, label })
+                .map(|label| Hint {
+                    action: request.action,
+                    label,
+                    name: request.name.to_string(),
+                })
         })
         .collect()
 }
@@ -230,5 +288,66 @@ mod tests {
         let row = hints(&map);
         assert_eq!(row.len(), 1);
         assert_eq!(row[0].action, Action::Confirm);
+    }
+
+    // -- The per-screen subset --------------------------------------------
+
+    #[test]
+    fn the_default_row_names_each_action_by_its_own_label() {
+        let map = InputMap::gamepad("pad");
+        for hint in hints(&map) {
+            assert_eq!(hint.name, action_label(hint.action), "{hint:?}");
+        }
+    }
+
+    #[test]
+    fn the_game_page_row_names_play_overlay_and_back() {
+        let map = InputMap::gamepad("pad");
+        let row = hints_for(&map, &GAME_PAGE_HINTS);
+        let named: Vec<(&str, &str)> = row
+            .iter()
+            .map(|hint| (hint.label.as_str(), hint.name.as_str()))
+            .collect();
+        assert_eq!(
+            named,
+            [("A", "Play"), ("Start", "Overlay"), ("B", "Back")],
+            "the page's own words, in the order it reads them"
+        );
+    }
+
+    #[test]
+    fn a_screen_subset_drops_the_actions_it_does_not_expose() {
+        let map = InputMap::keyboard();
+        let row = hints_for(&map, &GAME_PAGE_HINTS);
+        assert_eq!(
+            row.iter().map(|hint| hint.action).collect::<Vec<_>>(),
+            [Action::Confirm, Action::Menu, Action::Back]
+        );
+        // The default row names Search and the shell key; the game page does not.
+        assert!(!row.iter().any(|hint| hint.action == Action::Search));
+        assert!(!row.iter().any(|hint| hint.action == Action::Guide));
+    }
+
+    #[test]
+    fn a_subset_skips_an_action_the_map_leaves_unbound() {
+        let mut map = InputMap::new("empty");
+        map.bind(Action::Confirm, Binding::key(Key::Enter));
+        let row = hints_for(&map, &GAME_PAGE_HINTS);
+        assert_eq!(row.len(), 1, "only the one bound action is named");
+        assert_eq!(row[0].name, "Play");
+        assert_eq!(row[0].label, "Enter");
+    }
+
+    #[test]
+    fn a_subset_follows_a_remap() {
+        let mut map = InputMap::gamepad("pad");
+        map.bind(Action::Confirm, Binding::button(Button::East));
+        let row = hints_for(&map, &GAME_PAGE_HINTS);
+        let play = row
+            .iter()
+            .find(|hint| hint.action == Action::Confirm)
+            .expect("Play is still bound");
+        assert_eq!(play.label, "B", "the remapped glyph, not the old one");
+        assert_eq!(play.name, "Play", "the screen's word is unchanged");
     }
 }

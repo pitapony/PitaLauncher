@@ -51,6 +51,7 @@ mod downloads;
 mod filter;
 mod focus;
 mod format;
+mod game_page;
 mod gamepad;
 mod grid;
 mod handoff;
@@ -676,6 +677,11 @@ fn App() -> Element {
             pitagames_art::ArtSize::Hero,
         )
     });
+    // Library folders the detail page's Steam-install tracker polls.
+    let detail_libraries = snapshot
+        .as_ref()
+        .map(|library| library.libraries.clone())
+        .unwrap_or_default();
     let downloads_snapshot: Downloads = (*board.read()).clone();
     let active_downloads: Vec<downloads::Download> = downloads_snapshot.active().cloned().collect();
     let finished_downloads: Vec<downloads::Download> =
@@ -789,7 +795,13 @@ fn App() -> Element {
     } else {
         input_maps.read().keyboard()
     };
-    let hint_row = pitagames_input::hints(&hint_map);
+    let hint_row = if shell_state.shell().is_console() && current_view == View::Detail {
+        // The console game page advertises only the actions it exposes, in its
+        // own words: Play (Confirm), Overlay (Menu), Back.
+        pitagames_input::hints_for(&hint_map, &pitagames_input::GAME_PAGE_HINTS)
+    } else {
+        pitagames_input::hints(&hint_map)
+    };
 
     // The grid is a child component so scroll-position changes re-render only
     // it, never the whole window (and never clone the library per scroll tick).
@@ -1332,6 +1344,12 @@ fn App() -> Element {
                             play,
                             play_events,
                             history_revision,
+                            shell: shell_state.shell,
+                            installs,
+                            install_events,
+                            events,
+                            board,
+                            libraries: detail_libraries.clone(),
                         }
                     }
                 }
@@ -1417,7 +1435,7 @@ fn App() -> Element {
                             style: "min-width:1.4rem;padding:0.05rem 0.35rem;border:1px solid #3a3a4a;border-radius:0.3rem;background:#1e1e28;color:#e8e8f0;text-align:center;font-weight:600;",
                             "{hint.label}"
                         }
-                        span { "{pitagames_input::action_label(hint.action)}" }
+                        span { "{hint.name}" }
                     }
                 }
             }

@@ -54,7 +54,9 @@ pub use action::{Action, ActionEvent, ActionKind, UnknownAction};
 pub use binding::{Axis, Binding, Button, Direction, Key, Stick};
 pub use focus::{FocusGraph, FocusId, FocusNode};
 pub use gamepad::{GilrsSource, SourceError};
-pub use hint::{HINT_ACTIONS, Hint, action_label, binding_label, hints};
+pub use hint::{
+    GAME_PAGE_HINTS, HINT_ACTIONS, Hint, ScreenHint, action_label, binding_label, hints, hints_for,
+};
 pub use map::{
     DEFAULT_DEADZONE, DEFAULT_REPEAT_DELAY_MS, DEFAULT_REPEAT_INTERVAL_MS, InputMap, InputMaps,
     InputMapsError, KEYBOARD_DEVICE,

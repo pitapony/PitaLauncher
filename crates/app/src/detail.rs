@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 
+use pitagames_core::ui::Shell;
 use pitagames_core::{AntiCheat, GameId, Profile, ProtonRef};
 use pitagames_db::{Db, HistoryRepository, StoredLaunch, StoredProfile};
 use pitagames_platform::proton::{DiscoveryReport, ProtonInstall};
@@ -19,12 +20,15 @@ use crate::View;
 use crate::anticheat::AnticheatView;
 use crate::copy::CopyButton;
 use crate::diagnostics::DiagnosticsEditor;
+use crate::downloads::{DownloadEvent, Downloads};
 use crate::focus::{self, ActionChannel};
 use crate::format;
+use crate::game_page::{self, Badge, BadgeKind, BadgeTone, Primary};
 use crate::library::GameEntry;
 use crate::persist;
 use crate::play::{Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
+use crate::store_installs::{InstallEvent, Installs};
 use crate::wrappers::WrapperEditor;
 use pitagames_input::Action;
 
@@ -60,6 +64,18 @@ pub struct DetailProps {
     pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
     /// Bumped when a supervised session ends, so the history card reloads.
     pub history_revision: Signal<u64>,
+    /// Which shell the window is in: the console shell opens on a full-bleed
+    /// hero, the desktop shell on the page's original chrome.
+    pub shell: Signal<Shell>,
+    /// The CLI stores' install queue: the console hero's Install action enqueues
+    /// into it.
+    pub installs: Signal<Installs>,
+    pub install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    /// The Downloads channel a Steam install is tracked through.
+    pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
+    pub board: Signal<Downloads>,
+    /// Library folders a Steam install's tracker polls.
+    pub libraries: Vec<PathBuf>,
 }
 
 /// The detail screen for one game.
@@ -343,6 +359,35 @@ pub fn Detail(props: DetailProps) -> Element {
     };
     let steam_root = props.steam_root.clone();
 
+    // The console game page's model: only true badges, and the one primary
+    // action. The desktop page keeps its original chrome, so the two shells read
+    // the same facts without the desktop layout changing.
+    let console = props.shell.read().is_console();
+    let forced_tool = compat_status.as_ref().map(|tool| tool.name.clone());
+    let badges = game_page::badges(&entry, anticheat_view.kind, forced_tool.as_deref());
+    let primary = game_page::primary_action(&entry);
+    let install_ready = (*props.install_events.read()).is_some();
+    let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
+        "Update"
+    } else {
+        "Install"
+    };
+    let meta_line = entry.meta_line();
+    let initial = title
+        .chars()
+        .next()
+        .map(|first| first.to_uppercase().to_string())
+        .unwrap_or_default();
+    // The hero URL is needed by both shells' chrome; the desktop branch used to
+    // move it out of `props`, so keep a clone for the console hero.
+    let hero_url = props.hero.clone();
+    // The console hero's Install action needs the same channels the grid uses.
+    let action_installs = props.installs;
+    let action_install_events = props.install_events;
+    let action_events = props.events;
+    let action_board = props.board;
+    let action_libraries = props.libraries.clone();
+
     // The resolved command mirrors what will actually run: `pitagames-shim` for
     // a Steam game, the umu/Proton (or store-client) hand-off for every other
     // store. Both recompute on every render from the selected profile plus the
@@ -403,12 +448,19 @@ pub fn Detail(props: DetailProps) -> Element {
     // moved into other closures below.
     let osk_db = db.clone();
     let osk_game = game_id.clone();
+    // The console hero's own button captures: the desktop branch below already
+    // owns `play_entry`/`play_db`, so the hero needs its own copies.
+    let hero_play_entry = entry.clone();
+    let hero_play_db = db.clone();
+    let hero_install_id = game_id.clone();
+    let hero_install_title = title.clone();
+    let hero_libraries = props.libraries.clone();
 
     // The detail screen's action drain. The app's one pump posts here; this
     // screen owns its own graph. The cells are the two primary actions the page
-    // always offers: Back, then Play when the game is wired and not running.
+    // always offers: Back, then Play or Install when the game can be started.
     // The runtime panels keep their pointer controls; a controller can reach
-    // Back and Play without a pointer.
+    // Back and the primary action without a pointer.
     let action_entry = play_entry.clone();
     let action_db = play_db.clone();
     let action_game = game_id.clone();
@@ -417,6 +469,7 @@ pub fn Detail(props: DetailProps) -> Element {
         let entry = action_entry.clone();
         let db = action_db.clone();
         let game = action_game.clone();
+        let libraries = action_libraries.clone();
         async move {
             while let Some(action) = channel.next().await {
                 if session.read().view() != View::Detail {
@@ -460,7 +513,10 @@ pub fn Detail(props: DetailProps) -> Element {
                     continue;
                 }
                 let playing = play_signal.read().label(&game).is_some();
-                let count = if play_wired && !playing { 2 } else { 1 };
+                // The page offers one primary action under Back: Play when the
+                // game is wired, Install when its files are missing or waiting.
+                let has_primary = matches!(primary, Primary::Play | Primary::Install);
+                let count = if has_primary && !playing { 2 } else { 1 };
                 match action {
                     Action::Back => {
                         let to = session.read().back();
@@ -474,9 +530,29 @@ pub fn Detail(props: DetailProps) -> Element {
                             let to = session.read().back();
                             session.write().set_view(to);
                         }
-                        Some(1) if play_wired && !playing => {
-                            start_play(error, play_signal, play_events, entry.clone(), db.clone());
-                        }
+                        Some(1) if !playing => match primary {
+                            Primary::Play => {
+                                start_play(
+                                    error,
+                                    play_signal,
+                                    play_events,
+                                    entry.clone(),
+                                    db.clone(),
+                                );
+                            }
+                            Primary::Install => crate::launch_start::start_install(
+                                &entry.game.id,
+                                entry.title(),
+                                action_installs,
+                                action_install_events,
+                                action_events,
+                                action_board,
+                                &libraries,
+                                error,
+                                session,
+                            ),
+                            Primary::Open => {}
+                        },
                         _ => {}
                     },
                     _ => {}
@@ -489,83 +565,230 @@ pub fn Detail(props: DetailProps) -> Element {
         div {
             style: "display:flex;flex-direction:column;gap:18px;padding:0 32px 40px;",
 
-            {
-                let focused = screen_focus.index() == Some(0);
-                let ring = focus::ring_style(focused);
-                let label = back_label(session.read().back());
-                rsx! {
-                    button {
-                        onclick: move |_| {
-                            let to = session.read().back();
-                            session.write().set_view(to);
-                        },
-                        style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
-                        "{label}"
-                    }
-                }
-            }
-
-            if let Some(hero) = props.hero {
+            if console {
+                // The console game page's full-bleed hero: the game's art behind
+                // its true badges, its title and its one primary action. Back is
+                // overlaid top-left (the cheat-sheet footer also names it), and
+                // the existing panels carry on below the fold.
                 div {
-                    style: "width:100%;max-width:760px;aspect-ratio:460/215;border-radius:12px;overflow:hidden;background:#1e1e28;",
-                    img {
-                        src: "{hero}",
-                        alt: "",
-                        style: "width:100%;height:100%;object-fit:cover;display:block;",
-                    }
-                }
-            }
+                    style: "position:relative;margin:0 -32px;height:44vh;min-height:280px;overflow:hidden;background:#1e1e28;",
 
-            div {
-                style: "display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;",
-                h2 {
-                    style: "margin:0;font-size:var(--text-title);font-weight:600;color:#ffffff;",
-                    "{title}"
-                }
-                if let Some(kind) = app_kind.clone() {
-                    span {
-                        style: "padding:2px 8px;border-radius:999px;border:1px solid #3a3a4c;color:var(--text-secondary);font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;",
-                        "{kind}"
+                    if let Some(url) = hero_url.clone() {
+                        img {
+                            src: "{url}",
+                            alt: "",
+                            style: "position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block;",
+                        }
+                    } else {
+                        div {
+                            style: "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:linear-gradient(135deg,#26263a,#191922);color:#414158;font-size:72px;font-weight:600;",
+                            "{initial}"
+                        }
                     }
-                }
-                if let Some(status) = status {
-                    span {
-                        style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--warning);",
-                        "{status}"
+
+                    div {
+                        style: "position:absolute;inset:0;background:linear-gradient(90deg, rgba(12,12,18,0.94) 0%, rgba(12,12,18,0.55) 55%, rgba(12,12,18,0.10) 100%);",
                     }
-                }
-                if let Some(label) = playing {
-                    span {
-                        style: "padding:8px 12px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:var(--success);font-size:var(--text-caption);",
-                        "{label}"
-                    }
-                } else if play_wired {
+
                     {
-                        let focused = screen_focus.index() == Some(1);
+                        let focused = screen_focus.index() == Some(0);
                         let ring = focus::ring_style(focused);
+                        let label = back_label(session.read().back());
                         rsx! {
                             button {
-                                disabled: !can_play,
                                 onclick: move |_| {
-                                    start_play(
-                                        error,
-                                        play_signal,
-                                        play_events,
-                                        play_entry.clone(),
-                                        play_db.clone(),
-                                    );
+                                    let to = session.read().back();
+                                    session.write().set_view(to);
                                 },
-                                style: "{play_style(can_play)}{ring}",
-                                "Play"
+                                style: "position:absolute;top:16px;left:16px;padding:8px 14px;border-radius:8px;border:1px solid #3a3a4c;background:rgba(18,18,26,0.82);color:#ffffff;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
+                                "{label}"
                             }
                         }
                     }
-                } else if let Some(reason) = play_blocked {
-                    // A button that cannot launch is worse than a sentence that
-                    // says so; the grid's Install action is the way forward here.
-                    span {
-                        style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:var(--text-muted);font-size:var(--text-caption);",
-                        "{reason}"
+
+                    div {
+                        style: "position:absolute;left:0;right:0;bottom:0;display:flex;flex-direction:column;gap:12px;padding:28px 40px;",
+
+                        // Only true badges: the store, the install/update state,
+                        // a loud anti-cheat chip when protected, and a forced
+                        // build when Steam is pinned to one.
+                        div {
+                            style: "display:flex;flex-wrap:wrap;gap:8px;",
+                            for (index, badge) in badges.iter().enumerate() {
+                                {
+                                    let style = badge_style(badge);
+                                    let label = badge.label.clone();
+                                    rsx! {
+                                        span {
+                                            key: "badge-{index}",
+                                            style: "{style}",
+                                            "{label}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        h2 {
+                            style: "margin:0;font-size:var(--text-title);font-weight:700;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+                            "{title}"
+                        }
+
+                        div {
+                            style: "display:flex;align-items:baseline;gap:12px;font-size:var(--text-body);color:var(--text-secondary);",
+                            span { "{meta_line}" }
+                            if let Some(status) = status {
+                                span {
+                                    style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--warning);",
+                                    "{status}"
+                                }
+                            }
+                        }
+
+                        div {
+                            style: "display:flex;gap:10px;margin-top:4px;max-width:560px;",
+
+                            if let Some(label) = playing {
+                                span {
+                                    style: "padding:12px 20px;border-radius:10px;border:1px solid #3a5a48;background:#243a2e;color:var(--success);font-size:var(--text-heading);",
+                                    "{label}"
+                                }
+                            } else if primary == Primary::Play {
+                                {
+                                    let focused = screen_focus.index() == Some(1);
+                                    let ring = focus::ring_style(focused);
+                                    rsx! {
+                                        button {
+                                            disabled: !can_play,
+                                            onclick: move |_| {
+                                                start_play(
+                                                    error,
+                                                    play_signal,
+                                                    play_events,
+                                                    hero_play_entry.clone(),
+                                                    hero_play_db.clone(),
+                                                );
+                                            },
+                                            style: "{hero_action_style(can_play)}{ring}",
+                                            "Play"
+                                        }
+                                    }
+                                }
+                            } else if primary == Primary::Install {
+                                {
+                                    let focused = screen_focus.index() == Some(1);
+                                    let ring = focus::ring_style(focused);
+                                    rsx! {
+                                        button {
+                                            disabled: !install_ready,
+                                            onclick: move |_| {
+                                                crate::launch_start::start_install(
+                                                    &hero_install_id,
+                                                    &hero_install_title,
+                                                    action_installs,
+                                                    action_install_events,
+                                                    action_events,
+                                                    action_board,
+                                                    &hero_libraries,
+                                                    error,
+                                                    session,
+                                                );
+                                            },
+                                            style: "{hero_install_style(install_ready)}{ring}",
+                                            "{install_label}"
+                                        }
+                                    }
+                                }
+                            } else if let Some(reason) = play_blocked {
+                                // A button that cannot launch is worse than a
+                                // sentence that says so.
+                                span {
+                                    style: "padding:12px 20px;border-radius:10px;border:1px solid #2c2c38;background:rgba(26,26,34,0.82);color:var(--text-muted);font-size:var(--text-caption);",
+                                    "{reason}"
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                {
+                    let focused = screen_focus.index() == Some(0);
+                    let ring = focus::ring_style(focused);
+                    let label = back_label(session.read().back());
+                    rsx! {
+                        button {
+                            onclick: move |_| {
+                                let to = session.read().back();
+                                session.write().set_view(to);
+                            },
+                            style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
+                            "{label}"
+                        }
+                    }
+                }
+
+                if let Some(hero) = hero_url.clone() {
+                    div {
+                        style: "width:100%;max-width:760px;aspect-ratio:460/215;border-radius:12px;overflow:hidden;background:#1e1e28;",
+                        img {
+                            src: "{hero}",
+                            alt: "",
+                            style: "width:100%;height:100%;object-fit:cover;display:block;",
+                        }
+                    }
+                }
+
+                div {
+                    style: "display:flex;align-items:baseline;gap:14px;flex-wrap:wrap;",
+                    h2 {
+                        style: "margin:0;font-size:var(--text-title);font-weight:600;color:#ffffff;",
+                        "{title}"
+                    }
+                    if let Some(kind) = app_kind.clone() {
+                        span {
+                            style: "padding:2px 8px;border-radius:999px;border:1px solid #3a3a4c;color:var(--text-secondary);font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;",
+                            "{kind}"
+                        }
+                    }
+                    if let Some(status) = status {
+                        span {
+                            style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--warning);",
+                            "{status}"
+                        }
+                    }
+                    if let Some(label) = playing {
+                        span {
+                            style: "padding:8px 12px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:var(--success);font-size:var(--text-caption);",
+                            "{label}"
+                        }
+                    } else if play_wired {
+                        {
+                            let focused = screen_focus.index() == Some(1);
+                            let ring = focus::ring_style(focused);
+                            rsx! {
+                                button {
+                                    disabled: !can_play,
+                                    onclick: move |_| {
+                                        start_play(
+                                            error,
+                                            play_signal,
+                                            play_events,
+                                            play_entry.clone(),
+                                            play_db.clone(),
+                                        );
+                                    },
+                                    style: "{play_style(can_play)}{ring}",
+                                    "Play"
+                                }
+                            }
+                        }
+                    } else if let Some(reason) = play_blocked {
+                        // A button that cannot launch is worse than a sentence that
+                        // says so; the grid's Install action is the way forward here.
+                        span {
+                            style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:var(--text-muted);font-size:var(--text-caption);",
+                            "{reason}"
+                        }
                     }
                 }
             }
@@ -1341,6 +1564,44 @@ fn play_style(enabled: bool) -> &'static str {
     } else {
         "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);cursor:default;"
     }
+}
+
+/// The console hero's primary Play button.
+fn hero_action_style(enabled: bool) -> String {
+    if enabled {
+        "padding:12px 28px;border-radius:10px;border:1px solid #3a5a8c;background:#2e3a56;color:#ffffff;font-size:var(--text-heading);font-weight:600;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);".to_string()
+    } else {
+        "padding:12px 28px;border-radius:10px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-heading);font-weight:600;cursor:default;".to_string()
+    }
+}
+
+/// The console hero's Install/Update button.
+fn hero_install_style(enabled: bool) -> String {
+    if enabled {
+        "padding:12px 28px;border-radius:10px;border:1px solid #3a5a48;background:#243024;color:#d8e8d0;font-size:var(--text-heading);font-weight:600;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);".to_string()
+    } else {
+        "padding:12px 28px;border-radius:10px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-heading);font-weight:600;cursor:default;".to_string()
+    }
+}
+
+/// The console badge chip's inline style, by kind and tone.
+///
+/// The store chip reads as identity (accent), the install chip is plain unless
+/// it warns, the anti-cheat chip is danger-red, and the forced-build chip is
+/// neutral. Every chip reads `--text-micro` so it scales with the shell.
+fn badge_style(badge: &Badge) -> String {
+    let (border, background, color) = match badge.kind {
+        BadgeKind::Store => ("#3f5c8c", "#243044", "#9ab0e8"),
+        BadgeKind::Install => match badge.tone {
+            BadgeTone::Warning => ("#5a4a2a", "#3a2e1e", "#e8c890"),
+            _ => ("#3a3a4c", "#1e1e28", "var(--text-secondary)"),
+        },
+        BadgeKind::AntiCheat => ("#6a2a2a", "#3a1e1e", "var(--danger)"),
+        BadgeKind::CompatTool => ("#3a3a4c", "#1e1e28", "var(--text-secondary)"),
+    };
+    format!(
+        "display:inline-flex;align-items:center;padding:5px 12px;border-radius:999px;border:1px solid {border};background:{background};color:{color};font-size:var(--text-micro);font-weight:600;text-transform:uppercase;letter-spacing:0.06em;"
+    )
 }
 
 fn create_style(disabled: bool) -> &'static str {

@@ -15,6 +15,9 @@ use pitagames_platform::anticheat::{self, AnticheatSource};
 pub struct AnticheatView {
     /// Short value for the info card, e.g. `Easy Anti-Cheat (detected)`.
     pub label: String,
+    /// The effective anti-cheat, after merging detection with curation. The
+    /// console game page's badge reads this to decide whether to draw at all.
+    pub kind: AntiCheat,
     /// Marker files found on disk, for the warning box.
     pub evidence: Vec<String>,
     /// The injection warning, when a concrete anti-cheat was found or curated.
@@ -26,6 +29,7 @@ impl AnticheatView {
     pub fn pending() -> Self {
         Self {
             label: "checking…".to_string(),
+            kind: AntiCheat::Unknown,
             evidence: Vec::new(),
             warning: None,
         }
@@ -59,6 +63,7 @@ pub fn summarize(install_dir: Option<&Path>, curated: AntiCheat) -> AnticheatVie
 
     AnticheatView {
         label,
+        kind: effective.kind,
         evidence,
         warning: anticheat::gate(effective.kind, true, false).message(),
     }
@@ -105,10 +110,25 @@ mod tests {
         // The compat DB says none, but the marker is proof.
         let view = summarize(Some(dir.path()), AntiCheat::None);
         assert_eq!(view.label, "Easy Anti-Cheat (detected)");
+        assert_eq!(
+            view.kind,
+            AntiCheat::Eac,
+            "the badge reads the effective kind"
+        );
         assert_eq!(view.evidence.len(), 1);
         assert!(view.evidence[0].contains("EasyAntiCheat"));
         let warning = view.warning.expect("a protected game warns");
         assert!(warning.contains("Easy Anti-Cheat"), "{warning}");
+    }
+
+    #[test]
+    fn an_unprotected_game_reports_its_kind_for_the_badge_rule() {
+        assert_eq!(summarize(None, AntiCheat::None).kind, AntiCheat::None);
+        assert_eq!(summarize(None, AntiCheat::Unknown).kind, AntiCheat::Unknown);
+        assert_eq!(
+            summarize(None, AntiCheat::BattlEye).kind,
+            AntiCheat::BattlEye
+        );
     }
 
     #[test]

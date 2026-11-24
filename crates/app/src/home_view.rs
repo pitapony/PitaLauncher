@@ -32,8 +32,9 @@ use crate::View;
 use crate::art;
 use crate::downloads::{DownloadEvent, Downloads};
 use crate::focus::{self, ActionChannel};
+use crate::game_page::Primary;
 use crate::home::{self, Home, HomeCell};
-use crate::library::{GameEntry, Library};
+use crate::library::Library;
 use crate::osk;
 use crate::play::{Play, PlayEvent};
 use crate::store_installs::{InstallEvent, Installs};
@@ -86,24 +87,6 @@ fn slot(slots: &Slots, index: usize) -> Option<Rc<MountedData>> {
 /// 10-foot design pass.
 fn tile_width() -> f64 {
     home::SHELF_TILE_WIDTH
-}
-
-/// The primary action the hero offers.
-enum Primary {
-    Play,
-    Install,
-    Open,
-}
-
-/// What pressing the hero does, given its install state.
-fn primary_action(entry: &GameEntry) -> Primary {
-    if entry.can_play() && entry.play_is_wired() {
-        Primary::Play
-    } else if entry.can_install() {
-        Primary::Install
-    } else {
-        Primary::Open
-    }
 }
 
 fn hero_button_style(enabled: bool, background: &str, color: &str) -> String {
@@ -273,7 +256,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         } else {
             "Install"
         };
-        let primary = primary_action(entry);
+        let primary = crate::game_page::primary_action(entry);
         let play_style = hero_button_style(can_play, "#2e3a56", "#ffffff");
         let install_style = hero_button_style(install_ready, "#243024", "#d8e8d0");
         let ring = focus::ring_style(focused == Some(0));
@@ -695,7 +678,7 @@ fn perform_home_action(
                 return;
             };
             let entry = &state.games[index];
-            match primary_action(entry) {
+            match crate::game_page::primary_action(entry) {
                 Primary::Play => crate::launch_start::start_play(
                     &entry.game,
                     entry.playtime(),
@@ -730,49 +713,5 @@ fn perform_home_action(
                 .write()
                 .open_detail(state.games[index].game.id.clone(), View::Home);
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use pitagames_core::{Game, GameId, Store};
-
-    fn entry(store: Store, id: &str, installed: bool, exe: Option<&str>) -> GameEntry {
-        let mut game = Game::new(GameId::new(store, id), "A Game");
-        game.installed = installed;
-        game.exe = exe.map(std::path::PathBuf::from);
-        GameEntry {
-            game,
-            phase: if installed {
-                pitagames_stores::InstallPhase::Installed
-            } else {
-                pitagames_stores::InstallPhase::NotInstalled
-            },
-            metadata: None,
-            owned: false,
-        }
-    }
-
-    #[test]
-    fn the_primary_action_follows_install_and_launch_state() {
-        assert!(matches!(
-            primary_action(&entry(Store::Steam, "620", true, None)),
-            Primary::Play
-        ));
-        assert!(matches!(
-            primary_action(&entry(Store::Steam, "620", false, None)),
-            Primary::Install
-        ));
-        // An installed Epic row the store cannot launch opens Details rather
-        // than offering a Play that could not work.
-        assert!(matches!(
-            primary_action(&entry(Store::Epic, "Gizmo", true, None)),
-            Primary::Open
-        ));
-        assert!(matches!(
-            primary_action(&entry(Store::Epic, "Gizmo", true, Some("/games/Gizmo.exe"))),
-            Primary::Play
-        ));
     }
 }
