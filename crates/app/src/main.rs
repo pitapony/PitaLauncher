@@ -1804,8 +1804,9 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 // which needs the listing's executable.
                                 let show_play = entry.game.installed && entry.play_is_wired();
                                 let playing = play.read().label(&game_id);
-                                let can_install = entry.can_install();
+                                let offers_install = entry.offers_install();
                                 let install_label = entry.install_action();
+                                let card_label = entry.card_label();
                                 // A queued/running CLI-store install owns the
                                 // card's action slot, so a second click cannot
                                 // queue a duplicate.
@@ -1919,7 +1920,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                     style: "flex:1;align-self:center;font-size:var(--text-micro);color:var(--accent);",
                                                     "{label}"
                                                 }
-                                            } else if can_install {
+                                            } else if offers_install {
                                                 button {
                                                     disabled: !install_enabled,
                                                     onclick: move |event| {
@@ -1950,7 +1951,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                             } else if !show_play {
                                                 span {
                                                     style: "flex:1;align-self:center;font-size:var(--text-micro);color:var(--text-muted);",
-                                                    "installed"
+                                                    "{card_label}"
                                                 }
                                             }
                                         }

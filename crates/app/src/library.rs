@@ -90,6 +90,27 @@ impl GameEntry {
         self.is_steam() || pitagames_stores::installer::is_installable(self.store())
     }
 
+    /// Whether an install action is available for this row.
+    ///
+    /// The files are missing (or an update is queued) *and* the store has an
+    /// installer. The game page's primary action and the grid card's Install
+    /// button both ask this, so neither offers a button that
+    /// [`pitagames_stores::installer::plan`] would reject for a store with no
+    /// installer.
+    pub fn offers_install(&self) -> bool {
+        self.can_install() && self.install_is_wired()
+    }
+
+    /// The passive label a grid card shows in its action slot when it has no
+    /// button.
+    ///
+    /// A plain install keeps the plain "installed" word; a row with no action
+    /// names its status instead — a `Local`/imported game with no installer shows
+    /// "not installed" rather than a button that could only error.
+    pub fn card_label(&self) -> &'static str {
+        self.status_label().unwrap_or("installed")
+    }
+
     /// Why Play is unavailable, as the detail page's sentence.
     ///
     /// `None` means the row is wired; the button can still be disabled for a
@@ -1256,6 +1277,46 @@ mod tests {
             !entry_for(Store::Local).install_is_wired(),
             "an imported row has no installer, so Install would only error"
         );
+    }
+
+    #[test]
+    fn a_card_offers_install_only_when_the_store_has_an_installer() {
+        // The grid card's Install button is gated on the same predicate as the
+        // game page's primary action (`offers_install`), so a Local/imported row
+        // never offers a button `installer::plan` would reject.
+        let row = |store: Store, installed: bool| {
+            let phase = if installed {
+                InstallPhase::Installed
+            } else {
+                InstallPhase::NotInstalled
+            };
+            let mut entry = entry("x", "Game", phase, installed);
+            entry.game.id = GameId::new(store, "x");
+            entry
+        };
+
+        assert!(
+            row(Store::Epic, false).offers_install(),
+            "an Epic missing row still installs"
+        );
+        assert!(row(Store::Amazon, false).offers_install());
+        assert!(row(Store::Gog, false).offers_install());
+        assert!(
+            row(Store::Steam, false).offers_install(),
+            "Steam installs through its own client"
+        );
+        assert!(
+            !row(Store::Local, false).offers_install(),
+            "a Local row has no installer, so it shows no Install button"
+        );
+        assert!(
+            !row(Store::Epic, true).offers_install(),
+            "an installed row has nothing to fetch"
+        );
+
+        // The passive fallback names the status instead of a dead button.
+        assert_eq!(row(Store::Local, false).card_label(), "not installed");
+        assert_eq!(row(Store::Epic, true).card_label(), "installed");
     }
 
     #[test]

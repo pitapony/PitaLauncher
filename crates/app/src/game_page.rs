@@ -114,7 +114,7 @@ pub enum Primary {
 pub fn primary_action(entry: &GameEntry) -> Primary {
     if entry.can_play() && entry.play_is_wired() {
         Primary::Play
-    } else if entry.can_install() && entry.install_is_wired() {
+    } else if entry.offers_install() {
         Primary::Install
     } else {
         Primary::Open
