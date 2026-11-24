@@ -388,6 +388,26 @@ pub fn header_style(_shell: Shell, _display: &DisplayConfig) -> String {
         .to_string()
 }
 
+/// The console destination strip's per-destination style.
+///
+/// The strip is a *passive* indicator: it names the shell's type and hit tokens
+/// so a destination reads at 10 feet, but it is not a control — no
+/// `cursor:pointer`, no hover rule, and it never enters a focus graph. `Tab`
+/// moves the highlight; the strip only reports where the window is.
+pub fn destination_strip_style(active: bool) -> String {
+    let base = format!(
+        "display:inline-flex;align-items:center;padding:calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));border-radius:999px;font-size:var(--text-caption);white-space:nowrap;{}",
+        HIT_FLOOR
+    );
+    if active {
+        format!("{base}border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;")
+    } else {
+        format!(
+            "{base}border:1px solid transparent;background:transparent;color:var(--text-muted);"
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,6 +536,23 @@ mod tests {
         let display = DisplayConfig::default();
         let header = header_style(Shell::Console, &display);
         assert!(header.contains("font-size:var(--text-caption)"));
+    }
+
+    #[test]
+    fn the_destination_strip_is_a_passive_indicator() {
+        let active = destination_strip_style(true);
+        let inactive = destination_strip_style(false);
+        for style in [&active, &inactive] {
+            // Readable at 10 feet and consistent with the nav: the shell's
+            // caption token and the shell's hit floor, never a literal size.
+            assert!(style.contains("font-size:var(--text-caption)"), "{style}");
+            assert!(style.contains("var(--hit-min)"), "{style}");
+            // Passive: an indicator, not a control. No pointer affordance, so
+            // it can never read as a hover-only action.
+            assert!(!style.contains("cursor:pointer"), "{style}");
+        }
+        assert!(active.contains("color:#ffffff"), "{active}");
+        assert!(inactive.contains("var(--text-muted)"), "{inactive}");
     }
 
     #[test]

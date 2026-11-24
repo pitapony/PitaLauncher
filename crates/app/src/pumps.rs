@@ -482,6 +482,20 @@ pub(crate) fn gamepad_actions(
                             crate::guide_action(&mut shell, session, pad_handoff);
                             continue;
                         }
+                        // `Tab` cycles the destinations. It is the app's job, not
+                        // a screen's, so it works on every screen — including the
+                        // four with no focus graph — and the console strip and the
+                        // desktop pills read one ring.
+                        if matches!(
+                            action.action,
+                            pitagames_input::Action::TabNext | pitagames_input::Action::TabPrev
+                        ) {
+                            crate::tab_action(
+                                session,
+                                action.action == pitagames_input::Action::TabNext,
+                            );
+                            continue;
+                        }
                         crate::dispatch_action(
                             action.action,
                             session,
@@ -802,8 +816,10 @@ pub(crate) fn keyboard(
         if session.read().text_focused() && action != pitagames_input::Action::Back {
             return;
         }
-        // Movement may repeat while a key is held; Confirm/Back must not.
-        if key_event.repeat && !action.is_navigation() {
+        // Movement may repeat while a key is held; Confirm/Back must not. The
+        // repeat set is `Action::repeats()`, so a held `Tab` cycles destinations
+        // exactly as a held direction walks the grid.
+        if key_event.repeat && !action.repeats() {
             return;
         }
         // `M` opens the console overlay, the keyboard's answer to the pad's
@@ -817,6 +833,15 @@ pub(crate) fn keyboard(
         // the hand-off's "game ended" badge).
         if action == pitagames_input::Action::Guide {
             crate::guide_action(&mut key_shell, session, key_handoff);
+            return;
+        }
+        // `Tab`/`Q` cycle the destinations; the app owns the ring, so a screen
+        // never has to.
+        if matches!(
+            action,
+            pitagames_input::Action::TabNext | pitagames_input::Action::TabPrev
+        ) {
+            crate::tab_action(session, action == pitagames_input::Action::TabNext);
             return;
         }
         crate::dispatch_action(

@@ -219,6 +219,8 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
 // `View` lives in `navigation` now; re-export it so existing `crate::View`
 // paths and `use crate::View` keep working (ADR-0027).
 pub(crate) use navigation::View;
+// The console top bar draws this ring and `Tab` cycles it, so both read one list.
+pub(crate) use navigation::DESTINATIONS;
 
 /// The handle every metadata enqueuer holds.
 ///
@@ -1156,77 +1158,95 @@ fn App() -> Element {
                         style: "font-size:inherit;color:var(--text-muted);",
                         "{shell_hint}"
                     }
-                }
-                input {
-                    placeholder: "Search your library",
-                    value: "{session.read().filter().query}",
-                    oninput: move |event| session.write().filter_mut().query = event.value(),
-                    onfocus: move |_| session.write().set_text_focused(true),
-                    onblur: move |_| session.write().set_text_focused(false),
-                    style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-size:inherit;outline:none;",
+                    // The console top bar: a passive destination strip, in the
+                    // desktop pill order. `Tab` cycles it; it is not focusable
+                    // and has no hover rule, so it is an indicator rather than a
+                    // control. No text field is mounted in the console shell.
+                    div {
+                        style: "display:flex;flex-wrap:wrap;align-items:center;gap:0.5rem;margin-left:auto;",
+                        for destination in DESTINATIONS {
+                            span {
+                                style: shell::destination_strip_style(current_view == destination),
+                                "{destination.label()}"
+                            }
+                        }
+                    }
+                } else {
+                    input {
+                        placeholder: "Search your library",
+                        value: "{session.read().filter().query}",
+                        oninput: move |event| session.write().filter_mut().query = event.value(),
+                        onfocus: move |_| session.write().set_text_focused(true),
+                        onblur: move |_| session.write().set_text_focused(false),
+                        style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-size:inherit;outline:none;",
+                    }
                 }
             }
 
-            div {
-                style: "display:flex;gap:8px;padding:0 32px 16px;",
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Home);
-                    },
-                    style: nav_style(current_view == View::Home),
-                    "Home"
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Library);
-                    },
-                    style: nav_style(current_view == View::Library),
-                    "Library"
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Downloads);
-                    },
-                    style: nav_style(current_view == View::Downloads),
-                    "Downloads"
-                    if active_count > 0 {
-                        " ({active_count})"
+            // The desktop pill nav. The console shell shows the passive strip in
+            // the header instead: destinations stay reachable there through `Tab`.
+            if !shell_state.shell().is_console() {
+                div {
+                    style: "display:flex;gap:8px;padding:0 32px 16px;",
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Home);
+                        },
+                        style: nav_style(current_view == View::Home),
+                        "{View::Home.label()}"
                     }
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::History);
-                    },
-                    style: nav_style(current_view == View::History),
-                    "History"
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Stores);
-                    },
-                    style: nav_style(current_view == View::Stores),
-                    "Stores"
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Account);
-                    },
-                    style: nav_style(current_view == View::Account),
-                    "Account"
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Controls);
-                    },
-                    style: nav_style(current_view == View::Controls),
-                    "Controls"
-                }
-                button {
-                    onclick: move |_| {
-                        session.write().go(View::Logs);
-                    },
-                    style: nav_style(current_view == View::Logs),
-                    "Logs"
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Library);
+                        },
+                        style: nav_style(current_view == View::Library),
+                        "{View::Library.label()}"
+                    }
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Downloads);
+                        },
+                        style: nav_style(current_view == View::Downloads),
+                        "{View::Downloads.label()}"
+                        if active_count > 0 {
+                            " ({active_count})"
+                        }
+                    }
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::History);
+                        },
+                        style: nav_style(current_view == View::History),
+                        "{View::History.label()}"
+                    }
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Stores);
+                        },
+                        style: nav_style(current_view == View::Stores),
+                        "{View::Stores.label()}"
+                    }
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Account);
+                        },
+                        style: nav_style(current_view == View::Account),
+                        "{View::Account.label()}"
+                    }
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Controls);
+                        },
+                        style: nav_style(current_view == View::Controls),
+                        "{View::Controls.label()}"
+                    }
+                    button {
+                        onclick: move |_| {
+                            session.write().go(View::Logs);
+                        },
+                        style: nav_style(current_view == View::Logs),
+                        "{View::Logs.label()}"
+                    }
                 }
             }
 
@@ -2093,6 +2113,16 @@ pub(crate) fn guide_action(
         return;
     }
     toggle_shell(shell, session);
+}
+
+/// `Tab`'s app-level job: cycle the current view through the destinations.
+///
+/// Handled at the app level, not by a screen, so it works wherever the player is
+/// — the console strip and the desktop pills read the one ring in
+/// [`navigation::DESTINATIONS`], so a `Tab` step can never land on a screen the
+/// strip does not show.
+pub(crate) fn tab_action(mut session: Signal<crate::session::Session>, forward: bool) {
+    session.write().tab(forward);
 }
 
 /// Toggle the shell and land the player on the shell's home screen.

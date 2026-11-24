@@ -23,6 +23,60 @@ pub(crate) enum View {
     Logs,
 }
 
+/// The top-level destinations, in the desktop pill order.
+///
+/// `Detail` is deliberately absent: it is a page opened *from* a destination,
+/// not a destination itself. The console top bar draws this strip and `Tab`
+/// cycles it, so the two can never disagree about which screens exist.
+pub(crate) const DESTINATIONS: [View; 8] = [
+    View::Home,
+    View::Library,
+    View::Downloads,
+    View::History,
+    View::Stores,
+    View::Account,
+    View::Controls,
+    View::Logs,
+];
+
+impl View {
+    /// The label a nav pill or the console destination strip shows.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Home => "Home",
+            Self::Library => "Library",
+            Self::Downloads => "Downloads",
+            Self::History => "History",
+            Self::Stores => "Stores",
+            // Not a destination, but the enum is closed and a label is cheap.
+            Self::Detail => "Details",
+            Self::Account => "Account",
+            Self::Controls => "Controls",
+            Self::Logs => "Logs",
+        }
+    }
+}
+
+/// The destination a `Tab` step lands on.
+///
+/// `forward` moves to the next destination in [`DESTINATIONS`] and wraps at the
+/// end; `false` moves backwards and wraps at the start. A view that is not a
+/// destination (the detail page) has no place in the ring, so forward lands on
+/// the first destination and backward on the last — a defined answer either way,
+/// so `Tab` is never a no-op.
+pub(crate) fn cycle_destination(view: View, forward: bool) -> View {
+    let current = DESTINATIONS
+        .iter()
+        .position(|destination| *destination == view);
+    let index = match (current, forward) {
+        (Some(index), true) => (index + 1) % DESTINATIONS.len(),
+        (Some(index), false) => (index + DESTINATIONS.len() - 1) % DESTINATIONS.len(),
+        (None, true) => 0,
+        (None, false) => DESTINATIONS.len() - 1,
+    };
+    DESTINATIONS[index]
+}
+
 /// Where the window is, where Back returns to, and what it has open.
 ///
 /// This is the concept every screen reaches for, so it lives in one module
@@ -117,6 +171,17 @@ impl Navigation {
         self.selected = Some(id);
         self.view = View::Detail;
     }
+
+    /// Cycle the current view to the next (`forward`) or previous destination.
+    ///
+    /// `Tab`'s job, handled at the app level so it works on every screen without
+    /// each one owning a copy of the ring. It clears the selection like [`go`],
+    /// so tabbing off the detail page leaves nothing half-open.
+    ///
+    /// [`go`]: Navigation::go
+    pub(crate) fn tab(&mut self, forward: bool) {
+        self.go(cycle_destination(self.view, forward));
+    }
 }
 
 #[cfg(test)]
@@ -187,6 +252,104 @@ mod tests {
         nav.search("portal".to_string());
         assert_eq!(nav.view(), View::Library);
         assert_eq!(nav.filter().query, "portal");
+        assert_eq!(nav.selected(), None);
+    }
+
+    // -- Tab destination cycling -------------------------------------------
+
+    #[test]
+    fn the_destinations_are_the_desktop_pill_order() {
+        assert_eq!(
+            DESTINATIONS,
+            [
+                View::Home,
+                View::Library,
+                View::Downloads,
+                View::History,
+                View::Stores,
+                View::Account,
+                View::Controls,
+                View::Logs,
+            ]
+        );
+        let labels: Vec<&str> = DESTINATIONS.iter().map(|view| view.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "Home",
+                "Library",
+                "Downloads",
+                "History",
+                "Stores",
+                "Account",
+                "Controls",
+                "Logs",
+            ]
+        );
+    }
+
+    #[test]
+    fn tab_next_cycles_through_every_destination_and_wraps() {
+        // Walking TabNext from Home visits every destination in pill order and
+        // comes back around, so nothing is stranded.
+        let mut nav = Navigation::new(View::Home);
+        let mut visited = vec![nav.view()];
+        for _ in 0..DESTINATIONS.len() {
+            nav.tab(true);
+            visited.push(nav.view());
+        }
+
+        let mut expected = DESTINATIONS.to_vec();
+        expected.push(View::Home);
+        assert_eq!(visited, expected);
+    }
+
+    #[test]
+    fn tab_prev_walks_the_destinations_backwards() {
+        let mut nav = Navigation::new(View::Home);
+        nav.tab(false);
+        assert_eq!(
+            nav.view(),
+            View::Logs,
+            "backwards from the first wraps to the last"
+        );
+        nav.tab(false);
+        assert_eq!(nav.view(), View::Controls);
+    }
+
+    #[test]
+    fn every_destination_reaches_every_other_with_tab() {
+        for start in DESTINATIONS {
+            let mut nav = Navigation::new(start);
+            let mut seen = std::collections::BTreeSet::new();
+            seen.insert(format!("{:?}", nav.view()));
+            for _ in 0..DESTINATIONS.len() - 1 {
+                nav.tab(true);
+                seen.insert(format!("{:?}", nav.view()));
+            }
+            assert_eq!(
+                seen.len(),
+                DESTINATIONS.len(),
+                "from {start:?} Tab reached only {} destinations",
+                seen.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_step_off_the_detail_page_lands_on_a_destination() {
+        // `Detail` is not a destination: forward lands on the first and
+        // backward on the last, and either way the open selection is cleared.
+        let mut nav = Navigation::new(View::Home);
+        nav.open_detail(id("620"), View::Library);
+        assert_eq!(nav.view(), View::Detail);
+        nav.tab(true);
+        assert_eq!(nav.view(), View::Home);
+        assert_eq!(nav.selected(), None);
+
+        nav.open_detail(id("620"), View::Library);
+        nav.tab(false);
+        assert_eq!(nav.view(), View::Logs);
         assert_eq!(nav.selected(), None);
     }
 }
