@@ -7,6 +7,8 @@
 
 use pitagames_core::GameId;
 
+use crate::filter::LibraryFilter;
+
 /// Which top-level list the window shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum View {
@@ -31,7 +33,7 @@ pub(crate) struct Navigation {
     view: View,
     back: View,
     selected: Option<GameId>,
-    query: String,
+    filter: LibraryFilter,
     text_focused: bool,
 }
 
@@ -43,7 +45,7 @@ impl Navigation {
             view,
             back: View::Library,
             selected: None,
-            query: String::new(),
+            filter: LibraryFilter::default(),
             text_focused: false,
         }
     }
@@ -60,8 +62,8 @@ impl Navigation {
         self.selected.clone()
     }
 
-    pub(crate) fn query(&self) -> String {
-        self.query.clone()
+    pub(crate) fn filter(&self) -> &LibraryFilter {
+        &self.filter
     }
 
     pub(crate) fn text_focused(&self) -> bool {
@@ -72,8 +74,8 @@ impl Navigation {
         self.view = view;
     }
 
-    pub(crate) fn set_query(&mut self, query: String) {
-        self.query = query;
+    pub(crate) fn filter_mut(&mut self) -> &mut LibraryFilter {
+        &mut self.filter
     }
 
     pub(crate) fn set_text_focused(&mut self, focused: bool) {
@@ -111,7 +113,7 @@ mod tests {
         assert_eq!(nav.view(), View::Home);
         assert_eq!(nav.back(), View::Library);
         assert_eq!(nav.selected(), None);
-        assert_eq!(nav.query(), "");
+        assert_eq!(nav.filter(), &LibraryFilter::default());
         assert!(!nav.text_focused());
     }
 
@@ -137,11 +139,13 @@ mod tests {
     }
 
     #[test]
-    fn the_query_and_text_focus_round_trip() {
+    fn the_filter_and_text_focus_round_trip() {
         let mut nav = Navigation::new(View::Library);
-        nav.set_query("half".to_string());
+        nav.filter_mut().query = "half".to_string();
+        nav.filter_mut().installed_only = true;
         nav.set_text_focused(true);
-        assert_eq!(nav.query(), "half");
+        assert_eq!(nav.filter().query, "half");
+        assert!(nav.filter().installed_only);
         assert!(nav.text_focused());
     }
 }

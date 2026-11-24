@@ -282,17 +282,6 @@ impl Library {
         }
     }
 
-    /// Filter by a case-insensitive title substring.
-    ///
-    /// Pre-ordered by title; the filter preserves the order.
-    pub fn filtered(&self, query: &str) -> Vec<&GameEntry> {
-        let query = query.trim().to_lowercase();
-        self.games
-            .iter()
-            .filter(|entry| query.is_empty() || entry.title().to_lowercase().contains(&query))
-            .collect()
-    }
-
     /// Games Steam is currently installing or updating: the downloads view
     /// starts following these as soon as the scan lands.
     pub fn in_flight(&self) -> Vec<&GameEntry> {
@@ -595,31 +584,6 @@ mod tests {
             libraries: Vec::new(),
             owned: OwnedSummary::default(),
         }
-    }
-
-    #[test]
-    fn filtering_is_case_insensitive_and_order_preserving() {
-        let library = library();
-        assert_eq!(library.filtered("").len(), 3);
-
-        let titles: Vec<&str> = library
-            .filtered("DOTA")
-            .iter()
-            .map(|entry| entry.title())
-            .collect();
-        assert_eq!(titles, vec!["Dota 2"]);
-
-        let titles: Vec<&str> = library
-            .filtered(" Portal ")
-            .iter()
-            .map(|entry| entry.title())
-            .collect();
-        assert_eq!(titles, vec!["portal"]);
-    }
-
-    #[test]
-    fn filtering_misses_nonmatches() {
-        assert!(library().filtered("half-life").is_empty());
     }
 
     #[test]

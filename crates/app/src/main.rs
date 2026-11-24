@@ -47,6 +47,7 @@ mod desktop_entry;
 mod detail;
 mod diagnostics;
 mod downloads;
+mod filter;
 mod focus;
 mod format;
 mod gamepad;
@@ -1156,8 +1157,8 @@ fn App() -> Element {
                 }
                 input {
                     placeholder: "Search your library",
-                    value: "{session.read().query()}",
-                    oninput: move |event| session.write().set_query(event.value()),
+                    value: "{session.read().filter().query}",
+                    oninput: move |event| session.write().filter_mut().query = event.value(),
                     onfocus: move |_| session.write().set_text_focused(true),
                     onblur: move |_| session.write().set_text_focused(false),
                     style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-size:inherit;outline:none;",
@@ -1535,7 +1536,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                 // with the current filter so editing never starts from nothing.
                 if action == pitagames_input::Action::Search {
                     osk.set(pitagames_input::OnScreenKeyboard::with_text(
-                        session.read().query(),
+                        session.read().filter().query.clone(),
                     ));
                     osk_open.set(true);
                     continue;
@@ -1564,8 +1565,13 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         };
     };
 
-    let needle = session.read().query();
-    let matches: Vec<&library::GameEntry> = state.filtered(&needle);
+    let matches: Vec<&library::GameEntry> = session
+        .read()
+        .filter()
+        .apply(state)
+        .into_iter()
+        .map(|index| &state.games[index])
+        .collect();
     let geometry = grid::GridGeometry::for_width(viewport_width());
     let window = grid::window(
         matches.len(),
@@ -1590,6 +1596,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let metadata_notes = state.metadata_warnings.clone();
     let metadata_warning_count = metadata_notes.len();
     let has_games = !state.games.is_empty();
+    let needle = session.read().filter().query.clone();
 
     // Bound as locals so the RSX format strings only interpolate identifiers.
     let columns = geometry.columns;
@@ -1882,7 +1889,7 @@ fn commit_search(
     mut osk_open: Signal<bool>,
     text: String,
 ) {
-    session.write().set_query(text);
+    session.write().filter_mut().query = text;
     screen_focus.set(None);
     osk_open.set(false);
 }
@@ -1909,8 +1916,8 @@ fn perform_action(
     // Back on the library clears the search before it leaves the screen; the
     // grid is the root view, so there is nowhere else to go.
     if action == pitagames_input::Action::Back {
-        if !session.read().query().is_empty() {
-            session.write().set_query(String::new());
+        if !session.read().filter().query.is_empty() {
+            session.write().filter_mut().query.clear();
         }
         return;
     }
@@ -1920,9 +1927,8 @@ fn perform_action(
         let Some(state) = guard.as_ref() else {
             return;
         };
-        let needle = session.read().query();
         let columns = grid::GridGeometry::for_width(viewport_width()).columns;
-        (state.filtered(&needle).len(), columns)
+        (session.read().filter().apply(state).len(), columns)
     };
     if count == 0 {
         return;
@@ -1961,12 +1967,11 @@ fn perform_action(
         let open = {
             let guard = library.read();
             guard.as_ref().and_then(|state| {
-                let needle = session.read().query();
-                let matches = state.filtered(&needle);
+                let indices = session.read().filter().apply(state);
                 screen_focus
                     .index()
-                    .filter(|index| *index < matches.len())
-                    .map(|index| matches[index].game.id.clone())
+                    .filter(|index| *index < indices.len())
+                    .map(|index| state.games[indices[index]].game.id.clone())
             })
         };
         if let Some(id) = open {
