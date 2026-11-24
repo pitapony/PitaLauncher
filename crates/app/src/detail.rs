@@ -28,6 +28,7 @@ use crate::library::GameEntry;
 use crate::persist;
 use crate::play::{Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
+use crate::shell;
 use crate::store_installs::{InstallEvent, Installs};
 use crate::wrappers::WrapperEditor;
 use pitagames_input::Action;
@@ -367,11 +368,9 @@ pub fn Detail(props: DetailProps) -> Element {
     let badges = game_page::badges(&entry, anticheat_view.kind, forced_tool.as_deref());
     let primary = game_page::primary_action(&entry);
     let install_ready = (*props.install_events.read()).is_some();
-    let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
-        "Update"
-    } else {
-        "Install"
-    };
+    // The hero button and the hero badge read one source
+    // (`GameEntry::install_status`), so they can never disagree.
+    let install_label = game_page::primary_label(&entry, primary);
     let meta_line = entry.meta_line();
     let initial = title
         .chars()
@@ -1558,30 +1557,30 @@ fn start_play(
     );
 }
 
-fn play_style(enabled: bool) -> &'static str {
-    if enabled {
-        "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
-    } else {
-        "margin-left:auto;padding:8px 22px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);cursor:default;"
-    }
+fn play_style(enabled: bool) -> String {
+    shell::action_style(
+        "margin-left:auto;padding:8px 22px;border-radius:8px;font-size:var(--text-body);",
+        "border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;",
+        enabled,
+    )
 }
 
 /// The console hero's primary Play button.
 fn hero_action_style(enabled: bool) -> String {
-    if enabled {
-        "padding:12px 28px;border-radius:10px;border:1px solid #3a5a8c;background:#2e3a56;color:#ffffff;font-size:var(--text-heading);font-weight:600;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);".to_string()
-    } else {
-        "padding:12px 28px;border-radius:10px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-heading);font-weight:600;cursor:default;".to_string()
-    }
+    shell::action_style(
+        "padding:12px 28px;border-radius:10px;font-size:var(--text-heading);font-weight:600;",
+        "border:1px solid #3a5a8c;background:#2e3a56;color:#ffffff;",
+        enabled,
+    )
 }
 
 /// The console hero's Install/Update button.
 fn hero_install_style(enabled: bool) -> String {
-    if enabled {
-        "padding:12px 28px;border-radius:10px;border:1px solid #3a5a48;background:#243024;color:#d8e8d0;font-size:var(--text-heading);font-weight:600;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);".to_string()
-    } else {
-        "padding:12px 28px;border-radius:10px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-heading);font-weight:600;cursor:default;".to_string()
-    }
+    shell::action_style(
+        "padding:12px 28px;border-radius:10px;font-size:var(--text-heading);font-weight:600;",
+        "border:1px solid #3a5a48;background:#243024;color:#d8e8d0;",
+        enabled,
+    )
 }
 
 /// The console badge chip's inline style, by kind and tone.
@@ -1604,12 +1603,12 @@ fn badge_style(badge: &Badge) -> String {
     )
 }
 
-fn create_style(disabled: bool) -> &'static str {
-    if disabled {
-        "padding:8px 16px;border-radius:8px;border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);font-size:var(--text-body);cursor:default;"
-    } else {
-        "padding:8px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#243024;color:#d8e8d0;font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);"
-    }
+fn create_style(disabled: bool) -> String {
+    shell::action_style(
+        "padding:8px 16px;border-radius:8px;font-size:var(--text-body);",
+        "border:1px solid #3a3a4c;background:#243024;color:#d8e8d0;",
+        !disabled,
+    )
 }
 
 /// One selectable Proton runtime in the detail page.

@@ -2352,31 +2352,23 @@ pub(crate) fn dispatch_action(
 /// Filter chip style. An active chip reads like the active nav pill; an
 /// inactive one is the plain card. The hit floor keeps it pad-reachable.
 fn chip_style(active: bool) -> String {
-    let floor = shell::HIT_FLOOR;
-    let base = format!(
-        "padding:calc(5px * var(--ui-scale, 1)) calc(12px * var(--ui-scale, 1));border-radius:999px;font-size:var(--text-caption);cursor:pointer;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;{floor}"
-    );
-    if active {
-        format!("{base}border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;")
-    } else {
-        format!("{base}border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);")
-    }
+    shell::pill_style(
+        active,
+        "calc(5px * var(--ui-scale, 1)) calc(12px * var(--ui-scale, 1))",
+        "cursor:pointer;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+        shell::PILL_INACTIVE,
+    )
 }
 
 fn nav_style(active: bool) -> String {
     // The type is the shell's caption token, so the console shell's navigation
     // reads from a couch without a second navigation rule.
-    let font = "var(--text-caption)";
-    let floor = shell::HIT_FLOOR;
-    if active {
-        format!(
-            "padding:calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));border-radius:999px;border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;font-size:{font};cursor:pointer;{floor}"
-        )
-    } else {
-        format!(
-            "padding:calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));border-radius:999px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:{font};cursor:pointer;{floor}"
-        )
-    }
+    shell::pill_style(
+        active,
+        "calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1))",
+        "cursor:pointer;",
+        shell::PILL_INACTIVE,
+    )
 }
 
 /// Card action button. A disabled action must look disabled: the grid relies on

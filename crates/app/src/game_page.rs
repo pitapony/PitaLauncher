@@ -107,16 +107,31 @@ pub enum Primary {
 /// What the page's one press does, given the game's install and launch state.
 ///
 /// A game that can be played (and whose store can launch it) plays; a game whose
-/// files are missing (or waiting on an update) installs; anything else opens the
-/// page's details rather than offering a button that could not work. The Continue
-/// hero reads the same rule, so the two surfaces cannot disagree.
+/// files are missing (or waiting on an update) installs, provided its store can
+/// install it; anything else opens the page's details rather than offering a
+/// button that could not work. The Continue hero reads the same rule, so the two
+/// surfaces cannot disagree.
 pub fn primary_action(entry: &GameEntry) -> Primary {
     if entry.can_play() && entry.play_is_wired() {
         Primary::Play
-    } else if entry.can_install() {
+    } else if entry.can_install() && entry.install_is_wired() {
         Primary::Install
     } else {
         Primary::Open
+    }
+}
+
+/// The word the primary action's button wears.
+///
+/// A Play button says "Play"; an Install button wears the **same** install/update
+/// word the page's install badge does — both read
+/// [`GameEntry::install_status`] — so the hero button and the hero badge for one
+/// game cannot disagree. `Open` shows no button.
+pub fn primary_label(entry: &GameEntry, primary: Primary) -> &'static str {
+    match primary {
+        Primary::Play => "Play",
+        Primary::Install => entry.install_status(),
+        Primary::Open => "",
     }
 }
 
@@ -180,6 +195,24 @@ mod tests {
                 ("Not installed", BadgeKind::Install),
             ]
         );
+    }
+
+    #[test]
+    fn the_install_button_wears_the_same_word_as_the_install_badge() {
+        // The button and the badge for one game read one source
+        // (`GameEntry::install_status`), so they can never disagree.
+        for phase in [InstallPhase::NotInstalled, InstallPhase::UpdateAvailable] {
+            let entry = entry(Store::Steam, phase, false, None);
+            let badge = badges(&entry, AntiCheat::Unknown, None)
+                .into_iter()
+                .find(|badge| badge.kind == BadgeKind::Install)
+                .expect("every row has an install badge");
+            assert_eq!(
+                primary_label(&entry, Primary::Install),
+                badge.label.as_str(),
+                "the hero button and the hero badge disagree"
+            );
+        }
     }
 
     #[test]
@@ -273,5 +306,32 @@ mod tests {
             )),
             Primary::Play
         );
+    }
+
+    #[test]
+    fn an_install_primary_needs_a_store_that_can_install() {
+        // A `Local`/imported row has no installer (`stores::installer::plan`
+        // rejects it), so offering Install would only produce an error. The
+        // page falls through to Open instead.
+        assert_eq!(
+            primary_action(&entry(
+                Store::Local,
+                InstallPhase::NotInstalled,
+                false,
+                None
+            )),
+            Primary::Open,
+            "a row with no installer never offers Install"
+        );
+
+        // Steam installs through its own client and the three CLI stores have a
+        // backend, so a missing game there still offers Install.
+        for store in [Store::Steam, Store::Epic, Store::Amazon, Store::Gog] {
+            assert_eq!(
+                primary_action(&entry(store, InstallPhase::NotInstalled, false, None)),
+                Primary::Install,
+                "{store} can install"
+            );
+        }
     }
 }

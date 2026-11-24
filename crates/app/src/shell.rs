@@ -388,24 +388,62 @@ pub fn header_style(_shell: Shell, _display: &DisplayConfig) -> String {
         .to_string()
 }
 
-/// The console destination strip's per-destination style.
+/// The highlight a selected pill wears.
 ///
-/// The strip is a *passive* indicator: it names the shell's type and hit tokens
-/// so a destination reads at 10 feet, but it is not a control — no
-/// `cursor:pointer`, no hover rule, and it never enters a focus graph. `Tab`
-/// moves the highlight; the strip only reports where the window is.
-pub fn destination_strip_style(active: bool) -> String {
-    let base = format!(
-        "display:inline-flex;align-items:center;padding:calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1));border-radius:999px;font-size:var(--text-caption);white-space:nowrap;{}",
-        HIT_FLOOR
-    );
-    if active {
-        format!("{base}border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;")
+/// Shared by the desktop nav, the filter chips and the console destination
+/// strip, so "selected" reads the same wherever it appears.
+pub const PILL_ACTIVE: &str = "border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;";
+
+/// The resting look of a *control* pill (the nav and the filter chips): the
+/// plain card, so an unselected control reads as a card rather than a hole.
+pub const PILL_INACTIVE: &str =
+    "border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);";
+
+/// A pill's inline style, shared by the nav, the filter chips and the console
+/// destination strip.
+///
+/// `padding` and `extra` are the row's own layout (a chip is tighter than a nav
+/// pill; the strip is a passive inline-flex indicator); `inactive` is the
+/// resting look — the plain card for a control, transparent for the strip. The
+/// type is the shell's caption token and the hit floor travels inline, so the
+/// shape is identical in both shells.
+pub fn pill_style(active: bool, padding: &str, extra: &str, inactive: &str) -> String {
+    let state = if active { PILL_ACTIVE } else { inactive };
+    format!(
+        "padding:{padding};border-radius:999px;{state}font-size:var(--text-caption);{extra}{HIT_FLOOR}"
+    )
+}
+
+/// An action button that must look disabled when it cannot work.
+///
+/// `layout` is everything before the state colours (padding, radius, type) and
+/// `enabled_colors` is the border/fill/text an enabled button wears. The
+/// disabled branch is one shared grey with no hit area, so a dead control cannot
+/// be focused or clicked. The detail page's Play, hero Play/Install and Save
+/// buttons all share this pair, so "disabled" reads the same across the page.
+pub fn action_style(layout: &str, enabled_colors: &str, enabled: bool) -> String {
+    if enabled {
+        format!("{layout}{enabled_colors}cursor:pointer;{HIT_FLOOR}")
     } else {
         format!(
-            "{base}border:1px solid transparent;background:transparent;color:var(--text-muted);"
+            "{layout}border:1px solid #26262f;background:#1a1a22;color:var(--text-disabled);cursor:default;"
         )
     }
+}
+
+/// The console destination strip's per-destination style.
+///
+/// The strip is a *passive* indicator: it wears the shared pill shape and the
+/// active highlight, but its resting look is transparent and it is not a
+/// control — no `cursor:pointer`, no hover rule, and it never enters a focus
+/// graph. `Tab` moves the highlight; the strip only reports where the window is.
+pub fn destination_strip_style(active: bool) -> String {
+    pill_style(
+        active,
+        "calc(6px * var(--ui-scale, 1)) calc(14px * var(--ui-scale, 1))",
+        "display:inline-flex;align-items:center;white-space:nowrap;",
+        "border:1px solid transparent;background:transparent;color:var(--text-muted);",
+    )
 }
 
 #[cfg(test)]
@@ -553,6 +591,43 @@ mod tests {
         }
         assert!(active.contains("color:#ffffff"), "{active}");
         assert!(inactive.contains("var(--text-muted)"), "{inactive}");
+    }
+
+    #[test]
+    fn the_pill_shape_is_shared_by_every_pill_row() {
+        // The nav, the filter chips and the destination strip all wear this
+        // shape, so "selected" reads the same wherever it appears.
+        let active = pill_style(true, "8px", "cursor:pointer;", PILL_INACTIVE);
+        assert!(active.contains(PILL_ACTIVE), "{active}");
+        assert!(active.contains("border-radius:999px;"), "{active}");
+        assert!(
+            active.contains("font-size:var(--text-caption);"),
+            "{active}"
+        );
+        assert!(active.contains(HIT_FLOOR), "{active}");
+
+        let inactive = pill_style(false, "8px", "cursor:pointer;", PILL_INACTIVE);
+        assert!(inactive.contains(PILL_INACTIVE), "{inactive}");
+        assert!(!inactive.contains(PILL_ACTIVE), "{inactive}");
+    }
+
+    #[test]
+    fn the_action_style_shares_one_disabled_look() {
+        let colors = "border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;";
+        let enabled = action_style("padding:1px;", colors, true);
+        assert!(enabled.contains(colors), "{enabled}");
+        assert!(enabled.contains("cursor:pointer;"), "{enabled}");
+        assert!(enabled.contains(HIT_FLOOR), "{enabled}");
+
+        // A dead control looks disabled and offers no hit area.
+        let disabled = action_style("padding:1px;", colors, false);
+        assert!(disabled.contains("background:#1a1a22;"), "{disabled}");
+        assert!(
+            disabled.contains("color:var(--text-disabled);"),
+            "{disabled}"
+        );
+        assert!(!disabled.contains("cursor:pointer"), "{disabled}");
+        assert!(!disabled.contains("var(--hit-min)"), "{disabled}");
     }
 
     #[test]

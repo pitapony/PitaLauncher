@@ -59,6 +59,17 @@ impl GameEntry {
             || (self.game.installed && pitagames_stores::launch::launches_by_id(self.store()))
     }
 
+    /// Whether the store's installer can fetch this row's files.
+    ///
+    /// Mirrors [`play_is_wired`]: Steam installs through its own client, the
+    /// three CLI stores through [`pitagames_stores::installer`], and a
+    /// `Local`/imported row has no installer at all — `installer::plan` rejects
+    /// it — so offering Install would only produce an error. `can_install` says
+    /// the files are missing; this says the store can fetch them.
+    pub fn install_is_wired(&self) -> bool {
+        self.is_steam() || pitagames_stores::installer::is_installable(self.store())
+    }
+
     /// Why Play is unavailable, as the detail page's sentence.
     ///
     /// `None` means the row is wired; the button can still be disabled for a
@@ -1118,6 +1129,30 @@ mod tests {
         let blocked = with_exe(Store::Epic, true, None).play_blocked().unwrap();
         assert!(blocked.contains("no launch executable"), "{blocked}");
         assert_eq!(with_exe(Store::Gog, true, None).play_blocked(), None);
+    }
+
+    #[test]
+    fn install_is_wired_per_store_shape() {
+        let entry_for = |store: Store| {
+            let mut entry = entry("x", "Game", InstallPhase::NotInstalled, false);
+            entry.game.id = GameId::new(store, "x");
+            entry
+        };
+
+        assert!(
+            entry_for(Store::Steam).install_is_wired(),
+            "Steam installs through its own client"
+        );
+        for store in [Store::Epic, Store::Amazon, Store::Gog] {
+            assert!(
+                entry_for(store).install_is_wired(),
+                "{store} has an installer backend"
+            );
+        }
+        assert!(
+            !entry_for(Store::Local).install_is_wired(),
+            "an imported row has no installer, so Install would only error"
+        );
     }
 
     #[test]

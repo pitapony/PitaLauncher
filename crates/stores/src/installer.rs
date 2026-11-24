@@ -184,6 +184,17 @@ impl std::fmt::Debug for InstallControl {
     }
 }
 
+/// Whether this store has an installer backend.
+///
+/// The three CLI stores do; Steam installs through its own client, and a
+/// `Local`/imported row has no installer at all. This is the one predicate the
+/// GUI asks before offering Install to a row whose files are missing, so a row
+/// that [`plan`] would reject never shows a button that could only error.
+#[must_use]
+pub const fn is_installable(store: Store) -> bool {
+    matches!(store, Store::Epic | Store::Amazon | Store::Gog)
+}
+
 /// Plan an install for `id`/`title`.
 ///
 /// The target comes from the store's own module (`epic::install_dir` and
@@ -502,6 +513,20 @@ mod tests {
         assert_eq!(
             plan(&game(Store::Local, "shortcut"), "Shortcut"),
             Err(InstallerError::Unsupported(Store::Local))
+        );
+    }
+
+    #[test]
+    fn only_the_three_cli_stores_are_installable() {
+        // The one predicate the GUI gates its Install button on: a store with no
+        // backend is not installable, so no button is offered for it.
+        assert!(is_installable(Store::Epic));
+        assert!(is_installable(Store::Amazon));
+        assert!(is_installable(Store::Gog));
+        assert!(!is_installable(Store::Steam), "Steam installs itself");
+        assert!(
+            !is_installable(Store::Local),
+            "an imported row has no installer"
         );
     }
 
