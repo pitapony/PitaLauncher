@@ -16,10 +16,24 @@
 use std::collections::{HashMap, HashSet};
 
 use pitagames_core::{Game, GameId, Store};
+use pitagames_input::{FocusGraph, FocusId};
 use pitagames_stores::InstallPhase;
 use pitagames_stores::status::updates;
 
 use crate::library::{GameEntry, Library};
+
+/// The stores a store chip can name, in the fixed order the row draws them —
+/// the same product order the home shelves use.
+pub const STORE_ORDER: [Store; 5] = [
+    Store::Steam,
+    Store::Epic,
+    Store::Amazon,
+    Store::Gog,
+    Store::Local,
+];
+
+/// Smallest width one chip needs before the row wraps, in CSS pixels.
+pub const CHIP_MIN_WIDTH: f64 = 140.0;
 
 /// How the filtered library is ordered.
 ///
@@ -39,6 +53,24 @@ pub enum Sort {
 impl Sort {
     /// Every mode, in the order the Sort chip cycles them.
     pub const ALL: [Sort; 3] = [Sort::Title, Sort::Playtime, Sort::Recent];
+
+    /// The label the Sort chip shows for this mode.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Title => "Title",
+            Self::Playtime => "Playtime",
+            Self::Recent => "Recent",
+        }
+    }
+
+    /// The next mode the Sort chip advances to; the cycle closes.
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Title => Self::Playtime,
+            Self::Playtime => Self::Recent,
+            Self::Recent => Self::Title,
+        }
+    }
 }
 
 impl Default for Sort {
@@ -143,6 +175,197 @@ impl LibraryFilter {
     }
 }
 
+/// One control in the filter chip row.
+///
+/// The row is a fixed order — Installed, Updates, one chip per non-empty store,
+/// then Sort — so a screen never has to guess where a chip goes. Each chip
+/// knows its own label and what a press does, which keeps the renderer a
+/// mapping from the model to buttons and nothing more.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chip {
+    /// Keep only the games whose files are on disk.
+    Installed,
+    /// Keep only the games that need an update or verification.
+    Updates,
+    /// Keep only this store; store chips multi-select.
+    Store(Store),
+    /// Cycle the sort mode.
+    Sort,
+}
+
+impl Chip {
+    /// The label the chip draws; the Sort chip names the mode it is on.
+    pub fn label(self, filter: &LibraryFilter) -> String {
+        match self {
+            Self::Installed => "Installed".to_string(),
+            Self::Updates => "Updates".to_string(),
+            Self::Store(store) => crate::home::store_label(store).to_string(),
+            Self::Sort => format!("Sort: {}", filter.sort.label()),
+        }
+    }
+
+    /// Whether the chip's filter is on. The Sort chip is a cycle, not a toggle,
+    /// so it is never "active".
+    pub fn is_active(self, filter: &LibraryFilter) -> bool {
+        match self {
+            Self::Installed => filter.installed_only,
+            Self::Updates => filter.needs_attention,
+            Self::Store(store) => filter.stores.contains(&store),
+            Self::Sort => false,
+        }
+    }
+
+    /// Apply one press of this chip to the filter.
+    ///
+    /// Installed/Updates flip in place; a store chip joins or leaves the
+    /// selected set, where an empty set means every store; Sort advances the
+    /// mode. Pure, so a chip and a test agree on what a press does.
+    pub fn toggle(self, filter: &mut LibraryFilter) {
+        match self {
+            Self::Installed => filter.installed_only = !filter.installed_only,
+            Self::Updates => filter.needs_attention = !filter.needs_attention,
+            Self::Store(store) => {
+                if let Some(index) = filter.stores.iter().position(|known| *known == store) {
+                    filter.stores.remove(index);
+                } else {
+                    filter.stores.push(store);
+                }
+            }
+            Self::Sort => filter.sort = filter.sort.next(),
+        }
+    }
+}
+
+/// The chips a library shows, in the fixed row order.
+///
+/// Installed and Updates are always present; then one store chip per store that
+/// has at least one row, in [`STORE_ORDER`]; then Sort. A store with no games
+/// contributes no chip, so the row never offers a filter that would empty the
+/// grid for a store the user does not own anything from.
+pub fn chips(library: &Library) -> Vec<Chip> {
+    let mut chips = vec![Chip::Installed, Chip::Updates];
+    for store in STORE_ORDER {
+        if library.games.iter().any(|entry| entry.store() == store) {
+            chips.push(Chip::Store(store));
+        }
+    }
+    chips.push(Chip::Sort);
+    chips
+}
+
+/// The filter chip row: its chips and the ragged graph over the chips and the
+/// tiles below them.
+///
+/// The chips are a fixed list, but the row wraps when it overflows, so the row
+/// owns the wrap count (`columns`) as well as the chips. The graph is the one
+/// place that knows a chip id and a tile id share one id space, so a
+/// [`ScreenFocus`](crate::focus::ScreenFocus) can store the flat id like a grid
+/// index and the renderer can ask which side a focused id is on.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChipRow {
+    chips: Vec<Chip>,
+    columns: usize,
+}
+
+impl ChipRow {
+    /// Build the row for a library, wrapping the chips into as many per line as
+    /// `available` CSS pixels fit (an unmeasured width puts them all on one).
+    pub fn build(library: &Library, available: f64) -> Self {
+        let chips = chips(library);
+        let columns = chip_columns(chips.len(), available);
+        Self {
+            chips,
+            columns: columns.max(1),
+        }
+    }
+
+    /// The chips, in row order.
+    pub fn chips(&self) -> &[Chip] {
+        &self.chips
+    }
+
+    /// How many chips fit on one line.
+    pub fn columns(&self) -> usize {
+        self.columns
+    }
+
+    /// The chip a focus id names, when the id is a chip rather than a tile.
+    pub fn chip(&self, id: FocusId) -> Option<Chip> {
+        self.chip_index(id)
+            .and_then(|index| self.chips.get(index).copied())
+    }
+
+    /// The chip index a focus id names.
+    pub fn chip_index(&self, id: FocusId) -> Option<usize> {
+        let index = usize::try_from(id.get()).ok()?;
+        (index < self.chips.len()).then_some(index)
+    }
+
+    /// The tile index a focus id names (tiles follow the chips in the id space).
+    pub fn tile_index(&self, id: FocusId) -> Option<usize> {
+        let index = usize::try_from(id.get()).ok()?;
+        (index >= self.chips.len()).then(|| index - self.chips.len())
+    }
+
+    /// The focus id of a tile by its index into the filtered list.
+    pub fn tile_id(&self, index: usize) -> FocusId {
+        FocusId::from(self.chips.len() + index)
+    }
+
+    /// The ragged graph: the chips on row 0 (wrapping), then the tiles.
+    pub fn graph(&self, tile_count: usize, tile_columns: usize) -> FocusGraph {
+        ragged_graph(self.chips.len(), self.columns, tile_count, tile_columns)
+    }
+}
+
+/// Build the ragged chip-over-tiles focus graph.
+///
+/// The chips are laid out row-major `chip_columns` to a line, so a row that does
+/// not fit wraps onto the next; the tiles begin on the row after the last chip
+/// row, row-major in `tile_columns`. A chip's id is its index in the row and a
+/// tile's id is `chip_count + index`, so `Up` from the top tile row reaches the
+/// chips and the two sets never share an id. A zero column count is treated as
+/// one column.
+pub fn ragged_graph(
+    chip_count: usize,
+    chip_columns: usize,
+    tile_count: usize,
+    tile_columns: usize,
+) -> FocusGraph {
+    let chip_columns = chip_columns.max(1);
+    let tile_columns = tile_columns.max(1);
+    let chip_rows = chip_count.div_ceil(chip_columns);
+
+    let mut graph = FocusGraph::new();
+    for index in 0..chip_count {
+        graph.insert(index, index / chip_columns, index % chip_columns);
+    }
+    for index in 0..tile_count {
+        graph.insert(
+            chip_count + index,
+            chip_rows + index / tile_columns,
+            index % tile_columns,
+        );
+    }
+    graph
+}
+
+/// How many chips fit on one line of `available` CSS pixels.
+///
+/// An unmeasured (or zero) width puts every chip on one line, so the first paint
+/// is not a one-chip-wide column; otherwise the row wraps at [`CHIP_MIN_WIDTH`]
+/// per chip and never returns zero.
+pub fn chip_columns(chip_count: usize, available: f64) -> usize {
+    if chip_count == 0 {
+        return 0;
+    }
+    if available <= 0.0 {
+        return chip_count;
+    }
+    let fit = (available / CHIP_MIN_WIDTH).floor() as usize;
+    fit.clamp(1, chip_count)
+}
+
 /// Title order, case-insensitively, with the id as a stable tie-break.
 fn title_cmp(left: &GameEntry, right: &GameEntry) -> std::cmp::Ordering {
     left.title()
@@ -180,6 +403,7 @@ mod tests {
     use time::OffsetDateTime;
 
     use super::*;
+    use pitagames_input::Action;
 
     fn at(seconds: i64) -> OffsetDateTime {
         OffsetDateTime::from_unix_timestamp(seconds).unwrap()
@@ -370,5 +594,256 @@ mod tests {
             ..LibraryFilter::default()
         };
         assert_eq!(filter.apply(&library), vec![0], "Dota 2 is the first entry");
+    }
+
+    // -- The chip row ------------------------------------------------------
+
+    #[test]
+    fn the_chip_row_is_installed_updates_then_the_non_empty_stores_then_sort() {
+        // The fixture spans Steam, Epic, GOG and Local, so Amazon has no chip.
+        let library = library();
+        let row = ChipRow::build(&library, 1_000.0);
+        assert_eq!(
+            row.chips(),
+            &[
+                Chip::Installed,
+                Chip::Updates,
+                Chip::Store(Store::Steam),
+                Chip::Store(Store::Epic),
+                Chip::Store(Store::Gog),
+                Chip::Store(Store::Local),
+                Chip::Sort,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_store_with_no_games_contributes_no_chip() {
+        let mut library = Library::default();
+        library
+            .games
+            .push(entry(Store::Steam, "1", "Only Game", true));
+        let row = ChipRow::build(&library, 1_000.0);
+        assert_eq!(
+            row.chips(),
+            &[
+                Chip::Installed,
+                Chip::Updates,
+                Chip::Store(Store::Steam),
+                Chip::Sort,
+            ],
+            "no Epic/Amazon/GOG/Local chip without a row from that store"
+        );
+    }
+
+    #[test]
+    fn the_chip_labels_name_the_sort_mode() {
+        let library = library();
+        let row = ChipRow::build(&library, 1_000.0);
+        let mut filter = LibraryFilter::default();
+        let labels: Vec<String> = row.chips().iter().map(|chip| chip.label(&filter)).collect();
+        assert_eq!(
+            labels,
+            [
+                "Installed",
+                "Updates",
+                "Steam",
+                "Epic",
+                "GOG",
+                "Local",
+                "Sort: Title",
+            ]
+        );
+
+        filter.sort = Sort::Playtime;
+        assert_eq!(Chip::Sort.label(&filter), "Sort: Playtime");
+        filter.sort = Sort::Recent;
+        assert_eq!(Chip::Sort.label(&filter), "Sort: Recent");
+    }
+
+    #[test]
+    fn toggling_installed_and_updates_refilters_the_grid() {
+        let mut filter = LibraryFilter::default();
+        assert_eq!(titles(&filter).len(), 5, "the neutral filter shows all");
+
+        Chip::Installed.toggle(&mut filter);
+        assert!(Chip::Installed.is_active(&filter));
+        assert_eq!(titles(&filter), ["Aardvark", "Dota 2", "Portal", "Zelda"]);
+
+        Chip::Installed.toggle(&mut filter);
+        assert!(!Chip::Installed.is_active(&filter));
+        assert_eq!(titles(&filter).len(), 5);
+
+        Chip::Updates.toggle(&mut filter);
+        assert!(Chip::Updates.is_active(&filter));
+        assert_eq!(titles(&filter), ["Aardvark", "Portal"]);
+    }
+
+    #[test]
+    fn store_chips_multiselect_and_none_means_every_store() {
+        let mut filter = LibraryFilter::default();
+
+        // None selected means all stores.
+        assert!(filter.stores.is_empty());
+        assert_eq!(titles(&filter).len(), 5);
+
+        Chip::Store(Store::Epic).toggle(&mut filter);
+        assert_eq!(titles(&filter), ["Gizmo Deluxe"]);
+
+        // A second store joins the selection.
+        Chip::Store(Store::Gog).toggle(&mut filter);
+        assert_eq!(titles(&filter), ["Aardvark", "Gizmo Deluxe"]);
+        assert!(Chip::Store(Store::Epic).is_active(&filter));
+        assert!(Chip::Store(Store::Gog).is_active(&filter));
+        assert!(!Chip::Store(Store::Steam).is_active(&filter));
+
+        // Toggling one off leaves the other.
+        Chip::Store(Store::Epic).toggle(&mut filter);
+        assert_eq!(titles(&filter), ["Aardvark"]);
+
+        // Toggling the last one off returns to every store.
+        Chip::Store(Store::Gog).toggle(&mut filter);
+        assert!(filter.stores.is_empty());
+        assert_eq!(titles(&filter).len(), 5);
+    }
+
+    #[test]
+    fn the_sort_chip_cycles_title_playtime_recent() {
+        let mut filter = LibraryFilter::default();
+        assert_eq!(filter.sort, Sort::Title);
+        assert!(!Chip::Sort.is_active(&filter), "a cycle is never 'on'");
+
+        Chip::Sort.toggle(&mut filter);
+        assert_eq!(filter.sort, Sort::Playtime);
+        assert_eq!(
+            titles(&filter),
+            ["Zelda", "Dota 2", "Aardvark", "Portal", "Gizmo Deluxe"]
+        );
+
+        Chip::Sort.toggle(&mut filter);
+        assert_eq!(filter.sort, Sort::Recent);
+
+        Chip::Sort.toggle(&mut filter);
+        assert_eq!(filter.sort, Sort::Title, "the cycle closes");
+    }
+
+    // -- The ragged chip-over-tiles graph ----------------------------------
+
+    fn cell(graph: &FocusGraph, id: usize) -> (usize, usize) {
+        let node = graph
+            .nodes()
+            .iter()
+            .find(|node| node.id == FocusId::from(id))
+            .unwrap_or_else(|| panic!("cell {id} is in the graph"));
+        (node.row, node.col)
+    }
+
+    #[test]
+    fn the_graph_lays_the_chips_on_row_zero_and_the_tiles_below() {
+        let graph = ragged_graph(3, 3, 4, 2);
+
+        assert_eq!(cell(&graph, 0), (0, 0));
+        assert_eq!(cell(&graph, 1), (0, 1));
+        assert_eq!(cell(&graph, 2), (0, 2));
+        assert_eq!(cell(&graph, 3), (1, 0), "the first tile row follows");
+        assert_eq!(cell(&graph, 4), (1, 1));
+        assert_eq!(cell(&graph, 5), (2, 0));
+        assert_eq!(cell(&graph, 6), (2, 1));
+        assert_eq!(graph.len(), 7);
+    }
+
+    #[test]
+    fn up_from_the_first_tile_row_reaches_a_chip() {
+        let mut graph = ragged_graph(3, 3, 4, 2);
+        graph.focus(3usize); // the first tile, at (1, 0)
+        let next = graph.move_focus(Action::NavigateUp).expect("a chip above");
+        assert_eq!(next, FocusId::from(0usize), "the chip directly above");
+    }
+
+    #[test]
+    fn an_overflowing_chip_row_wraps_and_the_tiles_follow_the_last_chip_row() {
+        // Six chips, four to a line: rows 0 and 1; the tiles start on row 2.
+        let graph = ragged_graph(6, 4, 3, 3);
+        assert_eq!(cell(&graph, 0), (0, 0));
+        assert_eq!(cell(&graph, 3), (0, 3));
+        assert_eq!(cell(&graph, 4), (1, 0), "the fifth chip wraps");
+        assert_eq!(cell(&graph, 5), (1, 1));
+        assert_eq!(
+            cell(&graph, 6),
+            (2, 0),
+            "tiles begin after the last chip row"
+        );
+    }
+
+    #[test]
+    fn up_from_the_top_tile_reaches_the_wrapped_chip_row() {
+        let mut graph = ragged_graph(6, 4, 3, 3);
+        graph.focus(7usize); // a tile on row 2
+        let next = graph.move_focus(Action::NavigateUp).expect("a chip above");
+        assert!(next.get() < 6, "Up landed on a chip, got {next}");
+    }
+
+    #[test]
+    fn every_cell_of_a_ragged_row_reaches_every_other() {
+        let graph = ragged_graph(6, 4, 7, 3);
+        let ids: Vec<FocusId> = graph.nodes().iter().map(|node| node.id).collect();
+        for start in &ids {
+            let mut seen = std::collections::BTreeSet::new();
+            seen.insert(*start);
+            let mut queue = vec![*start];
+            while let Some(current) = queue.pop() {
+                for action in [
+                    Action::NavigateUp,
+                    Action::NavigateDown,
+                    Action::NavigateLeft,
+                    Action::NavigateRight,
+                ] {
+                    let mut copy = graph.clone();
+                    copy.focus(current);
+                    if let Some(next) = copy.move_focus(action)
+                        && seen.insert(next)
+                    {
+                        queue.push(next);
+                    }
+                }
+            }
+            assert_eq!(
+                seen.len(),
+                ids.len(),
+                "from {start} only reached {} of {}",
+                seen.len(),
+                ids.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_chip_row_builds_its_graph_with_the_chips_as_the_first_ids() {
+        let library = library();
+        let row = ChipRow::build(&library, 1_000.0);
+        let graph = row.graph(4, 3);
+        assert_eq!(graph.len(), row.chips().len() + 4);
+        // The chip ids are the chip indices; the tiles follow.
+        assert_eq!(row.chip(FocusId::from(0usize)), Some(Chip::Installed));
+        assert_eq!(
+            row.chip(FocusId::from(2usize)),
+            Some(Chip::Store(Store::Steam))
+        );
+        assert_eq!(row.chip(row.tile_id(0)), None, "a tile id is not a chip");
+        assert_eq!(row.tile_index(row.tile_id(2)), Some(2));
+        assert_eq!(row.tile_index(FocusId::from(0usize)), None);
+    }
+
+    #[test]
+    fn chip_columns_fit_as_many_as_the_width_allows_and_never_zero() {
+        assert_eq!(chip_columns(0, 1_000.0), 0, "no chips, no columns");
+        assert_eq!(chip_columns(8, 0.0), 8, "unmeasured: one row");
+        assert_eq!(chip_columns(8, CHIP_MIN_WIDTH * 3.0), 3);
+        assert_eq!(
+            chip_columns(2, CHIP_MIN_WIDTH * 3.0),
+            2,
+            "never more columns than chips"
+        );
+        assert_eq!(chip_columns(8, 1.0), 1, "a narrow row holds at least one");
     }
 }

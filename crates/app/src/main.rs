@@ -1597,6 +1597,18 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let metadata_warning_count = metadata_notes.len();
     let has_games = !state.games.is_empty();
     let needle = session.read().filter().query.clone();
+    let filter_snapshot = session.read().filter().clone();
+    // The chip row and the tiles share one ragged graph; the chips sit above
+    // the scroll area, so their width is the scroll container's minus the same
+    // padding the grid uses.
+    let chip_row = filter::ChipRow::build(state, viewport_width() - 2.0 * grid::H_PADDING);
+    let chip_columns = chip_row.columns();
+    let focused_id = screen_focus.index();
+    let empty_message = if needle.is_empty() {
+        "Nothing matches the current filters.".to_string()
+    } else {
+        format!("Nothing matches \"{needle}\".")
+    };
 
     // Bound as locals so the RSX format strings only interpolate identifiers.
     let columns = geometry.columns;
@@ -1632,16 +1644,46 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                 style: "flex:1;padding:48px 32px;color:var(--text-muted);",
                 "No games yet. PitaGames reads Steam's own libraries; open Stores and choose \"Sync libraries\" to fetch your Epic, Amazon and GOG games."
             }
-        } else if window.is_empty() {
-            div {
-                style: "flex:1;padding:48px 32px;color:var(--text-muted);",
-                "Nothing matches \"{needle}\"."
-            }
         } else {
-            // The scroll viewport fills the window; the page itself never
-            // scrolls, so `onscroll` reports this container's offset.
+            // The chip row sits above the grid in both shells, so the two shells
+            // cannot drift. It wraps onto more lines on a narrow window.
             div {
-                style: "flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;",
+                style: "display:flex;flex-direction:column;flex:1;min-height:0;",
+
+                div {
+                    style: "display:grid;grid-template-columns:repeat({chip_columns},minmax(0,1fr));gap:8px;padding:0 32px 12px;",
+                    for (index, chip) in chip_row.chips().iter().enumerate() {
+                        {
+                            let chip = *chip;
+                            let label = chip.label(&filter_snapshot);
+                            let active = chip.is_active(&filter_snapshot);
+                            let ring = focus::ring_style(focused_id == Some(index));
+                            let style = chip_style(active);
+                            let mut session = session;
+                            rsx! {
+                                button {
+                                    key: "chip-{index}",
+                                    onclick: move |_| {
+                                        chip.toggle(session.write().filter_mut());
+                                    },
+                                    style: "{style}{ring}",
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if window.is_empty() {
+                    div {
+                        style: "flex:1;padding:48px 32px;color:var(--text-muted);",
+                        "{empty_message}"
+                    }
+                } else {
+                    // The scroll viewport fills the rest of the wrapper; the page
+                    // itself never scrolls, so `onscroll` reports this offset.
+                    div {
+                        style: "flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;",
                 onmounted: move |event| {
                     // Keep the handle: the focus pump scrolls the container
                     // imperatively so the focused row is drawn next render.
@@ -1682,7 +1724,8 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 // Every closure below needs owned data: rsx
                                 // children outlive this iteration.
                                 let card_index = window.item_start + offset;
-                                let focused = screen_focus.index() == Some(card_index);
+                                let focus_id = chip_row.tile_id(card_index).get() as usize;
+                                let focused = screen_focus.index() == Some(focus_id);
                                 let ring = focus::ring_style(focused);
                                 let app_id = entry.app_id().to_string();
                                 let title = entry.title().to_string();
@@ -1749,7 +1792,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                     div {
                                         key: "{card_key}",
                                         onclick: move |_| {
-                                            screen_focus.set(Some(card_index));
+                                            screen_focus.set(Some(focus_id));
                                             session.write().open_detail(open_id.clone(), View::Library);
                                         },
                                         style: "display:flex;flex-direction:column;gap:6px;padding:14px;box-sizing:border-box;height:{card_height}px;overflow:hidden;border-radius:12px;background:#1e1e28;border:1px solid #2c2c38;cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
@@ -1862,6 +1905,8 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                     }
                 }
             }
+                }
+            }
         }
 
         // The on-screen keyboard is an overlay, so it sits outside the scroll
@@ -1922,20 +1967,36 @@ fn perform_action(
         return;
     }
 
-    let (count, columns) = {
+    // The chip row and the tiles share one ragged graph: the chips are row 0 and
+    // the tiles follow, so `Up` from the top tile row reaches the chips and the
+    // row wraps when it overflows.
+    let (chip_row, indices) = {
         let guard = library.read();
         let Some(state) = guard.as_ref() else {
             return;
         };
-        let columns = grid::GridGeometry::for_width(viewport_width()).columns;
-        (session.read().filter().apply(state).len(), columns)
+        // With no games at all the screen draws its empty message and no chips,
+        // so there is nothing for a direction or a press to reach.
+        if state.games.is_empty() {
+            return;
+        }
+        let available = viewport_width() - 2.0 * grid::H_PADDING;
+        let chip_row = filter::ChipRow::build(state, available);
+        let indices = session.read().filter().apply(state);
+        (chip_row, indices)
     };
-    if count == 0 {
+    let columns = grid::GridGeometry::for_width(viewport_width()).columns;
+    let graph = chip_row.graph(indices.len(), columns);
+    if graph.is_empty() {
         return;
     }
 
     if action.is_navigation() {
-        let Some(index) = screen_focus.move_focus(action, count, columns) else {
+        let Some(id) = screen_focus.move_in(&graph, action) else {
+            return;
+        };
+        // A chip is pinned above the scroll area; only a tile scrolls.
+        let Some(tile) = chip_row.tile_index(id) else {
             return;
         };
         let geometry = grid::GridGeometry::for_width(viewport_width());
@@ -1943,7 +2004,7 @@ fn perform_action(
             scroll_top(),
             viewport_height(),
             geometry,
-            geometry.row_of(index),
+            geometry.row_of(tile),
             grid::ROW_GAP,
         );
         if (target - scroll_top()).abs() > 0.5 {
@@ -1964,16 +2025,23 @@ fn perform_action(
     }
 
     if action == pitagames_input::Action::Confirm {
-        let open = {
-            let guard = library.read();
-            guard.as_ref().and_then(|state| {
-                let indices = session.read().filter().apply(state);
-                screen_focus
-                    .index()
-                    .filter(|index| *index < indices.len())
-                    .map(|index| state.games[indices[index]].game.id.clone())
-            })
-        };
+        // A focused chip toggles its filter; a focused tile opens its page.
+        if let Some(id) = screen_focus.id()
+            && let Some(chip) = chip_row.chip(id)
+        {
+            chip.toggle(session.write().filter_mut());
+            return;
+        }
+        let open = screen_focus
+            .id()
+            .and_then(|id| chip_row.tile_index(id))
+            .filter(|index| *index < indices.len())
+            .and_then(|index| {
+                let guard = library.read();
+                guard
+                    .as_ref()
+                    .map(|state| state.games[indices[index]].game.id.clone())
+            });
         if let Some(id) = open {
             session.write().open_detail(id, View::Library);
         }
@@ -2201,6 +2269,20 @@ pub(crate) fn dispatch_action(
         }
     };
     let _ = channel.send(action);
+}
+
+/// Filter chip style. An active chip reads like the active nav pill; an
+/// inactive one is the plain card. The hit floor keeps it pad-reachable.
+fn chip_style(active: bool) -> String {
+    let floor = shell::HIT_FLOOR;
+    let base = format!(
+        "padding:calc(5px * var(--ui-scale, 1)) calc(12px * var(--ui-scale, 1));border-radius:999px;font-size:var(--text-caption);cursor:pointer;text-align:center;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;{floor}"
+    );
+    if active {
+        format!("{base}border:1px solid #3f5c8c;background:#2e3a56;color:#ffffff;")
+    } else {
+        format!("{base}border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);")
+    }
 }
 
 fn nav_style(active: bool) -> String {
