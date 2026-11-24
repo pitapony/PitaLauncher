@@ -167,10 +167,12 @@ The **primary action** is one press: **Play** when the game can play and its
 store can launch it, **Install** when its files are missing and its store has an
 installer (Steam or one of the CLI stores), else a sentence explaining why it
 cannot start. An **update waiting does not block play** — an installed game still
-shows Play, and the amber **Update** badge is what says an update exists. The
-**existing detail panels** (Profiles, Runtime, Diagnostics, resolved Command,
-Recent launches) are kept **below the fold**, so nothing becomes unreachable from
-a controller.
+shows Play, and the amber **Update** badge is what says an update exists. A button
+wears the **action** verb (`Install` / `Update`) while the badge wears the
+**state** word (`Not installed` / `Update` / `Installed`) — two presentations of
+one fact, so they cannot disagree. The **existing detail panels** (Profiles,
+Runtime, Diagnostics, resolved Command, Recent launches) are kept **below the
+fold**, so nothing becomes unreachable from a controller.
 
 The footer cheat-sheet on the game page names the page's own actions —
 `Play`, `Overlay`, `Back` — in the last device's glyphs.

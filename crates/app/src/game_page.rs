@@ -123,14 +123,15 @@ pub fn primary_action(entry: &GameEntry) -> Primary {
 
 /// The word the primary action's button wears.
 ///
-/// A Play button says "Play"; an Install button wears the **same** install/update
-/// word the page's install badge does — both read
-/// [`GameEntry::install_status`] — so the hero button and the hero badge for one
-/// game cannot disagree. `Open` shows no button.
+/// A Play button says "Play"; an Install button wears the install/update
+/// **action** verb ([`GameEntry::install_action`]) while the badge wears the
+/// **state** word ([`GameEntry::install_status`]). Both map from the same
+/// [`GameEntry::install_state`], so the button and the badge for one game cannot
+/// disagree about the fact. `Open` shows no button.
 pub fn primary_label(entry: &GameEntry, primary: Primary) -> &'static str {
     match primary {
         Primary::Play => "Play",
-        Primary::Install => entry.install_status(),
+        Primary::Install => entry.install_action(),
         Primary::Open => "",
     }
 }
@@ -198,9 +199,10 @@ mod tests {
     }
 
     #[test]
-    fn the_install_button_wears_the_same_word_as_the_install_badge() {
-        // The button and the badge for one game read one source
-        // (`GameEntry::install_status`), so they can never disagree.
+    fn the_badge_and_the_button_share_one_install_fact() {
+        // One fact, two presentations: the badge shows the state word, the
+        // button the action verb, and both map from `GameEntry::install_state`,
+        // so the two for one game cannot disagree.
         for phase in [InstallPhase::NotInstalled, InstallPhase::UpdateAvailable] {
             let entry = entry(Store::Steam, phase, false, None);
             let badge = badges(&entry, AntiCheat::Unknown, None)
@@ -208,11 +210,23 @@ mod tests {
                 .find(|badge| badge.kind == BadgeKind::Install)
                 .expect("every row has an install badge");
             assert_eq!(
+                badge.label,
+                entry.install_status(),
+                "the badge shows the state"
+            );
+            assert_eq!(
                 primary_label(&entry, Primary::Install),
-                badge.label.as_str(),
-                "the hero button and the hero badge disagree"
+                entry.install_action(),
+                "the button shows the action"
             );
         }
+
+        // An update does not block play: the primary is still Play, while the
+        // same row's action verb stays "Update" for any secondary affordance.
+        let update = entry(Store::Steam, InstallPhase::UpdateAvailable, true, None);
+        assert_eq!(primary_action(&update), Primary::Play);
+        assert_eq!(primary_label(&update, Primary::Install), "Update");
+        assert_eq!(update.install_status(), "Update");
     }
 
     #[test]

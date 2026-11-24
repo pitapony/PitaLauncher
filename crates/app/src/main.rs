@@ -1805,11 +1805,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 let show_play = entry.game.installed && entry.play_is_wired();
                                 let playing = play.read().label(&game_id);
                                 let can_install = entry.can_install();
-                                let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
-                                    "Update"
-                                } else {
-                                    "Install"
-                                };
+                                let install_label = entry.install_action();
                                 // A queued/running CLI-store install owns the
                                 // card's action slot, so a second click cannot
                                 // queue a duplicate.

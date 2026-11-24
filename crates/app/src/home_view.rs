@@ -251,11 +251,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         let queued = installs_snapshot.active_label(&entry.game.id);
         let can_play = entry.can_play();
         let can_install = entry.can_install();
-        let install_label = if entry.phase == pitagames_stores::InstallPhase::UpdateAvailable {
-            "Update"
-        } else {
-            "Install"
-        };
+        let install_label = entry.install_action();
         let primary = crate::game_page::primary_action(entry);
         let play_style = hero_button_style(can_play, "#2e3a56", "#ffffff");
         let install_style = hero_button_style(install_ready, "#243024", "#d8e8d0");

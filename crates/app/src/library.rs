@@ -29,6 +29,26 @@ pub struct GameEntry {
     pub owned: bool,
 }
 
+/// The install/update state of a row, as one value.
+///
+/// The single fact both the badge's *state* word ([`GameEntry::install_status`])
+/// and a button's *action* verb ([`GameEntry::install_action`]) derive from, so
+/// the two presentations for one game cannot disagree about the fact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallState {
+    /// Files are present and the store is not writing them.
+    Installed,
+    /// No files on disk.
+    NotInstalled,
+    /// Files are present but the store has a newer build queued.
+    UpdateAvailable,
+    /// A download/update/uninstall is in flight; carries the phase for its own
+    /// word ("downloading", "updating", …).
+    Busy(InstallPhase),
+    /// The state could not be read.
+    Unknown,
+}
+
 impl GameEntry {
     /// The store's own id (Steam appid for now).
     pub fn app_id(&self) -> &str {
@@ -135,18 +155,50 @@ impl GameEntry {
         }
     }
 
-    /// The install/update word a console tile always shows.
+    /// The install/update fact, as one value.
+    ///
+    /// The one source [`install_status`](Self::install_status) and
+    /// [`install_action`](Self::install_action) both map from, so a badge and a
+    /// button for one game cannot disagree.
+    pub fn install_state(&self) -> InstallState {
+        match self.phase {
+            InstallPhase::Installed => InstallState::Installed,
+            InstallPhase::NotInstalled => InstallState::NotInstalled,
+            InstallPhase::UpdateAvailable => InstallState::UpdateAvailable,
+            InstallPhase::Unknown => InstallState::Unknown,
+            busy => InstallState::Busy(busy),
+        }
+    }
+
+    /// The install/update *state* word a console tile and the game page's badge
+    /// always show.
     ///
     /// The desktop card leaves a plain installed game's status blank; a 10-foot
     /// tile states it instead, so the couch user can read what pressing Play
     /// will do before pressing it. The busy phases keep Steam's own word
     /// ("downloading", "updating", …).
     pub fn install_status(&self) -> &'static str {
-        match self.phase {
-            InstallPhase::Installed => "Installed",
-            InstallPhase::NotInstalled => "Not installed",
-            InstallPhase::UpdateAvailable => "Update",
-            other => other.as_str(),
+        match self.install_state() {
+            InstallState::Installed => "Installed",
+            InstallState::NotInstalled => "Not installed",
+            InstallState::UpdateAvailable => "Update",
+            InstallState::Busy(phase) => phase.as_str(),
+            InstallState::Unknown => InstallPhase::Unknown.as_str(),
+        }
+    }
+
+    /// The install/update *action* verb a button or CTA shows.
+    ///
+    /// The button's twin of [`install_status`](Self::install_status): the same
+    /// [`install_state`](Self::install_state), the verb instead of the noun — a
+    /// missing game is "Install", an available update is "Update". A state with
+    /// no install action (already installed, or busy) still maps to "Install";
+    /// the callers gate on `can_install`/`install_is_wired` before showing a
+    /// button at all.
+    pub fn install_action(&self) -> &'static str {
+        match self.install_state() {
+            InstallState::UpdateAvailable => "Update",
+            _ => "Install",
         }
     }
 
@@ -668,6 +720,57 @@ mod tests {
             entry("620", "Portal 2", InstallPhase::Downloading, true).install_status(),
             "downloading"
         );
+    }
+
+    #[test]
+    fn the_install_state_maps_to_a_state_word_and_an_action_verb() {
+        // One fact, two presentations: the badge reads the state word, a button
+        // the action verb. Both map from `install_state`, so they cannot
+        // disagree about the fact.
+        let cases = [
+            (
+                InstallPhase::Installed,
+                InstallState::Installed,
+                "Installed",
+                "Install",
+            ),
+            (
+                InstallPhase::NotInstalled,
+                InstallState::NotInstalled,
+                "Not installed",
+                "Install",
+            ),
+            (
+                InstallPhase::UpdateAvailable,
+                InstallState::UpdateAvailable,
+                "Update",
+                "Update",
+            ),
+            (
+                InstallPhase::Downloading,
+                InstallState::Busy(InstallPhase::Downloading),
+                "downloading",
+                "Install",
+            ),
+            (
+                InstallPhase::Updating,
+                InstallState::Busy(InstallPhase::Updating),
+                "updating",
+                "Install",
+            ),
+            (
+                InstallPhase::Unknown,
+                InstallState::Unknown,
+                "unknown",
+                "Install",
+            ),
+        ];
+        for (phase, state, status, action) in cases {
+            let entry = entry("620", "Game", phase, phase.is_installed());
+            assert_eq!(entry.install_state(), state, "{phase:?} state");
+            assert_eq!(entry.install_status(), status, "{phase:?} status");
+            assert_eq!(entry.install_action(), action, "{phase:?} action");
+        }
     }
 
     #[test]
