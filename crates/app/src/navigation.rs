@@ -78,6 +78,26 @@ impl Navigation {
         &mut self.filter
     }
 
+    /// Clear the library filter back to the neutral one.
+    ///
+    /// `Back` on the grid clears a narrowing filter before it leaves, so the
+    /// rule lives on the model the screen already reaches through the session.
+    pub(crate) fn clear_filter(&mut self) {
+        self.filter.clear();
+    }
+
+    /// Commit a typed search and show the Library.
+    ///
+    /// A search can start on the console Home (`Action::Search`), so the commit
+    /// both sets the query and lands on the screen that draws its matches; the
+    /// Library's own search box and on-screen keyboard use the same path, so the
+    /// two cannot drift.
+    pub(crate) fn search(&mut self, query: String) {
+        self.filter.query = query;
+        self.selected = None;
+        self.view = View::Library;
+    }
+
     pub(crate) fn set_text_focused(&mut self, focused: bool) {
         self.text_focused = focused;
     }
@@ -147,5 +167,26 @@ mod tests {
         assert_eq!(nav.filter().query, "half");
         assert!(nav.filter().installed_only);
         assert!(nav.text_focused());
+    }
+
+    #[test]
+    fn clearing_the_filter_leaves_the_neutral_one() {
+        let mut nav = Navigation::new(View::Library);
+        nav.filter_mut().query = "half".to_string();
+        nav.filter_mut().installed_only = true;
+        nav.clear_filter();
+        assert_eq!(nav.filter(), &LibraryFilter::default());
+    }
+
+    #[test]
+    fn a_search_commits_the_query_and_lands_on_the_library() {
+        // The console Home's `Search` path: type on the Home, land on the
+        // Library with the matches shown.
+        let mut nav = Navigation::new(View::Home);
+        nav.open_detail(id("620"), View::Home);
+        nav.search("portal".to_string());
+        assert_eq!(nav.view(), View::Library);
+        assert_eq!(nav.filter().query, "portal");
+        assert_eq!(nav.selected(), None);
     }
 }

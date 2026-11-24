@@ -10,9 +10,20 @@
 //! This module owns the arithmetic so it can be tested without a webview: given
 //! the viewport size, the scroll offset and the item count it returns which
 //! items to draw and where the drawn block sits inside the sizer.
+//!
+//! The layout is per-shell ([`GridGeometry::for_shell`]): the console shell is a
+//! 10-foot grid and shows fewer, larger tiles than the windowed desktop grid,
+//! from the same geometry model so the two shells cannot drift.
 
-/// Smallest tile width the responsive grid will use, in CSS pixels.
+use pitagames_core::ui::Shell;
+
+/// Smallest tile width the windowed (desktop) grid will use, in CSS pixels.
 pub const TILE_MIN_WIDTH: f64 = 220.0;
+/// Smallest tile width the console (10-foot) grid will use, in CSS pixels.
+///
+/// Larger than [`TILE_MIN_WIDTH`] so a couch user gets fewer, bigger tiles at
+/// 1080p rather than the desktop's dense grid (plan §7, *Console mode*).
+pub const TILE_MIN_WIDTH_CONSOLE: f64 = 320.0;
 /// Horizontal gap between tiles.
 pub const COLUMN_GAP: f64 = 16.0;
 /// Vertical gap between rows.
@@ -21,10 +32,17 @@ pub const ROW_GAP: f64 = 16.0;
 pub const H_PADDING: f64 = 32.0;
 /// Height / width of the capsule art (Steam's 231×87 header art).
 pub const ART_RATIO: f64 = 87.0 / 231.0;
-/// Everything below the art on a card: title, status, meta line, buttons and
-/// the card's own padding. Deliberately generous so a row never clips its
-/// contents; the card is drawn at exactly this height so rows stay uniform.
+/// Everything below the art on a desktop card: title, status, meta line,
+/// buttons and the card's own padding. Deliberately generous so a row never
+/// clips its contents; the card is drawn at exactly this height so rows stay
+/// uniform.
 pub const TILE_CHROME: f64 = 132.0;
+/// Everything below the art on a console card, in CSS pixels.
+///
+/// Taller than [`TILE_CHROME`]: the console type floor makes the title, the
+/// store/install status and the meta line each a line taller, and the buttons
+/// carry the console hit floor, so the desktop height would clip them.
+pub const TILE_CHROME_CONSOLE: f64 = 176.0;
 /// Rows drawn above and below the viewport so a fast scroll does not flash an
 /// empty band.
 pub const OVERSCAN_ROWS: usize = 2;
@@ -37,24 +55,51 @@ pub struct GridGeometry {
     pub tile_width: f64,
     /// Vertical pitch of a row: tile height plus [`ROW_GAP`].
     pub row_height: f64,
+    /// Everything below the art on a card, in CSS pixels: the per-shell
+    /// [`TILE_CHROME`] / [`TILE_CHROME_CONSOLE`] the card height is built from.
+    pub chrome: f64,
 }
 
 impl GridGeometry {
-    /// Fit as many [`TILE_MIN_WIDTH`] columns as possible into `viewport_width`,
-    /// then grow the tiles to use the remaining space.
+    /// Fit as many [`TILE_MIN_WIDTH`] columns as possible into `viewport_width`
+    /// (the desktop shell's tile floor).
     ///
     /// A zero or unknown width falls back to a single column so the first paint
     /// (before the resize observer reports) still shows something.
     pub fn for_width(viewport_width: f64) -> Self {
-        let available = (viewport_width - 2.0 * H_PADDING).max(TILE_MIN_WIDTH);
+        Self::with_floor(viewport_width, TILE_MIN_WIDTH, TILE_CHROME)
+    }
+
+    /// Fit as many tiles as possible, using the shell's own tile floor.
+    ///
+    /// The console shell is a 10-foot grid: it uses
+    /// [`TILE_MIN_WIDTH_CONSOLE`] instead of [`TILE_MIN_WIDTH`], so at 1080p it
+    /// shows fewer, larger tiles than the desktop grid. Both shells share this
+    /// one model, so the scroll arithmetic cannot drift between them.
+    pub fn for_shell(shell: Shell, viewport_width: f64) -> Self {
+        if shell.is_console() {
+            Self::with_floor(viewport_width, TILE_MIN_WIDTH_CONSOLE, TILE_CHROME_CONSOLE)
+        } else {
+            Self::for_width(viewport_width)
+        }
+    }
+
+    /// Fit as many `min_tile_width` columns as possible into `viewport_width`,
+    /// then grow the tiles to use the remaining space.
+    ///
+    /// A zero or unknown width falls back to a single column so the first paint
+    /// (before the resize observer reports) still shows something.
+    pub fn with_floor(viewport_width: f64, min_tile_width: f64, chrome: f64) -> Self {
+        let available = (viewport_width - 2.0 * H_PADDING).max(min_tile_width);
         let columns =
-            (((available + COLUMN_GAP) / (TILE_MIN_WIDTH + COLUMN_GAP)).floor() as usize).max(1);
+            (((available + COLUMN_GAP) / (min_tile_width + COLUMN_GAP)).floor() as usize).max(1);
         let tile_width = (available - (columns as f64 - 1.0) * COLUMN_GAP) / columns as f64;
-        let row_height = tile_width * ART_RATIO + TILE_CHROME + ROW_GAP;
+        let row_height = tile_width * ART_RATIO + chrome + ROW_GAP;
         Self {
             columns,
             tile_width,
             row_height,
+            chrome,
         }
     }
 
@@ -229,6 +274,56 @@ mod tests {
         assert!(narrow.columns < wide.columns);
         assert!(narrow.tile_width > wide.tile_width);
         assert!(narrow.row_height > wide.row_height);
+    }
+
+    #[test]
+    fn for_width_is_the_desktop_shell() {
+        // The windowed grid keeps its exact behaviour; the console shell is a
+        // separate floor, not a change to the desktop one.
+        assert_eq!(
+            GridGeometry::for_width(1280.0),
+            GridGeometry::for_shell(Shell::Desktop, 1280.0)
+        );
+        assert_eq!(
+            GridGeometry::for_width(0.0).columns,
+            GridGeometry::for_shell(Shell::Desktop, 0.0).columns
+        );
+    }
+
+    #[test]
+    fn the_console_grid_shows_fewer_larger_tiles_than_the_desktop_at_1080p_and_4k() {
+        // The two widths the 10-foot pass validates against: a 1080p and a 4K
+        // monitor, in CSS pixels.
+        for width in [1920.0, 3840.0] {
+            let desktop = GridGeometry::for_shell(Shell::Desktop, width);
+            let console = GridGeometry::for_shell(Shell::Console, width);
+            assert!(
+                console.columns < desktop.columns,
+                "at {width}px the console shows {} columns, the desktop {}",
+                console.columns,
+                desktop.columns
+            );
+            assert!(
+                console.tile_width > desktop.tile_width,
+                "at {width}px the console tile ({}) is not larger than the desktop's ({})",
+                console.tile_width,
+                desktop.tile_width
+            );
+            // Each shell respects its own floor.
+            assert!(desktop.tile_width >= TILE_MIN_WIDTH - 1e-6);
+            assert!(console.tile_width >= TILE_MIN_WIDTH_CONSOLE - 1e-6);
+            // The console chrome is taller so the console type floor fits.
+            assert!(console.chrome > desktop.chrome);
+        }
+    }
+
+    #[test]
+    fn the_per_shell_column_counts_are_worked_examples() {
+        // 1920 = 1080p, 3840 = 4K, both minus the 2×32px padding.
+        assert_eq!(GridGeometry::for_shell(Shell::Console, 1920.0).columns, 5);
+        assert_eq!(GridGeometry::for_shell(Shell::Desktop, 1920.0).columns, 7);
+        assert_eq!(GridGeometry::for_shell(Shell::Console, 3840.0).columns, 11);
+        assert_eq!(GridGeometry::for_shell(Shell::Desktop, 3840.0).columns, 16);
     }
 
     #[test]

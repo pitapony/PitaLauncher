@@ -21,6 +21,7 @@ use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::stream::{self, StreamExt};
+use pitagames_core::ui::Shell;
 use pitagames_core::{GameId, Store};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
@@ -793,6 +794,7 @@ fn App() -> Element {
     let library_body = rsx! {
         LibraryGrid {
             library: library_state,
+            shell: shell_state.shell,
             actions: library_actions,
             art_state,
             art_revision,
@@ -1440,6 +1442,9 @@ fn App() -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct LibraryGridProps {
     pub library: Signal<Option<Library>>,
+    /// Which shell the window is in, so the grid picks its per-shell tile floor
+    /// and the console tile carries its store/status line.
+    pub shell: Signal<Shell>,
     /// The app's one input pump posts this screen's actions here.
     pub actions: focus::ActionChannel,
     pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
@@ -1468,6 +1473,7 @@ struct LibraryGridProps {
 #[allow(non_snake_case)]
 fn LibraryGrid(props: LibraryGridProps) -> Element {
     let library = props.library;
+    let shell = props.shell;
     let art_state = props.art_state;
     let art_revision = props.art_revision;
     let board = props.board;
@@ -1544,6 +1550,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                 perform_action(
                     action,
                     library,
+                    shell,
                     session,
                     screen_focus,
                     viewport_width,
@@ -1572,7 +1579,8 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         .into_iter()
         .map(|index| &state.games[index])
         .collect();
-    let geometry = grid::GridGeometry::for_width(viewport_width());
+    let console = shell().is_console();
+    let geometry = grid::GridGeometry::for_shell(shell(), viewport_width());
     let window = grid::window(
         matches.len(),
         geometry,
@@ -1596,7 +1604,6 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let metadata_notes = state.metadata_warnings.clone();
     let metadata_warning_count = metadata_notes.len();
     let has_games = !state.games.is_empty();
-    let needle = session.read().filter().query.clone();
     let filter_snapshot = session.read().filter().clone();
     // The chip row and the tiles share one ragged graph; the chips sit above
     // the scroll area, so their width is the scroll container's minus the same
@@ -1604,18 +1611,14 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let chip_row = filter::ChipRow::build(state, viewport_width() - 2.0 * grid::H_PADDING);
     let chip_columns = chip_row.columns();
     let focused_id = screen_focus.index();
-    let empty_message = if needle.is_empty() {
-        "Nothing matches the current filters.".to_string()
-    } else {
-        format!("Nothing matches \"{needle}\".")
-    };
+    let empty_message = filter::empty_message(&filter_snapshot);
 
     // Bound as locals so the RSX format strings only interpolate identifiers.
     let columns = geometry.columns;
     let row_gap = grid::ROW_GAP;
     let column_gap = grid::COLUMN_GAP;
     let h_padding = grid::H_PADDING;
-    let card_height = geometry.art_height() + grid::TILE_CHROME;
+    let card_height = geometry.art_height() + geometry.chrome;
     let total_height = window.total_height;
     let offset_y = window.offset_y;
 
@@ -1752,6 +1755,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                 let playtime = entry.playtime();
                                 let meta = entry.meta_line();
                                 let status = entry.status_label().unwrap_or_default();
+                                // The console tile names its store and its
+                                // install/update state explicitly; the desktop
+                                // card keeps them inside the meta line.
+                                let store_label = crate::home::store_label(entry.store());
+                                let install_status = entry.install_status();
                                 let can_play = entry.can_play();
                                 // Steam launches through its own client; every
                                 // other store goes through the umu hand-off,
@@ -1814,6 +1822,20 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                             style: "font-size:var(--text-body);font-weight:600;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                             title: "{title}",
                                             "{title}"
+                                        }
+
+                                        if console {
+                                            div {
+                                                style: "display:flex;align-items:baseline;gap:10px;font-size:var(--text-micro);",
+                                                span {
+                                                    style: "color:var(--text-secondary);font-weight:600;",
+                                                    "{store_label}"
+                                                }
+                                                span {
+                                                    style: "color:var(--warning);",
+                                                    "{install_status}"
+                                                }
+                                            }
                                         }
 
                                         if !status.is_empty() {
@@ -1934,7 +1956,7 @@ fn commit_search(
     mut osk_open: Signal<bool>,
     text: String,
 ) {
-    session.write().filter_mut().query = text;
+    session.write().search(text);
     screen_focus.set(None);
     osk_open.set(false);
 }
@@ -1951,6 +1973,7 @@ fn commit_search(
 fn perform_action(
     action: pitagames_input::Action,
     library: Signal<Option<Library>>,
+    shell: Signal<Shell>,
     mut session: Signal<crate::session::Session>,
     screen_focus: focus::ScreenFocus,
     viewport_width: Signal<f64>,
@@ -1958,11 +1981,18 @@ fn perform_action(
     mut scroll_top: Signal<f64>,
     scroller: Rc<RefCell<Option<Rc<MountedData>>>>,
 ) {
-    // Back on the library clears the search before it leaves the screen; the
-    // grid is the root view, so there is nowhere else to go.
+    // Back on the library clears a narrowing filter before it leaves; with
+    // nothing left to clear the console shell returns to its couch home (the
+    // desktop grid is the shell's root, so it stays put).
     if action == pitagames_input::Action::Back {
-        if !session.read().filter().query.is_empty() {
-            session.write().filter_mut().query.clear();
+        let back = filter::back_action(session.read().filter());
+        match back {
+            filter::BackAction::ClearFilters => session.write().clear_filter(),
+            filter::BackAction::Leave => {
+                if shell().is_console() {
+                    session.write().set_view(View::Home);
+                }
+            }
         }
         return;
     }
@@ -1985,7 +2015,7 @@ fn perform_action(
         let indices = session.read().filter().apply(state);
         (chip_row, indices)
     };
-    let columns = grid::GridGeometry::for_width(viewport_width()).columns;
+    let columns = grid::GridGeometry::for_shell(shell(), viewport_width()).columns;
     let graph = chip_row.graph(indices.len(), columns);
     if graph.is_empty() {
         return;
@@ -1999,7 +2029,7 @@ fn perform_action(
         let Some(tile) = chip_row.tile_index(id) else {
             return;
         };
-        let geometry = grid::GridGeometry::for_width(viewport_width());
+        let geometry = grid::GridGeometry::for_shell(shell(), viewport_width());
         let target = grid::scroll_into_view(
             scroll_top(),
             viewport_height(),

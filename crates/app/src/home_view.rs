@@ -34,6 +34,7 @@ use crate::downloads::{DownloadEvent, Downloads};
 use crate::focus::{self, ActionChannel};
 use crate::home::{self, Home, HomeCell};
 use crate::library::{GameEntry, Library};
+use crate::osk;
 use crate::play::{Play, PlayEvent};
 use crate::store_installs::{InstallEvent, Installs};
 
@@ -135,6 +136,11 @@ pub fn HomeView(props: HomeViewProps) -> Element {
     let _ = art_revision();
 
     let screen_focus = focus::use_focus();
+    // The on-screen keyboard, opened by the pad's `Search` button (or `F`). A
+    // search started on the Home commits the query and lands on the Library so
+    // its matches are shown.
+    let mut osk_open = use_signal(|| false);
+    let mut osk = use_signal(pitagames_input::OnScreenKeyboard::new);
     // One horizontal offset per shelf, and the width every shelf shares.
     let shelf_scroll = use_signal(Vec::<f64>::new);
     let viewport_width = use_signal(|| 0.0f64);
@@ -154,6 +160,27 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         async move {
             while let Some(action) = channel.next().await {
                 if session.read().view() != View::Home {
+                    continue;
+                }
+                // While the search sheet is open it owns every action: a
+                // direction walks the key grid and `Back` cancels the edit
+                // instead of leaving the Home.
+                if osk_open() {
+                    let press = osk.write().handle(action);
+                    if press == pitagames_input::OskPress::Submit {
+                        let text = osk.read().text().to_string();
+                        commit_home_search(session, screen_focus, osk_open, text);
+                    } else if press == pitagames_input::OskPress::Cancel {
+                        osk_open.set(false);
+                    }
+                    continue;
+                }
+                // `Search` opens the keyboard seeded with the current query.
+                if action == pitagames_input::Action::Search {
+                    osk.set(pitagames_input::OnScreenKeyboard::with_text(
+                        session.read().filter().query.clone(),
+                    ));
+                    osk_open.set(true);
                     continue;
                 }
                 perform_home_action(
@@ -524,7 +551,34 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                 }
             }
         }
+
+        // The on-screen keyboard is an overlay; the Home behind it keeps its
+        // focus and scroll while typing.
+        if osk_open() {
+            osk::OskSheet {
+                title: "Search your library".to_string(),
+                keyboard: osk,
+                on_done: move |text| commit_home_search(session, screen_focus, osk_open, text),
+                on_cancel: move |_| osk_open.set(false),
+            }
+        }
     }
+}
+
+/// Commit a search typed on the console Home.
+///
+/// The same model the Library's search box uses: set the query and land on the
+/// Library, so a couch player who searched from the Home immediately sees the
+/// matches. The sheet's pointer path and the action drain both call this.
+fn commit_home_search(
+    mut session: Signal<crate::session::Session>,
+    screen_focus: focus::ScreenFocus,
+    mut osk_open: Signal<bool>,
+    text: String,
+) {
+    session.write().search(text);
+    screen_focus.set(None);
+    osk_open.set(false);
 }
 
 /// Apply one action to the home's focus graph.

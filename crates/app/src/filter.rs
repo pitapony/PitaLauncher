@@ -102,6 +102,26 @@ pub struct LibraryFilter {
 }
 
 impl LibraryFilter {
+    /// Whether the filter hides any game.
+    ///
+    /// A query, a store subset or a toggle narrows the grid; [`Sort`] only
+    /// reorders it, so a sort on its own never empties the grid and is not a
+    /// filter to clear.
+    pub fn narrows(&self) -> bool {
+        !self.query.trim().is_empty()
+            || !self.stores.is_empty()
+            || self.installed_only
+            || self.needs_attention
+    }
+
+    /// Reset to the neutral filter that shows the whole library, in scan order.
+    ///
+    /// `Back` on the Library and the empty grid's "press Back" message both end
+    /// here, so there is one definition of "the filters are cleared".
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
     /// The filtered, ordered indices of `library.games` this filter keeps.
     ///
     /// Pure: it reads the library and returns indices, so the grid, the focus
@@ -251,6 +271,43 @@ pub fn chips(library: &Library) -> Vec<Chip> {
     }
     chips.push(Chip::Sort);
     chips
+}
+
+/// What `Back` does on the Library, before it leaves the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackAction {
+    /// The filter narrows the grid: clear it and stay put.
+    ClearFilters,
+    /// Nothing to clear: the caller leaves the screen.
+    Leave,
+}
+
+/// The Library's `Back` rule: clear a narrowing filter before leaving.
+///
+/// A couch player who filtered down and pressed `Back` means "undo the filter",
+/// not "leave the screen", so the filter is cleared first; a second `Back` (with
+/// nothing left to clear) leaves. A sort on its own does not count: it reorders
+/// the whole library rather than narrowing it, so `Back` leaves without
+/// disturbing the order.
+pub fn back_action(filter: &LibraryFilter) -> BackAction {
+    if filter.narrows() {
+        BackAction::ClearFilters
+    } else {
+        BackAction::Leave
+    }
+}
+
+/// The message a filtered-empty grid shows.
+///
+/// It names the query when there is one and always teaches `Back` to clear, so
+/// a couch player is never stuck on a blank grid with no way out.
+pub fn empty_message(filter: &LibraryFilter) -> String {
+    let needle = filter.query.trim();
+    if needle.is_empty() {
+        "Nothing matches the current filters. Press Back to clear them.".to_string()
+    } else {
+        format!("Nothing matches \"{needle}\". Press Back to clear the filters.")
+    }
 }
 
 /// The filter chip row: its chips and the ragged graph over the chips and the
@@ -584,6 +641,116 @@ mod tests {
     fn the_sort_modes_are_the_closed_set_the_chip_cycles() {
         assert_eq!(Sort::ALL.len(), 3);
         assert_eq!(Sort::default(), Sort::Title);
+    }
+
+    // -- The Back rule and the empty state ---------------------------------
+
+    #[test]
+    fn only_a_narrowing_filter_counts_as_engaged() {
+        assert!(!LibraryFilter::default().narrows());
+        // A sort alone reorders the whole library; it hides nothing.
+        assert!(
+            !LibraryFilter {
+                sort: Sort::Playtime,
+                ..LibraryFilter::default()
+            }
+            .narrows()
+        );
+
+        for filter in [
+            LibraryFilter {
+                query: "p".to_string(),
+                ..LibraryFilter::default()
+            },
+            LibraryFilter {
+                stores: vec![Store::Steam],
+                ..LibraryFilter::default()
+            },
+            LibraryFilter {
+                installed_only: true,
+                ..LibraryFilter::default()
+            },
+            LibraryFilter {
+                needs_attention: true,
+                ..LibraryFilter::default()
+            },
+        ] {
+            assert!(filter.narrows(), "{filter:?} narrows the grid");
+        }
+    }
+
+    #[test]
+    fn clearing_restores_the_neutral_filter() {
+        let mut filter = LibraryFilter {
+            query: "port".to_string(),
+            stores: vec![Store::Steam],
+            installed_only: true,
+            needs_attention: true,
+            sort: Sort::Recent,
+        };
+        filter.clear();
+        assert_eq!(filter, LibraryFilter::default());
+    }
+
+    #[test]
+    fn back_clears_a_narrowing_filter_before_it_leaves() {
+        assert_eq!(back_action(&LibraryFilter::default()), BackAction::Leave);
+        assert_eq!(
+            back_action(&LibraryFilter {
+                sort: Sort::Recent,
+                ..LibraryFilter::default()
+            }),
+            BackAction::Leave,
+            "a sort alone leaves the filter to clear"
+        );
+
+        for filter in [
+            LibraryFilter {
+                query: "portal".to_string(),
+                ..LibraryFilter::default()
+            },
+            LibraryFilter {
+                stores: vec![Store::Epic],
+                ..LibraryFilter::default()
+            },
+            LibraryFilter {
+                installed_only: true,
+                ..LibraryFilter::default()
+            },
+            LibraryFilter {
+                needs_attention: true,
+                ..LibraryFilter::default()
+            },
+        ] {
+            assert_eq!(
+                back_action(&filter),
+                BackAction::ClearFilters,
+                "{filter:?} is cleared first"
+            );
+        }
+    }
+
+    #[test]
+    fn the_empty_message_names_the_query_and_teaches_back() {
+        assert_eq!(
+            empty_message(&LibraryFilter::default()),
+            "Nothing matches the current filters. Press Back to clear them."
+        );
+        assert_eq!(
+            empty_message(&LibraryFilter {
+                query: "half-life".to_string(),
+                ..LibraryFilter::default()
+            }),
+            "Nothing matches \"half-life\". Press Back to clear the filters."
+        );
+        // A whitespace query reads as no query at all.
+        assert_eq!(
+            empty_message(&LibraryFilter {
+                query: "   ".to_string(),
+                ..LibraryFilter::default()
+            }),
+            "Nothing matches the current filters. Press Back to clear them."
+        );
     }
 
     #[test]

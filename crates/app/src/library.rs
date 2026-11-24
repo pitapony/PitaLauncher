@@ -124,6 +124,21 @@ impl GameEntry {
         }
     }
 
+    /// The install/update word a console tile always shows.
+    ///
+    /// The desktop card leaves a plain installed game's status blank; a 10-foot
+    /// tile states it instead, so the couch user can read what pressing Play
+    /// will do before pressing it. The busy phases keep Steam's own word
+    /// ("downloading", "updating", …).
+    pub fn install_status(&self) -> &'static str {
+        match self.phase {
+            InstallPhase::Installed => "Installed",
+            InstallPhase::NotInstalled => "Not installed",
+            InstallPhase::UpdateAvailable => "Update",
+            other => other.as_str(),
+        }
+    }
+
     /// Grid meta line: store, id, size, playtime when known.
     pub fn meta_line(&self) -> String {
         let mut parts = vec![self.game.id.store.as_str().to_string()];
@@ -619,6 +634,28 @@ mod tests {
         assert_eq!(
             entry("620", "Portal 2", InstallPhase::Unknown, true).status_label(),
             Some("state unknown")
+        );
+    }
+
+    #[test]
+    fn the_tile_install_status_always_names_a_state() {
+        // A console tile shows this word for every row, including a plain
+        // install, so the couch user reads the state without a blank slot.
+        assert_eq!(
+            entry("620", "Portal 2", InstallPhase::Installed, true).install_status(),
+            "Installed"
+        );
+        assert_eq!(
+            entry("999", "Demo", InstallPhase::NotInstalled, false).install_status(),
+            "Not installed"
+        );
+        assert_eq!(
+            entry("620", "Portal 2", InstallPhase::UpdateAvailable, true).install_status(),
+            "Update"
+        );
+        assert_eq!(
+            entry("620", "Portal 2", InstallPhase::Downloading, true).install_status(),
+            "downloading"
         );
     }
 
