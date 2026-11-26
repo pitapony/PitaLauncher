@@ -7,6 +7,7 @@ members = [
     "crates/stores",
     "crates/metadata",
     "crates/platform",
+    "crates/mods",
     "crates/secrets",
     "crates/input",
     "crates/shim",
@@ -29,12 +30,17 @@ pitagames-art = { path = "crates/art" }
 pitagames-stores = { path = "crates/stores" }
 pitagames-metadata = { path = "crates/metadata" }
 pitagames-platform = { path = "crates/platform" }
+pitagames-mods = { path = "crates/mods" }
 pitagames-secrets = { path = "crates/secrets" }
 pitagames-input = { path = "crates/input" }
 
 anyhow = "1.0"
 async-trait = "0.1"
 axum = "0.8"
+# `blake3` is the per-file / tree hash the mod manifest records; `sha2` stays
+# for release and Steam-config digests, which are SHA-256 by contract.
+blake3 = "1"
+walkdir = "2"
 # 0.11 is the version whose SDL-derived mappings and evdev/udev backend the
 # console input slice was designed around; the launcher never uses the webview's
 # `navigator.getGamepads()` instead. Its default `wgi` feature is Windows-only
