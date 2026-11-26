@@ -23,6 +23,7 @@ use pitagames_core::{
 use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
 use pitagames_mods::ini::{IniSetting, IniSurface};
 use pitagames_mods::release::{MapFetcher, PinnedRelease};
+use pitagames_mods::tierb;
 use pitagames_mods::{ModManifest, RestoreReport, VerifyReport};
 use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
@@ -1367,6 +1368,7 @@ fn mods(args: &[String]) -> Result<()> {
         Some("release") => mods_release(&args[1..]),
         Some("ini") => mods_ini(&args[1..]),
         Some("capture") => mods_capture(&args[1..]),
+        Some("tierb") => mods_tierb(&args[1..]),
         _ => mods_manifest(args),
     }
 }
@@ -1628,7 +1630,9 @@ fn mods_usage() -> String {
      pitagames-cli mods release --fixture <dir> [--dest <dir>] [--json]\n    \
      pitagames-cli mods ini <file> --surface <name> [--set Section.Key=Value]... [--write] [--json]\n    \
      pitagames-cli mods capture <file|-> [--json]\n    \
-     pitagames-cli mods capture --run <program> [args...] [--json]\n\n\
+     pitagames-cli mods capture --run <program> [args...] [--json]\n    \
+     pitagames-cli mods tierb <target> --fixture <dir> [--set Section.Key=Value]... [--json]\n    \
+     pitagames-cli mods tierb <target> --uninstall [--json]\n\n\
      ARGS:\n    \
      <dir>                  A game directory a mod was installed into\n\n\
      OPTIONS:\n    \
@@ -1640,7 +1644,8 @@ fn mods_usage() -> String {
      With no action, prints the manifest a mod left in `<dir>/.gl-backup/`.\n\
      `--verify` and `--restore` exit non-zero when a file or backup does not match.\n\
      The `release`, `ini` and `capture` subcommands are the shared mod primitives; see\n\
-     `pitagames-cli mods release --help`, `mods ini --help` and `mods capture --help`."
+     `pitagames-cli mods release --help`, `mods ini --help` and `mods capture --help`.\n\
+     `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`."
         .to_string()
 }
 
@@ -1666,38 +1671,7 @@ fn mods_release(args: &[String]) -> Result<()> {
         bail!("{} is not a directory", fixture.display());
     }
 
-    let config_path = fixture.join("fixture.json");
-    let config: PinnedRelease = serde_json::from_str(
-        &fs::read_to_string(&config_path)
-            .with_context(|| format!("cannot read {}", config_path.display()))?,
-    )
-    .with_context(|| format!("cannot parse {}", config_path.display()))?;
-
-    let release_path = fixture.join("release.json");
-    let release_body = fs::read(&release_path)
-        .with_context(|| format!("cannot read {}", release_path.display()))?;
-    let release = config
-        .source
-        .parse(std::str::from_utf8(&release_body).context("release.json is not UTF-8")?)?;
-    let asset = release.asset(&config.asset).with_context(|| {
-        format!(
-            "{} lists no asset named `{}`",
-            release_path.display(),
-            config.asset
-        )
-    })?;
-    let archive_path = fixture.join(&config.asset);
-    let fetcher = MapFetcher::new()
-        .with(
-            config.source.release_url(&config.project, &config.tag),
-            release_body,
-        )
-        .with(
-            asset.url.clone(),
-            fs::read(&archive_path)
-                .with_context(|| format!("cannot read {}", archive_path.display()))?,
-        );
-
+    let (config, fetcher) = load_release_fixture(&fixture)?;
     let dest = parsed.dest.unwrap_or_else(|| fixture.join("unpacked"));
     let report = config.fetch_and_unpack(&fetcher, &dest)?;
 
@@ -1733,6 +1707,46 @@ fn mods_release(args: &[String]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Load a release fixture into a pin and an offline [`MapFetcher`].
+///
+/// The directory holds `fixture.json` (the pin), `release.json` (the API body)
+/// and the asset itself. Both `mods release` and `mods tierb` drive the release
+/// pipeline from it, so a whole fetch → verify → unpack run needs no network.
+fn load_release_fixture(fixture: &Path) -> Result<(PinnedRelease, MapFetcher)> {
+    let config_path = fixture.join("fixture.json");
+    let config: PinnedRelease = serde_json::from_str(
+        &fs::read_to_string(&config_path)
+            .with_context(|| format!("cannot read {}", config_path.display()))?,
+    )
+    .with_context(|| format!("cannot parse {}", config_path.display()))?;
+
+    let release_path = fixture.join("release.json");
+    let release_body = fs::read(&release_path)
+        .with_context(|| format!("cannot read {}", release_path.display()))?;
+    let release = config
+        .source
+        .parse(std::str::from_utf8(&release_body).context("release.json is not UTF-8")?)?;
+    let asset = release.asset(&config.asset).with_context(|| {
+        format!(
+            "{} lists no asset named `{}`",
+            release_path.display(),
+            config.asset
+        )
+    })?;
+    let archive_path = fixture.join(&config.asset);
+    let fetcher = MapFetcher::new()
+        .with(
+            config.source.release_url(&config.project, &config.tag),
+            release_body,
+        )
+        .with(
+            asset.url.clone(),
+            fs::read(&archive_path)
+                .with_context(|| format!("cannot read {}", archive_path.display()))?,
+        );
+    Ok((config, fetcher))
 }
 
 /// Parsed `mods release` arguments.
@@ -2118,6 +2132,181 @@ fn mods_capture_usage() -> String {
      OPTIONS:\n    \
      --run <program> [args...]  Run a program and capture its output live\n    \
      --json                 Print the captured env and rejects as JSON\n    \
+     -h, --help             Show this help"
+        .to_string()
+}
+
+// -- mods tierb -------------------------------------------------------------
+
+/// Deploy or uninstall a managed Tier B OptiScaler.
+///
+/// The diagnostic for `mods::tierb`: it resolves the game's exe directory
+/// (including an Unreal `*/Binaries/Win64`), chooses the first free DLL name,
+/// fetches and SHA-256-verifies a pinned release from a fixture directory (so
+/// the whole pipeline runs offline), patches the ini, writes the manifest, and
+/// prints the `WINEDLLOVERRIDES` env vector. `--uninstall` restores the tree
+/// from the manifest instead.
+fn mods_tierb(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_tierb_args(args)?;
+    if parsed.help {
+        println!("{}", mods_tierb_usage());
+        return Ok(());
+    }
+    let target = parsed.target.clone().with_context(|| {
+        format!(
+            "expected a game directory or executable\n\n{}",
+            mods_tierb_usage()
+        )
+    })?;
+
+    if parsed.uninstall {
+        let report = tierb::uninstall(&target)?;
+        if parsed.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            for line in restore_lines(&target, &report) {
+                println!("{line}");
+            }
+        }
+        if report.tree_hash_ok {
+            return Ok(());
+        }
+        bail!(
+            "restore in {} did not reproduce the pre-install tree hash",
+            target.display()
+        );
+    }
+
+    let fixture = parsed.fixture.clone().with_context(|| {
+        format!(
+            "`--fixture` is required to deploy\n\n{}",
+            mods_tierb_usage()
+        )
+    })?;
+    if !fixture.is_dir() {
+        bail!("{} is not a directory", fixture.display());
+    }
+    let (pin, fetcher) = load_release_fixture(&fixture)?;
+    let staging = parsed
+        .staging
+        .clone()
+        .unwrap_or_else(|| fixture.join("unpacked"));
+    let deployment = tierb::deploy(&target, &pin, &fetcher, &staging, &parsed.settings)?;
+
+    if parsed.json {
+        let env: Vec<[&str; 2]> = deployment
+            .env
+            .iter()
+            .map(|(key, value)| [key.as_str(), value.as_str()])
+            .collect();
+        let payload = serde_json::json!({
+            "target": target,
+            "exe_dir": deployment.exe_dir,
+            "dll": deployment.dll.file_name(),
+            "override_key": deployment.dll.override_key(),
+            "env": env,
+            "asset": deployment.fetched.asset,
+            "sha256": deployment.fetched.sha256,
+            "archive": deployment.fetched.kind.label(),
+            "release_files": deployment.fetched.files,
+            "mod": deployment.manifest.mod_name,
+            "manifest_files": deployment.manifest.entries.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Deployed OptiScaler into {}", deployment.exe_dir.display());
+        println!("  dll          {}", deployment.dll.file_name());
+        for (key, value) in &deployment.env {
+            println!("  env          {key}={value}");
+        }
+        println!(
+            "  release      {} ({} {}, {} file(s))",
+            deployment.fetched.asset,
+            deployment.fetched.sha256,
+            deployment.fetched.kind.label(),
+            deployment.fetched.files.len()
+        );
+        println!(
+            "  manifest     {} ({} file(s) recorded)",
+            deployment.manifest.mod_name,
+            deployment.manifest.entries.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parsed `mods tierb` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsTierbArgs {
+    target: Option<PathBuf>,
+    fixture: Option<PathBuf>,
+    staging: Option<PathBuf>,
+    settings: Vec<IniSetting>,
+    uninstall: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_tierb_args(args: &[String]) -> Result<ModsTierbArgs> {
+    let mut parsed = ModsTierbArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--fixture" => parsed.fixture = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--staging" => parsed.staging = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--set" => parsed
+                .settings
+                .push(IniSetting::parse(&flag_value(args, &mut index, arg)?)?),
+            "--uninstall" => parsed.uninstall = true,
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if other.starts_with("--fixture=") => {
+                parsed.fixture = Some(PathBuf::from(after_eq(other)));
+            }
+            other if other.starts_with("--staging=") => {
+                parsed.staging = Some(PathBuf::from(after_eq(other)));
+            }
+            other if other.starts_with("--set=") => {
+                parsed.settings.push(IniSetting::parse(after_eq(other))?);
+            }
+            other if !other.starts_with('-') => {
+                if parsed.target.replace(PathBuf::from(other)).is_some() {
+                    bail!(
+                        "`mods tierb` takes one target directory or executable\n\n{}",
+                        mods_tierb_usage()
+                    );
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `mods tierb`\n\n{}",
+                mods_tierb_usage()
+            ),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn mods_tierb_usage() -> String {
+    "USAGE:\n    \
+     pitagames-cli mods tierb <target> --fixture <dir> [--staging <dir>] [--set Section.Key=Value]... [--json]\n    \
+     pitagames-cli mods tierb <target> --uninstall [--json]\n\n\
+     Deploys a managed Tier B OptiScaler into <target> — a game executable or its\n\
+     directory, including an Unreal `*/Binaries/Win64` — or, with `--uninstall`,\n\
+     restores the tree from its manifest. The DLL name is chosen from the ordered list\n\
+     dxgi -> d3d12 -> dbghelp -> winmm -> version, skipping names the game owns. The\n\
+     release comes from a fixture directory (fixture.json/release.json/<asset>) so the\n\
+     whole fetch -> verify -> unpack pipeline runs offline. `WINEDLLOVERRIDES` is\n\
+     reported as an env vector, never a shell string.\n\n\
+     ARGS:\n    \
+     <target>               The game executable or install directory\n\n\
+     OPTIONS:\n    \
+     --fixture <dir>        The release fixture directory (required to deploy)\n    \
+     --staging <dir>        Where to unpack the release (default `<fixture>/unpacked`)\n    \
+     --set <Section.Key=Value>  An OptiScaler.ini value to patch (repeatable)\n    \
+     --uninstall            Restore <target> from its manifest instead of deploying\n    \
+     --json                 Print the result as JSON\n    \
      -h, --help             Show this help"
         .to_string()
 }
@@ -7682,6 +7871,7 @@ mod tests {
 
         // The dispatcher routes each subcommand.
         assert!(mods(&["release".to_string(), "--help".to_string()]).is_ok());
+        assert!(mods(&["tierb".to_string(), "--help".to_string()]).is_ok());
     }
 
     #[test]
@@ -7842,6 +8032,148 @@ mod tests {
 
         assert!(mods_capture(&["/no/such/transcript".to_string()]).is_err());
         mods_capture(&["--help".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn mods_tierb_deploys_and_uninstalls_over_a_fixture() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+
+        // A fixture OptiScaler release: the DLL, the ini, and a support file.
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            for (name, data) in [
+                ("OptiScaler.dll", b"the dll bytes".as_slice()),
+                (
+                    "OptiScaler.ini",
+                    b"; upstream\n[Upscalers]\nDx12Upscaler=fsr4\n\n[FrameGen]\nEnabled=false\n"
+                        .as_slice(),
+                ),
+                (
+                    "OptiScaler/Licenses/OptiScaler.txt",
+                    b"the license".as_slice(),
+                ),
+            ] {
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let archive = cursor.into_inner();
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        fs::write(fixture.join("OptiScaler.zip"), &archive).unwrap();
+        fs::write(
+            fixture.join("fixture.json"),
+            serde_json::json!({
+                "source": "github",
+                "project": "optiscaler/OptiScaler",
+                "tag": "v0.9.0-test",
+                "asset": "OptiScaler.zip",
+                "sha256": digest,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            fixture.join("release.json"),
+            serde_json::json!({
+                "tag_name": "v0.9.0-test",
+                "assets": [{
+                    "name": "OptiScaler.zip",
+                    "browser_download_url": "https://dl.test/OptiScaler.zip",
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let game = temp.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("game.exe"), b"the game").unwrap();
+        let before = pitagames_mods::tree_hash(&game).unwrap();
+
+        let fixture_arg = fixture.display().to_string();
+        mods_tierb(&[
+            game.display().to_string(),
+            "--fixture".to_string(),
+            fixture_arg.clone(),
+            "--set".to_string(),
+            "FrameGen.Enabled=true".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(fs::read(game.join("dxgi.dll")).unwrap(), b"the dll bytes");
+        assert!(game.join("OptiScaler/Licenses/OptiScaler.txt").is_file());
+        assert!(
+            fs::read_to_string(game.join("OptiScaler.ini"))
+                .unwrap()
+                .contains("Enabled=true")
+        );
+        assert!(ModManifest::is_installed(&game));
+        let hash = pitagames_mods::tree_hash(&game).unwrap();
+        assert_ne!(hash, before);
+
+        // Uninstall restores the tree to its pre-install hash.
+        mods_tierb(&[game.display().to_string(), "--uninstall".to_string()]).unwrap();
+        assert!(!game.join("dxgi.dll").exists());
+        assert_eq!(pitagames_mods::tree_hash(&game).unwrap(), before);
+
+        // An occupied DLL name is skipped by the ordered list.
+        let taken = temp.path().join("taken");
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(taken.join("game.exe"), b"the game").unwrap();
+        fs::write(taken.join("dxgi.dll"), b"the game's own dxgi").unwrap();
+        mods_tierb(&[
+            taken.display().to_string(),
+            "--fixture".to_string(),
+            fixture_arg.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            fs::read(taken.join("dxgi.dll")).unwrap(),
+            b"the game's own dxgi"
+        );
+        assert_eq!(fs::read(taken.join("d3d12.dll")).unwrap(), b"the dll bytes");
+        mods_tierb(&[taken.display().to_string(), "--uninstall".to_string()]).unwrap();
+
+        // A pin that does not match the archive is refused, and nothing lands.
+        let bad = temp.path().join("bad");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("game.exe"), b"the game").unwrap();
+        let clean = pitagames_mods::tree_hash(&bad).unwrap();
+        fs::write(
+            fixture.join("fixture.json"),
+            serde_json::json!({
+                "source": "github",
+                "project": "optiscaler/OptiScaler",
+                "tag": "v0.9.0-test",
+                "asset": "OptiScaler.zip",
+                "sha256": "0".repeat(64),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            mods_tierb(&[
+                bad.display().to_string(),
+                "--fixture".to_string(),
+                fixture.display().to_string(),
+            ])
+            .is_err()
+        );
+        assert_eq!(pitagames_mods::tree_hash(&bad).unwrap(), clean);
+
+        mods_tierb(&["--help".to_string()]).unwrap();
+        assert!(mods_tierb(&[]).is_err());
+        // Deploy needs a fixture.
+        assert!(mods_tierb(&[game.display().to_string()]).is_err());
     }
 
     #[test]
