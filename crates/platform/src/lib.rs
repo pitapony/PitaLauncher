@@ -13,7 +13,10 @@
 //! `const` vendor/device table, `vulkaninfo`, VRAM and the ntsync/HDR hints)
 //! that the capability matrix will build on. [`capability`] is that matrix: it
 //! folds detection, curation and Proton resolution into one `Available` /
-//! `Hidden(reason)` verdict and one reason string per field.
+//! `Hidden(reason)` verdict and one reason string per field. M4 adds
+//! [`proton_update`]: opt-in, pinned GE-Proton builds fetched through
+//! `mods::release` into our own `proton/` directory, which [`proton`]
+//! discovery already scans.
 
 pub mod anticheat;
 pub mod capability;
@@ -25,6 +28,7 @@ pub mod launch;
 pub mod logs;
 pub mod prefix;
 pub mod proton;
+pub mod proton_update;
 
 pub use anticheat::{
     AnticheatFinding, AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision, ScanLimits,
@@ -50,4 +54,7 @@ pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{
     DiscoveryReport, ProtonError, ProtonInstall, ProtonKind, ProtonRoot, ProtonSource,
     default_roots, discover, discover_in,
+};
+pub use proton_update::{
+    BuildState, ProtonPin, ProtonUpdateError, Registry, RegistryError, UpdateReport,
 };

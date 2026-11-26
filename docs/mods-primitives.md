@@ -1,10 +1,12 @@
 # Mod primitives (`mods::release`, `mods::ini`, `mods::capture`) — fetch, patch, capture
 
 Status: implemented and verified against fixture archives, `tempfile` trees and a
-fake installer on macOS. Nothing consumes them yet — the Tier B OptiScaler
-deployment (M3), the HelixSR installer (M3) and the DLSSNR-AMD installer (M3.5)
-are the three systems they exist for. No real release has been fetched and no
-real installer transcript parsed yet.
+fake installer on macOS. `release` gained its first consumer with ticket #34:
+`platform::proton_update` fetches a pinned GE-Proton build through it (and needed
+`ArchiveKind::TarGz` and `LinkPolicy` for it). The Tier B OptiScaler deployment
+(M3), the HelixSR installer (M3) and the DLSSNR-AMD installer (M3.5) are the
+three systems the three primitives exist for. No real release has been fetched and
+no real installer transcript parsed yet.
 
 ## Why this slice exists
 
@@ -17,7 +19,7 @@ primitives" principle exists to prevent (Foundation, spec #8):
 - **fetch a pinned release**: the mods live on release hosts (GitLab for the
   DLSSNR upstream, GitHub for the RDNA 3 fork and HelixSR), each download must be
   SHA-256-verified against a pin *we* ship (ADR-0024), and each archive arrives
-  as a zip or a (zstd) tar;
+  as a zip or a (zstd/gzip) tar;
 - **edit an ini**: each ships an `OptiScaler.ini` / `dlssnr-amd.ini` whose
   comments, ordering and formatting must survive, and only a handful of keys are
   ours to set;
@@ -37,8 +39,9 @@ network, no game and no webview.
 | `release::Release` / `ReleaseAsset` | a tag and its downloadable assets, host-agnostic |
 | `release::PinnedRelease` | `{ source, project, tag, asset, sha256 }` — the pin |
 | `release::Fetched` | the bytes and the digest they actually had |
-| `release::ArchiveKind` | `Zip` / `TarZstd` / `Tar`, detected by magic bytes |
-| `release::sha256_hex` / `unpack_bytes` | the digest, and the safe unpack |
+| `release::ArchiveKind` | `Zip` / `TarZstd` / `TarGz` / `Tar`, detected by magic bytes |
+| `release::sha256_hex` / `unpack_bytes` / `unpack_bytes_with` | the digest, and the safe unpack (+ an explicit `LinkPolicy`) |
+| `release::LinkPolicy` | `Refuse` (default) / `AllowContained` — whether link entries are created |
 | `release::FetchedRelease` | asset, verified SHA-256, kind, extracted file list, dest |
 | `release::ReleaseError` | every failure, named |
 
@@ -55,6 +58,15 @@ project path is percent-encoded into one API segment.
 a zip entry whose `enclosed_name()` is `None`, a tar entry `unpack_in` declines,
 or a symlink/hardlink/special entry is a named error, so a hostile archive cannot
 write outside the game directory. Only regular files are recorded.
+
+**Two additions arrived with ticket #34 (the Proton/GE update).** A GE-Proton
+release is a gzip tar — `ArchiveKind::TarGz`, `1f 8b` — so `unpack_bytes` reads
+it. And a Proton build ships **relative symlinks** (its built-in-DLL links), so a
+caller can pass [`LinkPolicy::AllowContained`]: a symlink entry is created only
+when its target is relative and stays inside the destination (the `tar` crate
+validates a *hardlink's* target but not a symlink's, so this module does), and a
+hardlink only when the `tar` crate's own check accepts it. The default stays
+`Refuse`, so a mod release is still ordinary files.
 
 ## `mods::ini` — a line-preserving patch on a data surface
 
@@ -140,14 +152,17 @@ cargo clippy -p pitagames-mods -p pitagames-cli --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-`pitagames-mods` ships 52 tests (16 manifest + 36 new):
+`pitagames-mods` ships 57 tests (16 manifest + 41 new):
 
-- **release (13)** — the SHA-256 of `""` and `"abc"` against their published
+- **release (18)** — the SHA-256 of `""` and `"abc"` against their published
   vectors; both hosts' release URLs and JSON (including a GitLab link without a
   URL); a fixture zip round-trips through fetch → verify; a pin mismatch is
   refused; an API digest that disagrees with the bytes is refused; a missing asset
-  is named; zip / zstd-tar / plain-tar all unpack; a full fixture round-trip; an
-  unknown archive is refused; a zip-slip entry and a tar symlink are refused.
+  is named; zip / zstd-tar / gzip-tar / plain-tar all unpack; a full fixture
+  round-trip; a gzip tar round-trips through fetch and unpack; an unknown archive
+  is refused; a zip-slip entry and a tar symlink are refused; a symlink is refused
+  by default; a contained relative symlink is created under `AllowContained`; an
+  absolute or climbing symlink is refused even then.
 - **ini (14)** — a patch preserves a comment/ordering fixture byte-for-byte; an
   inline comment survives the replaced line; CRLF survives; a missing key joins
   its section; a missing section is appended; an unknown section, unknown key, bad
@@ -168,9 +183,10 @@ driver with a `#!/bin/sh` fake installer.
 - **Not driven against a real release host or installer.** The parsers cover the
   shapes the two hosts publish and the fixtures are hand-built; the first real
   fetch is the M3 Tier B deployment.
-- **`unpack` handles zip, tar.zst and tar only.** A gzip-compressed tar is not one
-  of the three the ticket ships; it is a named `UnknownArchive`, not a silent
-  failure. Symlinks and hardlinks are refused rather than created.
+- **`unpack` handles zip, tar.zst, tar.gz and tar only.** Anything else is a
+  named `UnknownArchive`, not a silent failure. Symlinks and hardlinks are
+  refused by default; a caller that opts into `AllowContained` gets a relative,
+  contained symlink (ticket #34) and still no escaping one.
 - **`zip` is read-only.** The crate is built with the deflate reader only; there
   is no writer (fixtures are written by the CLI's dev-dependency copy).
 - **The ini parser is deliberately small.** It understands `[section]` headers,

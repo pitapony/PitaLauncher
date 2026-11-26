@@ -37,6 +37,7 @@ use pitagames_platform::launch::{Outcome, Prepared};
 use pitagames_platform::logs as log_files;
 use pitagames_platform::prefix::{self, Prefix};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
+use pitagames_platform::proton_update::{self, ProtonPin, Registry};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::amazon::{self, Amazon};
 use pitagames_stores::auth::{AuthRun, AuthStep};
@@ -45,6 +46,8 @@ use pitagames_stores::epic::{self, Epic};
 use pitagames_stores::gog::{self, Gog};
 use pitagames_stores::import::{ImportReport, Importer, SourceReport};
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
+use pitagames_stores::installer;
+use pitagames_stores::queue::{InstallQueue, StartOutcome};
 use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport, UpdateAvailable};
 use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
@@ -473,6 +476,12 @@ fn platforms_line(platforms: Platforms) -> String {
 /// with `--root`/`--steam-root` overrides so it can run against a fixture tree
 /// or a second Steam install.
 fn proton(args: &[String]) -> Result<()> {
+    // `proton update` manages the builds PitaGames downloads itself; the plain
+    // command only lists what is on the machine.
+    if args.first().map(String::as_str) == Some("update") {
+        return proton_update(&args[1..]);
+    }
+
     let parsed = parse_proton_args(args)?;
     if parsed.help {
         println!("{}", proton_usage());
@@ -628,6 +637,140 @@ fn format_install(install: &ProtonInstall, name_width: usize) -> String {
     )
 }
 
+/// Manage the Proton/GE builds PitaGames downloads into our own `proton/` dir.
+///
+/// Opt-in and pinned: `--list` (the default) shows the shipped pins and whether
+/// each is already on disk; `--apply <name>` fetches the pinned tag, verifies
+/// its SHA-256 and unpacks it. The fetch is a fixture (`--fixture <dir>`, the
+/// same shape `mods release` uses) because the live HTTP fetcher is still the
+/// shared open item (ticket #12); a wrong digest is refused, never reported as
+/// installed.
+fn proton_update(args: &[String]) -> Result<()> {
+    let parsed = parse_proton_update_args(args)?;
+    if parsed.help {
+        println!("{}", proton_update_usage());
+        return Ok(());
+    }
+
+    let dir = match &parsed.dir {
+        Some(dir) => dir.clone(),
+        None => proton_update::default_dir().context("no data directory; pass --dir <path>")?,
+    };
+    let user = parsed
+        .user
+        .clone()
+        .or_else(proton_update::default_user_path);
+    let registry = Registry::effective(user.as_deref())?;
+
+    let Some(name) = parsed.apply.clone() else {
+        return proton_list(&dir, &registry, parsed.json);
+    };
+
+    let pin = registry
+        .get(&name)
+        .with_context(|| format!("no pin named `{name}` in the registry"))?
+        .clone();
+    let fixture = parsed.fixture.with_context(|| {
+        format!(
+            "`--apply` needs --fixture <dir>\n\n{}",
+            proton_update_usage()
+        )
+    })?;
+    let fetcher = pinned_fixture_fetcher(&pin, &fixture)?;
+
+    let report = proton_update::apply(&pin, &dir, &fetcher)?;
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        println!(
+            "Installed {} ({}) into {}",
+            report.name,
+            report.tag,
+            report.path.display()
+        );
+        println!("  asset      {}", report.asset);
+        println!("  sha256     {}", report.sha256);
+        println!("  files      {}", report.files);
+    }
+    Ok(())
+}
+
+/// Print the pinned builds and whether each is installed under `dir`.
+fn proton_list(dir: &Path, registry: &Registry, json: bool) -> Result<()> {
+    let builds = proton_update::status(dir, registry);
+    if json {
+        let payload = serde_json::json!({ "dir": dir, "builds": builds });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+    if builds.is_empty() {
+        println!("No Proton builds are pinned.");
+        return Ok(());
+    }
+    println!("Dir: {}", dir.display());
+    println!("{:<28} {:<10} {:<16} STATE", "NAME", "KIND", "TAG");
+    for build in &builds {
+        let state = if build.installed {
+            "installed"
+        } else {
+            "not installed"
+        };
+        println!(
+            "{:<28} {:<10} {:<16} {}",
+            build.name,
+            build.kind.label(),
+            build.tag,
+            state
+        );
+    }
+    println!("\nApply one with `pitagames-cli proton update --apply <name> --fixture <dir>`.");
+    Ok(())
+}
+
+/// A [`MapFetcher`] over a `mods release`-shaped fixture directory.
+///
+/// The directory holds `release.json` (the API body the host parses) and the
+/// pinned asset's bytes; the pin itself comes from the registry, so the fixture
+/// only has to agree with it.
+fn pinned_fixture_fetcher(pin: &ProtonPin, fixture: &Path) -> Result<MapFetcher> {
+    if !fixture.is_dir() {
+        bail!("{} is not a directory", fixture.display());
+    }
+    let release_path = fixture.join("release.json");
+    let release_body = fs::read(&release_path)
+        .with_context(|| format!("cannot read {}", release_path.display()))?;
+    let release = pin
+        .source
+        .parse(std::str::from_utf8(&release_body).context("release.json is not UTF-8")?)?;
+    let asset = release.asset(&pin.asset).with_context(|| {
+        format!(
+            "{} lists no asset named `{}`",
+            release_path.display(),
+            pin.asset
+        )
+    })?;
+    let archive_path = fixture.join(&pin.asset);
+    Ok(MapFetcher::new()
+        .with(pin.source.release_url(&pin.project, &pin.tag), release_body)
+        .with(
+            asset.url.clone(),
+            fs::read(&archive_path)
+                .with_context(|| format!("cannot read {}", archive_path.display()))?,
+        ))
+}
+
+/// Parsed `proton update` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ProtonUpdateArgs {
+    apply: Option<String>,
+    dir: Option<PathBuf>,
+    user: Option<PathBuf>,
+    fixture: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
 /// Report the GPU `platform::gpu` detects.
 ///
 /// Read-only diagnostic for the graphics layer: it reads sysfs, runs
@@ -682,6 +825,42 @@ struct GpuArgs {
     vulkaninfo: Option<PathBuf>,
     json: bool,
     help: bool,
+}
+
+fn parse_proton_update_args(args: &[String]) -> Result<ProtonUpdateArgs> {
+    let mut parsed = ProtonUpdateArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--apply" => parsed.apply = Some(flag_value(args, &mut index, arg)?),
+            "--dir" => parsed.dir = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--user" => parsed.user = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--fixture" => parsed.fixture = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            // The default action; accepted so a script can say it out loud.
+            "--list" => {}
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if other.starts_with("--apply=") => {
+                parsed.apply = Some(after_eq(other).to_string());
+            }
+            other if other.starts_with("--dir=") => {
+                parsed.dir = Some(PathBuf::from(after_eq(other)))
+            }
+            other if other.starts_with("--user=") => {
+                parsed.user = Some(PathBuf::from(after_eq(other)));
+            }
+            other if other.starts_with("--fixture=") => {
+                parsed.fixture = Some(PathBuf::from(after_eq(other)));
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `proton update`\n\n{}",
+                proton_update_usage()
+            ),
+        }
+        index += 1;
+    }
+    Ok(parsed)
 }
 
 fn parse_gpu_args(args: &[String]) -> Result<GpuArgs> {
@@ -4740,7 +4919,7 @@ fn stores(args: &[String]) -> Result<()> {
     }
 
     if let Some(name) = parsed.subcommand.as_deref()
-        && !matches!(name, "status" | "updates" | "sync")
+        && !matches!(name, "status" | "updates" | "sync" | "update")
     {
         bail!(
             "unknown subcommand `{name}` for `stores`\n\n{}",
@@ -4751,7 +4930,148 @@ fn stores(args: &[String]) -> Result<()> {
     match parsed.subcommand.as_deref() {
         Some("updates") => stores_updates(&parsed),
         Some("sync") => stores_sync(&parsed),
+        Some("update") => stores_update(&parsed),
         _ => stores_status(&parsed),
+    }
+}
+
+/// Apply one CLI-store update through the same queue an install uses.
+///
+/// A store-game update is an install of an existing id plus a verify, so this
+/// builds the same [`installer::InstallPlan`]/[`InstallJob`] a fresh install
+/// does (an update job, with the game's own install directory when `--dir`
+/// names it), puts it on the same serial [`InstallQueue`], and runs the same
+/// [`installer::run`] the GUI's worker runs. The queue, the worker and the
+/// verdict therefore cannot drift from an install — this is the headless half
+/// of the Updates chip.
+fn stores_update(parsed: &StoresArgs) -> Result<()> {
+    if parsed.list || parsed.with_stores || parsed.steam_root.is_some() || parsed.db.is_some() {
+        bail!(
+            "--list, --with-stores, --steam-root and --db do not belong to `stores update`\n\n{}",
+            stores_usage()
+        );
+    }
+
+    let filters = store_filters(&parsed.filters)?;
+    if filters.len() != 1 {
+        bail!(
+            "`stores update` needs exactly one --store\n\n{}",
+            stores_usage()
+        );
+    }
+    let store = filters[0];
+
+    let id = parsed.extra.first().cloned().with_context(|| {
+        format!(
+            "`stores update <store> <id>` needs an id\n\n{}",
+            stores_usage()
+        )
+    })?;
+    if let Some(extra) = parsed.extra.get(1) {
+        bail!(
+            "unexpected argument `{extra}` for `stores update`\n\n{}",
+            stores_usage()
+        );
+    }
+    let title = parsed.title.clone().unwrap_or_else(|| id.clone());
+
+    let mut game = Game::new(GameId::new(store, id.clone()), title.clone());
+    game.installed = true;
+    game.install_dir = parsed.dir.clone();
+    let plan = installer::update_plan(&game)?;
+    let job = plan.job();
+
+    let backends = sync_backends(parsed);
+    let options = stores_options(parsed);
+
+    if parsed.dry_run {
+        let install = plan.command();
+        let verify = verify_command_for(&plan);
+        print_planned(
+            plan.program,
+            store_spec(&backends, store, &install),
+            &install,
+        );
+        print_planned(plan.program, store_spec(&backends, store, &verify), &verify);
+        println!("update {store} {id} -> {}", plan.target.display());
+        return Ok(());
+    }
+
+    // The same queue the GUI's `pump_installs` drives: enqueue, start one job,
+    // run it, record the outcome. No store reports a size, so the disk
+    // pre-check is skipped rather than guessed.
+    let mut queue = InstallQueue::new();
+    let index = queue
+        .enqueue(job.clone())
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let started = queue.start_next(|_| None);
+    debug_assert!(matches!(started, StartOutcome::Started { .. }));
+
+    let control = installer::InstallControl::new();
+    let result = installer::run(&backends, &job, &options, &control, |progress| {
+        if let Some(stage) = progress.stage {
+            eprintln!("  {stage}");
+        }
+    });
+    queue.finish(index, result.as_ref().map(|_| ()).map_err(Clone::clone));
+
+    let run = result.map_err(|message| anyhow::anyhow!(message))?;
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "store": store.as_str(),
+            "id": id,
+            "title": title,
+            "kind": job.kind.label(),
+            "target": run.target,
+            "program": run.program,
+            "transcript": run.transcript,
+            "verify": run.verify,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+        return Ok(());
+    }
+
+    println!(
+        "Updated {title} ({store} {id}) via {} into {}",
+        run.program,
+        run.target.display()
+    );
+    if let Some(verify) = &run.verify {
+        if verify.cancelled {
+            println!("  verify     cancelled");
+        } else if verify.verified {
+            println!("  verify     {}: files match", verify.program);
+        } else {
+            println!(
+                "  verify     {}: {}",
+                verify.program,
+                verify.message.as_deref().unwrap_or("did not pass")
+            );
+        }
+    }
+    if let Some(transcript) = &run.transcript {
+        println!("  transcript {}", transcript.display());
+    }
+    Ok(())
+}
+
+/// The verify command for a plan, matching the one `installer::run` builds for
+/// the same job (so the `--dry-run` preview shows what will actually run).
+fn verify_command_for(plan: &installer::InstallPlan) -> CliCommand {
+    CliCommand::Verify {
+        id: plan.id.store_id.clone(),
+        install_dir: Some(plan.target.clone()),
+    }
+}
+
+/// The spec a store's backend uses for a command, for the `--dry-run` preview.
+fn store_spec<'a>(backends: &'a Backends, store: Store, command: &CliCommand) -> &'a CliSpec {
+    match store {
+        Store::Epic => backends.epic.spec(),
+        Store::Amazon => backends.amazon.spec(),
+        Store::Gog => backends.gog.spec_for(command),
+        _ => backends.epic.spec(),
     }
 }
 
@@ -5156,9 +5476,11 @@ fn store_filters(values: &[String]) -> Result<Vec<Store>> {
 /// Parsed `stores` arguments.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct StoresArgs {
-    /// `status` (default) or `updates`.
+    /// `status` (default), `updates`, `sync` or `update`.
     subcommand: Option<String>,
-    /// `--store` filters (status only).
+    /// Positionals after the subcommand (`update`: `<store> <id>`).
+    extra: Vec<String>,
+    /// `--store` filters (status, sync, update).
     filters: Vec<String>,
     list: bool,
     with_stores: bool,
@@ -5167,6 +5489,10 @@ struct StoresArgs {
     log_dir: Option<PathBuf>,
     steam_root: Option<PathBuf>,
     db: Option<PathBuf>,
+    /// `update`: the game's title for the plan (default: the id).
+    title: Option<String>,
+    /// `update`: the game's existing install directory.
+    dir: Option<PathBuf>,
     dry_run: bool,
     json: bool,
     help: bool,
@@ -5199,6 +5525,8 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
                     Some(PathBuf::from(flag_value(args, &mut index, "--steam-root")?))
             }
             "--db" => parsed.db = Some(PathBuf::from(flag_value(args, &mut index, "--db")?)),
+            "--title" => parsed.title = Some(flag_value(args, &mut index, "--title")?),
+            "--dir" => parsed.dir = Some(PathBuf::from(flag_value(args, &mut index, "--dir")?)),
             _ if arg.starts_with("--store=") => parsed.filters.push(after_eq(arg).to_string()),
             _ if arg.starts_with("--program=") => parsed.program = Some(after_eq(arg).to_string()),
             _ if arg.starts_with("--game-program=") => {
@@ -5211,14 +5539,14 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
                 parsed.steam_root = Some(PathBuf::from(after_eq(arg)))
             }
             _ if arg.starts_with("--db=") => parsed.db = Some(PathBuf::from(after_eq(arg))),
+            _ if arg.starts_with("--title=") => parsed.title = Some(after_eq(arg).to_string()),
+            _ if arg.starts_with("--dir=") => parsed.dir = Some(PathBuf::from(after_eq(arg))),
             other if !other.starts_with('-') => {
-                if parsed.subcommand.is_some() {
-                    bail!(
-                        "unexpected argument `{other}` for `stores`\n\n{}",
-                        stores_usage()
-                    );
+                if parsed.subcommand.is_none() {
+                    parsed.subcommand = Some(other.to_string());
+                } else {
+                    parsed.extra.push(other.to_string());
                 }
-                parsed.subcommand = Some(other.to_string());
             }
             other => bail!(
                 "unexpected argument `{other}` for `stores`\n\n{}",
@@ -5226,6 +5554,16 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
             ),
         }
         index += 1;
+    }
+
+    // Only `update` takes a positional after the subcommand (`<id>`); the other
+    // subcommands take none, so a stray word is a mistake, not an ignored value.
+    if !parsed.extra.is_empty() && parsed.subcommand.as_deref() != Some("update") {
+        bail!(
+            "unexpected argument `{}` for `stores`\n\n{}",
+            parsed.extra[0],
+            stores_usage()
+        );
     }
 
     Ok(parsed)
@@ -6955,7 +7293,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -6964,14 +7302,38 @@ fn usage() -> String {
 }
 
 fn proton_usage() -> String {
-    "USAGE:\n    pitagames-cli proton [--root <dir>]... [--steam-root <dir>]... [--json]\n\n\
+    "USAGE:\n    pitagames-cli proton [--root <dir>]... [--steam-root <dir>]... [--json]\n\
+     \x20                 pitagames-cli proton update [--apply <name>] [--dir <dir>] [--fixture <dir>] [--json]\n\n\
+     SUBCOMMANDS:\n    \
+     update                 List, or fetch and unpack, the pinned Proton/GE builds (opt-in)\n\n\
      OPTIONS:\n    \
      --root <dir>           Scan a compatibility-tools directory (repeatable)\n    \
      --steam-root <dir>     Scan <dir>/compatibilitytools.d and <dir>/steamapps/common\n    \
      --json                 Print the report as JSON\n    \
      -h, --help             Show this help\n\n\
      Without --root/--steam-root the default locations are scanned:\n\
-     system compatibilitytools.d, every Steam root, and umu's data directories."
+     system compatibilitytools.d, every Steam root, umu's data directories and\n\
+     PitaGames' own proton/ directory."
+        .to_string()
+}
+
+fn proton_update_usage() -> String {
+    "USAGE:\n    pitagames-cli proton update [--list] [--apply <name>] [--dir <dir>] [--user <file>] [--fixture <dir>] [--json]\n\n\
+     ACTIONS (default: list):\n    \
+     --list                 Show the pinned builds and whether each is installed\n    \
+     --apply <name>         Fetch, SHA-256-verify and unpack one pinned build (opt-in)\n\n\
+     OPTIONS:\n    \
+     --dir <dir>            Where builds land (default: $XDG_DATA_HOME/pitagames/proton)\n    \
+     --user <file>          A user pin registry (default: <config>/pitagames/proton/updates.toml)\n    \
+     --fixture <dir>        Fixture for --apply: release.json + <asset> (the mods release shape)\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     A pin is shipped data: host, tag, asset and SHA-256. --apply verifies the\n\
+     bytes against that pin before unpacking into our own proton/ dir, which\n\
+     `pitagames-cli proton` then lists and selects like any other build. Nothing\n\
+     is automatic: no startup, no schedule. Store CLIs are the package manager's\n\
+     job and are never touched here. The live HTTP fetch is the shared open item\n\
+     (ticket #12), so --apply reads a fixture today; a wrong digest is refused."
         .to_string()
 }
 
@@ -7075,13 +7437,15 @@ fn prefix_usage() -> String {
 fn stores_usage() -> String {
     "USAGE:\n    pitagames-cli stores [status] [--store <name>] [--list] [--json]\n\
      \x20                 pitagames-cli stores updates [--steam-root <dir>] [--with-stores] [--json]\n\
-     \x20                 pitagames-cli stores sync [--store <name>] [--db <path>] [--dry-run] [--json]\n\n\
+     \x20                 pitagames-cli stores sync [--store <name>] [--db <path>] [--dry-run] [--json]\n\
+     \x20                 pitagames-cli stores update --store <name> <id> [--title <t>] [--dir <dir>] [--dry-run] [--json]\n\n\
      SUBCOMMANDS:\n    \
      status                 Each CLI store's row (default)\n    \
      updates                The unified 'update available' list\n    \
-     sync                   Cache each CLI store's library in the database\n\n\
+     sync                   Cache each CLI store's library in the database\n    \
+     update                 Apply one store game's update through the install queue\n\n\
      OPTIONS:\n    \
-     --store <name>         Limit to epic, amazon or gog (repeatable; status, sync)\n    \
+     --store <name>         Limit to epic, amazon or gog (repeatable; status, sync, update)\n    \
      --list                 Also fetch owned/installed counts (status only)\n    \
      --program <path>       Override the CLI to probe (one --store; GOG: the library CLI)\n    \
      --game-program <path>  Override GOG's gogdl program\n    \
@@ -7089,7 +7453,9 @@ fn stores_usage() -> String {
      --steam-root <dir>     Steam root to scan for updates (updates only)\n    \
      --with-stores          Include the CLI stores' installs in the update list\n    \
      --db <path>            Database to write (sync only; default: the XDG one)\n    \
-     --dry-run              Merge and report, but do not write (sync only)\n    \
+     --title <title>        The game's title for the update's plan (update only; default: the id)\n    \
+     --dir <dir>            The game's existing install directory (update only)\n    \
+     --dry-run              Print the planned commands, do not run (sync, update)\n    \
      --json                 Print the result as JSON\n    \
      -h, --help             Show this help\n\n\
      A status row shows whether each store's CLI is on PATH, its version, the\n\
@@ -7100,7 +7466,10 @@ fn stores_usage() -> String {
      sync folds each store's owned and installed listings into one round of game\n\
      rows and replaces that store's rows in the database. A listing that failed is\n\
      reported and leaves the cache untouched — an empty answer is not an empty\n\
-     library — and other stores' rows are never deleted."
+     library — and other stores' rows are never deleted.\n\n\
+     update is an install of an existing id plus a verify: it rides the same\n\
+     serial queue and the same worker a fresh install does, so an update behaves\n\
+     like an install (Steam updates stay `steam://install`)."
         .to_string()
 }
 
@@ -8873,8 +9242,104 @@ mod tests {
         );
         // Steam has no CLI store backend.
         assert!(stores(&["--store".to_string(), "steam".to_string()]).is_err());
-        // Only the three subcommands exist.
+        // Only the known subcommands exist.
         assert!(stores(&["bogus".to_string()]).is_err());
+        // `status`/`updates`/`sync` take no positional arguments.
+        assert!(stores(&["status".to_string(), "extra".to_string()]).is_err());
+        assert!(stores(&["sync".to_string(), "extra".to_string()]).is_err());
+        // `update` needs one store and an id, and refuses the other
+        // subcommands' flags.
+        assert!(stores(&["update".to_string(), "Gizmo".to_string()]).is_err());
+        assert!(
+            stores(&[
+                "update".to_string(),
+                "--store".to_string(),
+                "epic".to_string(),
+                "Gizmo".to_string(),
+                "--store".to_string(),
+                "amazon".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            stores(&[
+                "update".to_string(),
+                "--store".to_string(),
+                "epic".to_string(),
+                "Gizmo".to_string(),
+                "--db".to_string(),
+                "/tmp/x.db".to_string(),
+            ])
+            .is_err()
+        );
+        assert!(
+            stores(&[
+                "update".to_string(),
+                "--store".to_string(),
+                "epic".to_string(),
+                "Gizmo".to_string(),
+                "TooMany".to_string(),
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn stores_update_installs_then_verifies_through_the_queue() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("installed");
+        let verified = dir.path().join("verified");
+        let program = fake_game(
+            dir.path(),
+            "legendary",
+            &format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 install) : > '{installed}'; exit 0 ;;\n\
+                 verify) : > '{verified}'; \
+                 echo 'Verification finished successfully.'; exit 0 ;;\n\
+                 *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+                 esac\n",
+                installed = installed.display(),
+                verified = verified.display(),
+            ),
+        );
+        let target = dir.path().join("Gizmo");
+        let args = || -> Vec<String> {
+            vec![
+                "update".to_string(),
+                "--store".to_string(),
+                "epic".to_string(),
+                "Gizmo".to_string(),
+                "--title".to_string(),
+                "Gizmo".to_string(),
+                "--dir".to_string(),
+                target.display().to_string(),
+                "--program".to_string(),
+                program.display().to_string(),
+                "--log-dir".to_string(),
+                dir.path().join("logs").display().to_string(),
+            ]
+        };
+
+        // A dry run plans both commands and starts nothing.
+        let mut dry = args();
+        dry.push("--dry-run".to_string());
+        stores(&dry).unwrap();
+        assert!(
+            !installed.exists() && !verified.exists(),
+            "a dry run runs nothing"
+        );
+
+        // The real run rides the queue: the install, then the verify.
+        stores(&args()).unwrap();
+        assert!(installed.exists(), "the install phase ran");
+        assert!(verified.exists(), "the verify followed the install");
+
+        // The JSON and plain render paths both complete.
+        let mut json = args();
+        json.push("--json".to_string());
+        stores(&json).unwrap();
     }
 
     /// A fake `legendary` answering both listings from the checked-in fixtures.
@@ -9280,6 +9745,104 @@ mod tests {
         assert!(parse_proton_args(&["--bogus".to_string()]).is_err());
         assert!(parse_proton_args(&["--root".to_string()]).is_err());
         assert!(parse_proton_args(&["--root=".to_string()]).is_err());
+    }
+
+    #[test]
+    fn proton_update_lists_and_applies_a_pinned_fixture() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let name = "GE-Proton99-1-x86_64";
+
+        // A GE-shaped `.tar.gz`: a top-level build dir holding a `proton` script.
+        let archive = {
+            use flate2::Compression;
+            use flate2::write::GzEncoder;
+
+            let mut builder = tar::Builder::new(Vec::new());
+            let mut header = tar::Header::new_gnu();
+            let proton = b"#!/usr/bin/env python3\n";
+            header.set_size(proton.len() as u64);
+            header.set_mode(0o755);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, format!("{name}/proton"), &proton[..])
+                .unwrap();
+            let tar_bytes = builder.into_inner().unwrap();
+            let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+            encoder.write_all(&tar_bytes).unwrap();
+            encoder.finish().unwrap()
+        };
+        let digest = format!("{:x}", Sha256::digest(&archive));
+
+        let fixture = temp.path().join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+        fs::write(fixture.join(format!("{name}.tar.gz")), &archive).unwrap();
+        fs::write(
+            fixture.join("release.json"),
+            serde_json::json!({
+                "tag_name": "GE-Proton99-1",
+                "assets": [{
+                    "name": format!("{name}.tar.gz"),
+                    "browser_download_url": "https://dl.test/ge.tar.gz",
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let user = temp.path().join("updates.toml");
+        let write_registry = |digest: &str| {
+            fs::write(
+                &user,
+                format!(
+                    "[[builds]]\nname = \"{name}\"\nkind = \"ge\"\nsource = \"github\"\n\
+                     project = \"GloriousEggroll/proton-ge-custom\"\ntag = \"GE-Proton99-1\"\n\
+                     asset = \"{name}.tar.gz\"\nsha256 = \"{digest}\"\n"
+                ),
+            )
+            .unwrap();
+        };
+        write_registry(&digest);
+
+        let dir = temp.path().join("proton");
+        let base = || -> Vec<String> {
+            vec![
+                "--dir".to_string(),
+                dir.display().to_string(),
+                "--user".to_string(),
+                user.display().to_string(),
+            ]
+        };
+
+        // Listing (plain and JSON) is the default and applies nothing.
+        proton_update(&base()).unwrap();
+        let mut list_json = base();
+        list_json.push("--json".to_string());
+        proton_update(&list_json).unwrap();
+        assert!(!dir.exists(), "listing creates nothing");
+
+        // Apply verifies the pin and unpacks into our own dir.
+        let mut apply = base();
+        apply.extend([
+            "--apply".to_string(),
+            name.to_string(),
+            "--fixture".to_string(),
+            fixture.display().to_string(),
+        ]);
+        proton_update(&apply).unwrap();
+        assert!(dir.join(name).join("proton").is_file());
+
+        // A pin the bytes do not match is refused rather than reported as done.
+        write_registry(&"0".repeat(64));
+        assert!(proton_update(&apply).is_err());
+
+        assert!(proton_update(&["--bogus".to_string()]).is_err());
+        // `--apply` without a fixture is not a silent no-op.
+        assert!(proton_update(&["--apply".to_string(), name.to_string()]).is_err());
+        // The dispatcher routes `proton update` to it.
+        assert!(proton(&["update".to_string(), "--help".to_string()]).is_ok());
     }
 
     #[test]

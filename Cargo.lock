@@ -4328,6 +4328,7 @@ name = "pitagames-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "flate2",
  "pitagames-core",
  "pitagames-db",
  "pitagames-metadata",
@@ -4400,6 +4401,7 @@ name = "pitagames-mods"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "flate2",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -4416,10 +4418,13 @@ dependencies = [
 name = "pitagames-platform"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "libc",
  "pitagames-core",
+ "pitagames-mods",
  "serde",
  "serde_json",
+ "tar",
  "tempfile",
  "thiserror 2.0.21",
  "toml",

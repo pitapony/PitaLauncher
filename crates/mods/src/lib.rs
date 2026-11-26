@@ -44,8 +44,9 @@ pub use manifest::{
     ModSource, RestoreReport, VerifyReport, file_hash, tree_hash,
 };
 pub use release::{
-    ArchiveKind, FetchError, Fetched, FetchedRelease, Fetcher, MapFetcher, PinnedRelease, Release,
-    ReleaseAsset, ReleaseError, ReleaseSource, Unpacked, sha256_hex, unpack_bytes,
+    ArchiveKind, FetchError, Fetched, FetchedRelease, Fetcher, LinkPolicy, MapFetcher,
+    PinnedRelease, Release, ReleaseAsset, ReleaseError, ReleaseSource, Unpacked, sha256_hex,
+    unpack_bytes, unpack_bytes_with,
 };
 pub use tierb::{
     Deployment, DllName, TierBError, choose_dll, deploy, override_env, resolve_exe_dir, uninstall,
