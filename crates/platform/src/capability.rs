@@ -668,14 +668,10 @@ fn cachyos_hooks(
 }
 
 /// A recent enough Proton or GE build for DLSSNR / HelixSR.
-fn recent_proton(
-    proton: Option<&ProtonInstall>,
-    steam_default: &'static str,
-) -> Option<&'static str> {
+fn recent_proton(proton: Option<&ProtonInstall>, reason: &'static str) -> Option<&'static str> {
     match proton {
-        None => Some(steam_default),
         Some(install) if proton_is_recent(install) => None,
-        Some(_) => Some(steam_default),
+        _ => Some(reason),
     }
 }
 
