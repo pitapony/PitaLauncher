@@ -51,14 +51,7 @@ pub struct HomeViewProps {
     pub actions: ActionChannel,
     pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
     pub art_revision: Signal<u64>,
-    pub notice: Signal<String>,
-    pub board: Signal<Downloads>,
-    pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
     pub db: Signal<Option<pitagames_db::Db>>,
-    pub installs: Signal<Installs>,
-    pub install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    pub play: Signal<Play>,
-    pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
 }
 
 /// The mounted-element slots a focus move scrolls.
@@ -105,15 +98,18 @@ pub fn HomeView(props: HomeViewProps) -> Element {
     let library = props.library;
     let art_state = props.art_state;
     let art_revision = props.art_revision;
+    // The session handle reaches every concern handle (ADR-0027): the Home
+    // reads the play slot, the install queue, the Downloads board and the
+    // notice line through the one seam.
     let mut session = crate::context::use_session();
-    let notice = props.notice;
-    let board = props.board;
-    let events = props.events;
+    let notice = session.read().notice();
+    let board = session.read().downloads();
+    let events = session.read().download_events();
     let db = props.db;
-    let installs = props.installs;
-    let install_events = props.install_events;
-    let play = props.play;
-    let play_events = props.play_events;
+    let installs = session.read().installs();
+    let install_events = session.read().install_events();
+    let play = session.read().play();
+    let play_events = session.read().play_events();
 
     // Reading the revision repaints a hero whose art just landed.
     let _ = art_revision();

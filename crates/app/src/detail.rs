@@ -20,7 +20,6 @@ use crate::View;
 use crate::anticheat::AnticheatView;
 use crate::copy::CopyButton;
 use crate::diagnostics::DiagnosticsEditor;
-use crate::downloads::{DownloadEvent, Downloads};
 use crate::focus::{self, ActionChannel};
 use crate::format;
 use crate::game_page::{self, Badge, BadgeKind, BadgeTone, Primary};
@@ -29,7 +28,6 @@ use crate::persist;
 use crate::play::{Play, PlayEvent};
 use crate::runtime::{self, DiagnosticsDraft, WrapperDraft};
 use crate::shell;
-use crate::store_installs::{InstallEvent, Installs};
 use crate::wrappers::WrapperEditor;
 use pitagames_input::Action;
 
@@ -59,22 +57,9 @@ pub struct DetailProps {
     pub steam_root: Option<PathBuf>,
     /// Proton builds discovered on this machine.
     pub proton: Option<DiscoveryReport>,
-    /// The one running non-Steam game, so this page's Play button becomes a
-    /// state label while it runs.
-    pub play: Signal<Play>,
-    pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
-    /// Bumped when a supervised session ends, so the history card reloads.
-    pub history_revision: Signal<u64>,
     /// Which shell the window is in: the console shell opens on a full-bleed
     /// hero, the desktop shell on the page's original chrome.
     pub shell: Signal<Shell>,
-    /// The CLI stores' install queue: the console hero's Install action enqueues
-    /// into it.
-    pub installs: Signal<Installs>,
-    pub install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    /// The Downloads channel a Steam install is tracked through.
-    pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
-    pub board: Signal<Downloads>,
     /// Library folders a Steam install's tracker polls.
     pub libraries: Vec<PathBuf>,
 }
@@ -85,7 +70,17 @@ pub fn Detail(props: DetailProps) -> Element {
     let entry = props.entry;
     let db = props.db.0;
     let actions = props.actions;
+    // The session handle reaches every concern handle (ADR-0027): this page
+    // reads the play slot, the install queue, the Downloads board and the
+    // history revision through the one seam instead of eight props fields.
     let mut session = crate::context::use_session();
+    let play_signal = session.read().play();
+    let play_events = session.read().play_events();
+    let installs = session.read().installs();
+    let install_events = session.read().install_events();
+    let download_events = session.read().download_events();
+    let board = session.read().downloads();
+    let history_revision = session.read().history_revision();
     let screen_focus = focus::use_focus();
     let game_id = entry.game.id.clone();
 
@@ -170,7 +165,6 @@ pub fn Detail(props: DetailProps) -> Element {
     // whenever a session ends: reading the revision subscribes this future to
     // it, so a game played from this page fills its card in without a reload.
     let history_rows = use_signal(Vec::<StoredLaunch>::new);
-    let history_revision = props.history_revision;
     let history_db = db.clone();
     let history_game = game_id.clone();
     use_future(move || {
@@ -304,8 +298,6 @@ pub fn Detail(props: DetailProps) -> Element {
     // umu/Proton hand-off, which needs the store listing's executable.
     let play_wired = entry.play_is_wired();
     let play_blocked = entry.play_blocked();
-    let play_signal = props.play;
-    let play_events = props.play_events;
     let playing = play_signal.read().label(&game_id);
     let is_steam = entry.is_steam();
 
@@ -367,7 +359,7 @@ pub fn Detail(props: DetailProps) -> Element {
     let forced_tool = compat_status.as_ref().map(|tool| tool.name.clone());
     let badges = game_page::badges(&entry, anticheat_view.kind, forced_tool.as_deref());
     let primary = game_page::primary_action(&entry);
-    let install_ready = (*props.install_events.read()).is_some();
+    let install_ready = (*install_events.read()).is_some();
     // The hero button and the hero badge read one source
     // (`GameEntry::install_status`), so they can never disagree.
     let install_label = game_page::primary_label(&entry, primary);
@@ -381,10 +373,10 @@ pub fn Detail(props: DetailProps) -> Element {
     // move it out of `props`, so keep a clone for the console hero.
     let hero_url = props.hero.clone();
     // The console hero's Install action needs the same channels the grid uses.
-    let action_installs = props.installs;
-    let action_install_events = props.install_events;
-    let action_events = props.events;
-    let action_board = props.board;
+    let action_installs = installs;
+    let action_install_events = install_events;
+    let action_events = download_events;
+    let action_board = board;
     let action_libraries = props.libraries.clone();
 
     // The resolved command mirrors what will actually run: `pitagames-shim` for

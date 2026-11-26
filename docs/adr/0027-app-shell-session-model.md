@@ -44,12 +44,16 @@ seam, following the pattern the crate already uses:
   `Navigation`: the current view, the back target, the selected game, the
   library query and the text-focus flag. "Where am I and what did I open" is one
   module, not six signals.
-- **`session.rs`** (framework-free) owns a `Session`: the `Navigation` plus the
-  shared concern handles (`Play`, `Installs`, `Downloads`, the history
-  revision) and `notice`, behind **one `dispatch(Action)`**. This is the screen
-  seam: a screen implements `handle(Action)` and the session routes to it. The
+- **`session.rs`** (framework-free for the navigation half) owns a `Session`:
+  the `Navigation` plus the shared concern handles (`Play`, `Installs`,
+  `Downloads`, the input maps and their reload handle, the history revision)
+  and `notice`, behind **one `dispatch(Action)`**. This is the screen seam: a
+  screen implements `handle(Action)` and the session routes to it. The
   per-screen `ActionChannel` split from ADR-0021 stays as it is — the deepening
   adds the missing `handle` seam *above* it, it does not re-litigate the split.
+  *(Update, ticket #9: the handles are held as `Signal`s, so the `Session` is
+  now part of the Dioxus seam — only `Navigation` stays framework-free. Its
+  tests build a `Session` on a headless `VirtualDom`.)*
 - **`context.rs`** is the Dioxus seam: `provide_session` / `use_session` over
   `use_context_provider` (confirmed present in Dioxus 0.7.10). A screen receives
   **one handle**, not a 2–16-field props struct of signals the root owns.

@@ -35,15 +35,11 @@ use crate::gamepad::MapReload;
 pub struct ControlsViewProps {
     /// The app's one input pump posts this screen's actions here.
     pub actions: ActionChannel,
-    /// The persisted maps; Save replaces them and the hint row follows.
-    pub maps: Signal<InputMaps>,
     /// The one remap session, owned by the app because the input pumps read its
     /// capture state.
     pub remap: Signal<Option<RemapSession>>,
     /// The pads the gamepad worker has named, for the target list.
     pub pads: Signal<Vec<Device>>,
-    /// A handle to push saved maps into the running gamepad worker.
-    pub reload: Signal<MapReload>,
 }
 
 /// One focusable cell of the list level, in reading order.
@@ -191,10 +187,12 @@ fn save(
 pub fn ControlsView(props: ControlsViewProps) -> Element {
     let nav = crate::context::use_session();
     let actions = props.actions;
-    let maps = props.maps;
+    // The persisted maps and the gamepad worker's reload handle come from the
+    // session handle (ADR-0027), the same signals the pumps read.
+    let maps = nav.read().input_maps();
     let mut remap = props.remap;
     let pads = props.pads;
-    let reload = props.reload;
+    let reload = nav.read().map_reload();
 
     let screen_focus = focus::use_focus();
     // `None` is the list; `Some(action)` is that action's detail.

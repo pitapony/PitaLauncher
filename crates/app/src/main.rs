@@ -290,14 +290,6 @@ fn App() -> Element {
     let db_state = use_signal(|| None::<pitagames_db::Db>);
     let mut board = use_signal(Downloads::default);
     let events = use_signal(|| None::<UnboundedSender<DownloadEvent>>);
-    // The console shell opens on its couch home; the desktop shell on the grid.
-    // The session handle owns navigation; `App` provides it in context and every
-    // screen below reads the same one (`context::use_session`).
-    let mut session = context::provide_session(if start.shell.is_console() {
-        View::Home
-    } else {
-        View::Library
-    });
     let mut notice = use_signal(String::new);
     // Art is optional: until the cache/server is up, cards show placeholders.
     let art_state = use_signal(|| None::<std::sync::Arc<art::ArtContext>>);
@@ -425,6 +417,29 @@ fn App() -> Element {
     // into as many event handlers as it needs; a `MapReload` is `Clone` but not
     // `Copy`, and a `Signal` is `Copy`.
     let map_reload = use_signal(move || pad_reload);
+    // The session handle owns navigation and every concern handle a screen
+    // reaches through it (ADR-0027). `App` creates the signals above and hands
+    // them to the one provider; every screen below shares the same handle, so a
+    // new screen reads them from here instead of `App` growing a prop field.
+    let mut session = context::provide_session(
+        if start.shell.is_console() {
+            View::Home
+        } else {
+            View::Library
+        },
+        context::SessionHandles {
+            play,
+            play_events,
+            installs,
+            install_events,
+            downloads: board,
+            download_events: events,
+            input_maps,
+            map_reload,
+            notice,
+            history_revision,
+        },
+    );
     // The pad pump lives with the other drains (`pumps`).
     pumps::gamepad_actions(
         pad_channel.clone(),
@@ -812,14 +827,7 @@ fn App() -> Element {
             actions: library_actions,
             art_state,
             art_revision,
-            board,
-            notice,
-            events,
             db: db_state,
-            installs,
-            install_events,
-            play,
-            play_events,
         }
     };
 
@@ -1341,14 +1349,7 @@ fn App() -> Element {
                             hero: hero_url,
                             steam_root: steam_root.clone(),
                             proton: proton_report.clone(),
-                            play,
-                            play_events,
-                            history_revision,
                             shell: shell_state.shell,
-                            installs,
-                            install_events,
-                            events,
-                            board,
                             libraries: detail_libraries.clone(),
                         }
                     }
@@ -1372,7 +1373,6 @@ fn App() -> Element {
                     style: "flex:1;min-height:0;overflow-y:auto;",
                     history_view::HistoryView {
                         db: detail::DbHandle(db_handle.clone()),
-                        revision: history_revision,
                     }
                 }
             } else if current_view == View::Account {
@@ -1392,10 +1392,8 @@ fn App() -> Element {
                     style: "flex:1;min-height:0;overflow-y:auto;",
                     controls::ControlsView {
                         actions: controls_actions,
-                        maps: input_maps,
                         remap,
                         pads,
-                        reload: map_reload,
                     }
                 }
             } else if current_view == View::Logs {
@@ -1409,14 +1407,7 @@ fn App() -> Element {
                     actions: home_actions,
                     art_state,
                     art_revision,
-                    notice,
-                    board,
-                    events,
                     db: db_state,
-                    installs,
-                    install_events,
-                    play,
-                    play_events,
                 }
             } else {
                 {library_body}
@@ -1487,18 +1478,7 @@ struct LibraryGridProps {
     pub actions: focus::ActionChannel,
     pub art_state: Signal<Option<std::sync::Arc<art::ArtContext>>>,
     pub art_revision: Signal<u64>,
-    pub board: Signal<Downloads>,
-    pub notice: Signal<String>,
-    pub events: Signal<Option<UnboundedSender<DownloadEvent>>>,
     pub db: Signal<Option<pitagames_db::Db>>,
-    /// The CLI stores' install queue: a card whose game is queued reads its
-    /// state here, and its Install button enqueues into it.
-    pub installs: Signal<Installs>,
-    pub install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
-    /// The one running non-Steam game: its card shows `starting`/`playing`
-    /// instead of a Play button.
-    pub play: Signal<Play>,
-    pub play_events: Signal<Option<UnboundedSender<PlayEvent>>>,
 }
 
 /// The windowed library grid.
@@ -1514,17 +1494,18 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
     let shell = props.shell;
     let art_state = props.art_state;
     let art_revision = props.art_revision;
-    let board = props.board;
-    // The session handle owns navigation (ADR-0027): the grid reads the filter
-    // and opens a card through it instead of five separate props.
+    // The session handle owns navigation and every concern handle (ADR-0027):
+    // the grid reads the filter, the Downloads board, the install queue, the
+    // play slot and the notice line through the one seam instead of seven props.
     let mut session = crate::context::use_session();
-    let notice = props.notice;
-    let events = props.events;
+    let board = session.read().downloads();
+    let notice = session.read().notice();
+    let events = session.read().download_events();
     let db = props.db;
-    let installs = props.installs;
-    let install_events = props.install_events;
-    let play = props.play;
-    let play_events = props.play_events;
+    let installs = session.read().installs();
+    let install_events = session.read().install_events();
+    let play = session.read().play();
+    let play_events = session.read().play_events();
 
     let mut scroll_top = use_signal(|| 0.0f64);
     let mut viewport_width = use_signal(|| 0.0f64);
