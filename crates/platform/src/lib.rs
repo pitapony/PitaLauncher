@@ -9,7 +9,10 @@
 //! and the read-only [`logs`] reader. M2 adds [`disk`] (free space and bounded
 //! directory sizes), [`prefix`] (the per-game Wine/Proton prefix layout for the
 //! non-Steam stores) and [`launch`] (the umu/Proton hand-off plus process
-//! supervision). GPU detection and the graphics env table arrive in M3.
+//! supervision). M4 adds [`proton_update`]: opt-in, pinned GE-Proton builds
+//! fetched through `mods::release` into our own `proton/` directory, which
+//! [`proton`] discovery already scans. GPU detection and the graphics env table
+//! arrive in M3.
 
 pub mod anticheat;
 pub mod compat;
@@ -19,6 +22,7 @@ pub mod launch;
 pub mod logs;
 pub mod prefix;
 pub mod proton;
+pub mod proton_update;
 
 pub use anticheat::{
     AnticheatFinding, AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision, ScanLimits,
@@ -40,4 +44,7 @@ pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{
     DiscoveryReport, ProtonError, ProtonInstall, ProtonKind, ProtonRoot, ProtonSource,
     default_roots, discover, discover_in,
+};
+pub use proton_update::{
+    BuildState, ProtonPin, ProtonUpdateError, Registry, RegistryError, UpdateReport,
 };
