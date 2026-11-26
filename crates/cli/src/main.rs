@@ -20,6 +20,7 @@ use pitagames_core::{
     read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
+use pitagames_mods::{ModManifest, RestoreReport, VerifyReport};
 use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
@@ -83,6 +84,7 @@ fn run() -> Result<()> {
         "import" => import(&args.collect::<Vec<_>>()),
         "prefix" => prefix(&args.collect::<Vec<_>>()),
         "disk" => disk(&args.collect::<Vec<_>>()),
+        "mods" => mods(&args.collect::<Vec<_>>()),
         "history" => history(&args.collect::<Vec<_>>()),
         "launch" => launch(&args.collect::<Vec<_>>()),
         "stores" => stores(&args.collect::<Vec<_>>()),
@@ -1352,6 +1354,273 @@ fn parse_size_bytes(value: &str) -> Result<u64> {
             .with_context(|| format!("`{number}` is not a whole number"))?;
         Ok(amount.saturating_mul(multiplier))
     }
+}
+
+/// Read, verify or restore a mod manifest in a game directory.
+///
+/// This is the diagnostic for `mods::manifest`: it reads the ledger a mod wrote
+/// (or reports that there is none), hashes the tree, checks every created file
+/// and backup against its recorded BLAKE3, and can restore the directory from
+/// `.gl-backup/`. It never installs anything — installation runs the upstream
+/// installer and is the GUI's job — and it writes only when `--restore` is
+/// asked for.
+fn mods(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_args(args)?;
+    if parsed.help {
+        println!("{}", mods_usage());
+        return Ok(());
+    }
+
+    let dir = parsed
+        .dir
+        .clone()
+        .with_context(|| format!("expected a game directory\n\n{}", mods_usage()))?;
+    if !dir.is_dir() {
+        bail!("{} is not a directory", dir.display());
+    }
+
+    match parsed.action {
+        ModsAction::Hash => {
+            let hash = pitagames_mods::tree_hash(&dir)
+                .with_context(|| format!("cannot hash {}", dir.display()))?;
+            if parsed.json {
+                let payload = serde_json::json!({ "path": dir, "tree_hash": hash });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{hash}");
+            }
+            Ok(())
+        }
+        ModsAction::Show => {
+            let Some(manifest) = ModManifest::load(&dir)? else {
+                if parsed.json {
+                    let payload = serde_json::json!({ "path": dir, "mod": null });
+                    println!("{}", serde_json::to_string_pretty(&payload)?);
+                } else {
+                    println!(
+                        "No mod manifest in {} ({} is absent)",
+                        dir.display(),
+                        dir.join(pitagames_mods::BACKUP_DIR)
+                            .join(pitagames_mods::MANIFEST_NAME)
+                            .display()
+                    );
+                }
+                return Ok(());
+            };
+            if parsed.json {
+                println!("{}", serde_json::to_string_pretty(&manifest)?);
+            } else {
+                for line in manifest_lines(&dir, &manifest) {
+                    println!("{line}");
+                }
+            }
+            Ok(())
+        }
+        ModsAction::Verify => {
+            let manifest = ModManifest::load_required(&dir)?;
+            let report = manifest.verify(&dir);
+            if parsed.json {
+                let payload = serde_json::json!({
+                    "path": dir,
+                    "mod": manifest.mod_name,
+                    "ok": report.ok(),
+                    "issues": report.issues,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                for line in verify_lines(&dir, &manifest, &report) {
+                    println!("{line}");
+                }
+            }
+            if report.ok() {
+                Ok(())
+            } else {
+                bail!(
+                    "{} issue(s) found for `{}` in {}",
+                    report.issues.len(),
+                    manifest.mod_name,
+                    dir.display()
+                )
+            }
+        }
+        ModsAction::Restore => {
+            let report = ModManifest::restore(&dir)?;
+            if parsed.json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                for line in restore_lines(&dir, &report) {
+                    println!("{line}");
+                }
+            }
+            if report.tree_hash_ok {
+                Ok(())
+            } else {
+                bail!(
+                    "restore of `{}` in {} did not reproduce the pre-install tree hash",
+                    report.mod_name,
+                    dir.display()
+                )
+            }
+        }
+    }
+}
+
+/// What `mods` should do with a game directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum ModsAction {
+    /// Show the manifest, or say there is none.
+    #[default]
+    Show,
+    /// Print the directory's tree hash.
+    Hash,
+    /// Verify the installed mod against its manifest.
+    Verify,
+    /// Restore the directory from its manifest.
+    Restore,
+}
+
+/// Parsed `mods` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsArgs {
+    dir: Option<PathBuf>,
+    action: ModsAction,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_args(args: &[String]) -> Result<ModsArgs> {
+    let mut parsed = ModsArgs::default();
+    let mut action_set = false;
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--hash" => set_mods_action(&mut parsed, &mut action_set, ModsAction::Hash, arg)?,
+            "--verify" => set_mods_action(&mut parsed, &mut action_set, ModsAction::Verify, arg)?,
+            "--restore" => set_mods_action(&mut parsed, &mut action_set, ModsAction::Restore, arg)?,
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if !other.starts_with('-') => {
+                if parsed.dir.replace(PathBuf::from(other)).is_some() {
+                    bail!("`mods` takes one directory\n\n{}", mods_usage());
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `mods`\n\n{}",
+                mods_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn set_mods_action(
+    parsed: &mut ModsArgs,
+    set: &mut bool,
+    action: ModsAction,
+    flag: &str,
+) -> Result<()> {
+    if *set {
+        bail!(
+            "`{flag}` cannot be combined with another `mods` action\n\n{}",
+            mods_usage()
+        );
+    }
+    parsed.action = action;
+    *set = true;
+    Ok(())
+}
+
+/// The manifest as a short table: the mod, the two tree hashes, then each file
+/// with the shortened hashes it created and backed up.
+fn manifest_lines(dir: &Path, manifest: &ModManifest) -> Vec<String> {
+    let mut lines = vec![
+        format!("Mod manifest in {}", dir.display()),
+        format!("  mod          {}", manifest.mod_name),
+        format!("  installed    {}", manifest.installed_at),
+        format!("  tree hash    {}", manifest.post_install_tree_hash),
+        format!("  pre-install  {}", manifest.pre_install_tree_hash),
+        format!("  files        {}", manifest.entries.len()),
+    ];
+    let width = manifest
+        .entries
+        .iter()
+        .map(|entry| entry.path.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(16);
+    for entry in &manifest.entries {
+        let mut tags = Vec::new();
+        if let Some(hash) = &entry.created {
+            tags.push(format!("created {}", short_hash(hash)));
+        }
+        if let Some(hash) = &entry.backup {
+            tags.push(format!("backup {}", short_hash(hash)));
+        }
+        lines.push(format!("    {:<width$}  {}", entry.path, tags.join("  ")));
+    }
+    lines
+}
+
+fn verify_lines(dir: &Path, manifest: &ModManifest, report: &VerifyReport) -> Vec<String> {
+    let mut lines = vec![format!(
+        "Verifying `{}` in {}",
+        manifest.mod_name,
+        dir.display()
+    )];
+    if report.ok() {
+        lines.push("  OK: every file matches the manifest".to_string());
+    } else {
+        for issue in &report.issues {
+            lines.push(format!("  issue: {issue}"));
+        }
+    }
+    lines
+}
+
+fn restore_lines(dir: &Path, report: &RestoreReport) -> Vec<String> {
+    let mut lines = vec![
+        format!("Restored `{}` in {}", report.mod_name, dir.display()),
+        format!("  removed      {} file(s)", report.removed.len()),
+        format!("  restored     {} file(s)", report.restored.len()),
+        format!("  tree hash    {}", report.tree_hash),
+        format!("  pre-install  {}", report.expected_tree_hash),
+    ];
+    lines.push(format!(
+        "  result       {}",
+        if report.tree_hash_ok {
+            "byte-for-byte match"
+        } else {
+            "MISMATCH"
+        }
+    ));
+    for issue in &report.issues {
+        lines.push(format!("  issue: {issue}"));
+    }
+    lines
+}
+
+/// The first twelve hex characters of a hash, for a table cell.
+fn short_hash(hash: &str) -> &str {
+    hash.get(..12).unwrap_or(hash)
+}
+
+fn mods_usage() -> String {
+    "USAGE:\n    pitagames-cli mods <dir> [--hash|--verify|--restore] [--json]\n\n\
+     ARGS:\n    \
+     <dir>                  A game directory a mod was installed into\n\n\
+     OPTIONS:\n    \
+     --hash                 Print the directory's BLAKE3 tree hash and exit\n    \
+     --verify               Check the installed mod against its manifest\n    \
+     --restore              Uninstall the mod, restoring `.gl-backup/`\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     With no action, prints the manifest a mod left in `<dir>/.gl-backup/`.\n\
+     `--verify` and `--restore` exit non-zero when a file or backup does not match."
+        .to_string()
 }
 
 /// List (or clear) the sessions the launcher recorded.
@@ -5600,7 +5869,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show, verify or restore a mod manifest in a game directory\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -5970,7 +6239,9 @@ fn scan_usage() -> String {
 mod tests {
     use super::*;
     use pitagames_db::LaunchRecord;
+    use pitagames_mods::ModSource;
     use pitagames_stores::{InstallPhase, install::InstallProgress};
+    use std::fs;
 
     #[test]
     fn parses_steam_account_actions_and_targets() {
@@ -6766,6 +7037,93 @@ mod tests {
         ])
         .unwrap();
         disk(&[path]).unwrap();
+    }
+
+    #[test]
+    fn parses_mods_arguments() {
+        let parsed = parse_mods_args(&[
+            "/games/epic/Gizmo".to_string(),
+            "--verify".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.dir.as_deref(), Some(Path::new("/games/epic/Gizmo")));
+        assert_eq!(parsed.action, ModsAction::Verify);
+        assert!(parsed.json && !parsed.help);
+
+        // No action is `Show`; `--hash` is the tree hash alone.
+        assert_eq!(
+            parse_mods_args(&["/g".to_string()]).unwrap().action,
+            ModsAction::Show
+        );
+        assert_eq!(
+            parse_mods_args(&["/g".to_string(), "--hash".to_string()])
+                .unwrap()
+                .action,
+            ModsAction::Hash
+        );
+        assert!(parse_mods_args(&["--help".to_string()]).unwrap().help);
+
+        let error = parse_mods_args(&[
+            "/g".to_string(),
+            "--verify".to_string(),
+            "--restore".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("cannot be combined"), "{error}");
+
+        let error = parse_mods_args(&["--bogus".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unexpected argument"), "{error}");
+    }
+
+    #[test]
+    fn mods_shows_verifies_and_restores_a_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("game");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("dxgi.dll"), b"an old dll").unwrap();
+        let staging = temp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("OptiScaler.dll"), b"the new dll").unwrap();
+
+        ModManifest::install(
+            &root,
+            "optiscaler",
+            &[ModSource::new("dxgi.dll", staging.join("OptiScaler.dll"))],
+        )
+        .unwrap();
+        let dir = root.display().to_string();
+
+        // Every read-only form succeeds and prints.
+        mods(std::slice::from_ref(&dir)).unwrap();
+        mods(&[dir.clone(), "--json".to_string()]).unwrap();
+        mods(&[dir.clone(), "--hash".to_string()]).unwrap();
+        mods(&[dir.clone(), "--hash".to_string(), "--json".to_string()]).unwrap();
+        mods(&[dir.clone(), "--verify".to_string()]).unwrap();
+
+        // A tampered backup fails verification (reported, not ignored).
+        fs::write(root.join(".gl-backup/dxgi.dll"), b"tampered").unwrap();
+        assert!(mods(&[dir.clone(), "--verify".to_string()]).is_err());
+        // And a tampered backup blocks the restore.
+        assert!(mods(&[dir.clone(), "--restore".to_string()]).is_err());
+
+        // Put the backup back and the restore completes, clearing the ledger.
+        fs::write(root.join(".gl-backup/dxgi.dll"), b"an old dll").unwrap();
+        mods(&[dir.clone(), "--restore".to_string()]).unwrap();
+        assert!(!root.join(".gl-backup").exists());
+        assert_eq!(fs::read(root.join("dxgi.dll")).unwrap(), b"an old dll");
+
+        // With no manifest, showing is fine but verifying is an error.
+        mods(std::slice::from_ref(&dir)).unwrap();
+        assert!(mods(&[dir.clone(), "--verify".to_string()]).is_err());
+
+        // Missing or unknown directories are refused.
+        assert!(mods(&[]).is_err());
+        assert!(mods(&["/no/such/dir".to_string()]).is_err());
+        mods(&["--help".to_string()]).unwrap();
     }
 
     #[test]
