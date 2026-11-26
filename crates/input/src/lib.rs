@@ -31,6 +31,10 @@
 //!   grid walked by the same [`FocusGraph`], with shift and symbol layers, a
 //!   character caret and the text it edits. Its screen is a bottom sheet; this
 //!   module owns every rule that sheet applies.
+//! - [`assess`] is the read-only permission probe: over an [`InputLayout`] (the
+//!   real [`DevInput`] or a fake) it reports whether a controller's `/dev/input`
+//!   node is usable or denied, and the one-line fix when it is denied. It never
+//!   grabs a device, so a game keeps receiving input.
 //!
 //! [`Action`] is runtime state, not a persisted domain type: the keyboard and
 //! every controller share it, so the focus graph and both shells cannot disagree
@@ -46,6 +50,7 @@ mod hint;
 mod map;
 mod mapper;
 mod osk;
+mod permission;
 mod remap;
 mod replay;
 mod source;
@@ -63,6 +68,7 @@ pub use map::{
 };
 pub use mapper::{Input, LastInput};
 pub use osk::{MAX_TEXT, OnScreenKeyboard, OskKey, OskLayer, OskPress};
+pub use permission::{DevInput, GroupState, INPUT_GROUP, InputLayout, PadAccess, assess};
 pub use remap::{CaptureSlot, RemapSession, RemapTarget};
 pub use replay::ReplaySource;
 pub use source::{Battery, Device, DeviceId, InputSource, RawEvent};

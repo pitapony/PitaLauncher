@@ -17,7 +17,7 @@ use std::ops::{Deref, DerefMut};
 
 use dioxus::prelude::Signal;
 use futures_channel::mpsc::UnboundedSender;
-use pitagames_input::InputMaps;
+use pitagames_input::{InputMaps, PadAccess};
 
 use crate::downloads::{DownloadEvent, Downloads};
 use crate::gamepad::MapReload;
@@ -50,6 +50,8 @@ pub(crate) struct SessionHandles {
     pub input_maps: Signal<InputMaps>,
     /// The live gamepad worker's reload handle, so a saved remap reaches it.
     pub map_reload: Signal<MapReload>,
+    /// The read-only pad-permission probe's verdict, for the Controls screen.
+    pub pad_access: Signal<PadAccess>,
     /// The transient one-line notice the header shows.
     pub notice: Signal<String>,
     /// Bumped when a launch session is written, so the history views reload.
@@ -69,6 +71,7 @@ pub(crate) struct Session {
     download_events: Signal<Option<UnboundedSender<DownloadEvent>>>,
     input_maps: Signal<InputMaps>,
     map_reload: Signal<MapReload>,
+    pad_access: Signal<PadAccess>,
     notice: Signal<String>,
     history_revision: Signal<u64>,
 }
@@ -86,6 +89,7 @@ impl Session {
             download_events: handles.download_events,
             input_maps: handles.input_maps,
             map_reload: handles.map_reload,
+            pad_access: handles.pad_access,
             notice: handles.notice,
             history_revision: handles.history_revision,
         }
@@ -131,6 +135,11 @@ impl Session {
         self.map_reload
     }
 
+    /// The read-only pad-permission probe's verdict.
+    pub(crate) fn pad_access(&self) -> Signal<PadAccess> {
+        self.pad_access
+    }
+
     /// The transient one-line notice the header shows.
     pub(crate) fn notice(&self) -> Signal<String> {
         self.notice
@@ -161,7 +170,7 @@ mod tests {
     // The `rsx!` macro emits `dioxus_core`/`dioxus_signals`/`dioxus_elements`
     // paths, so the prelude glob has to be in scope for the harness render.
     use dioxus::prelude::*;
-    use pitagames_input::InputMaps;
+    use pitagames_input::{InputMaps, PadAccess};
 
     use crate::downloads::Downloads;
     use crate::gamepad::MapReload;
@@ -195,6 +204,7 @@ mod tests {
                 download_events: Signal::new(None),
                 input_maps: Signal::new(InputMaps::new()),
                 map_reload: Signal::new(MapReload::detached()),
+                pad_access: Signal::new(PadAccess::NoDevices),
                 notice: Signal::new(String::new()),
                 history_revision: Signal::new(0u64),
             };
@@ -228,6 +238,7 @@ mod tests {
             assert_eq!(session.download_events(), handles.download_events);
             assert_eq!(session.input_maps(), handles.input_maps);
             assert_eq!(session.map_reload(), handles.map_reload);
+            assert_eq!(session.pad_access(), handles.pad_access);
             assert_eq!(session.notice(), handles.notice);
             assert_eq!(session.history_revision(), handles.history_revision);
         });

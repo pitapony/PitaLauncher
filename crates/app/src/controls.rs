@@ -22,8 +22,8 @@
 
 use dioxus::prelude::*;
 use pitagames_input::{
-    Action, Binding, CaptureSlot, Device, InputMaps, RemapSession, RemapTarget, action_label,
-    binding_label,
+    Action, Binding, CaptureSlot, Device, InputMaps, PadAccess, RemapSession, RemapTarget,
+    action_label, binding_label,
 };
 
 use crate::View;
@@ -117,6 +117,19 @@ fn binding_summary(session: &RemapSession, action: Action) -> String {
     } else {
         labels.join("  ·  ")
     }
+}
+
+/// The one-line pad-permission fix to show, or `None` when there is nothing to
+/// say.
+///
+/// A pad the worker has already named means input is reaching the launcher, so
+/// a denied probe is stale or about a node that does not matter — no notice.
+/// That is the guard against a false positive when a working pad is present.
+fn permission_notice(access: &PadAccess, has_pad: bool) -> Option<String> {
+    if has_pad {
+        return None;
+    }
+    access.message().map(str::to_string)
 }
 
 /// Switch the session to another device.
@@ -227,6 +240,11 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
 
     let pad_list = pads.read().clone();
     let target_list = targets(&pad_list);
+    // A pad the worker named means input is working; otherwise the read-only
+    // probe's verdict decides whether the screen shows its fix.
+    let has_pad = pad_list.iter().any(|device| device.is_gamepad);
+    let pad_access = nav.read().pad_access()();
+    let permission_line = permission_notice(&pad_access, has_pad);
     let session = remap.read().clone();
     let list = list_cells(&pad_list);
     let focused = screen_focus.index();
@@ -266,6 +284,13 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                 span {
                     style: "font-size:12px;color:#78788a;line-height:1.5;",
                     "Rebind the keyboard or a connected controller. A rebind asks you to press the control you want; the launcher writes it to input.toml, so a remap survives a restart and a replugged controller."
+                }
+            }
+
+            if let Some(message) = permission_line.clone() {
+                div {
+                    style: "padding:10px 14px;border-radius:8px;background:#2a2a1e;color:#e8d8a0;font-size:13px;line-height:1.5;",
+                    "{message}"
                 }
             }
 
@@ -722,5 +747,32 @@ mod tests {
         session.remove_binding(Action::Confirm, 0);
         session.remove_binding(Action::Confirm, 0);
         assert_eq!(binding_summary(&session, Action::Confirm), "unbound");
+    }
+
+    #[test]
+    fn a_denied_pad_shows_the_one_line_fix() {
+        let denied = PadAccess::Denied {
+            devices: 2,
+            group: pitagames_input::GroupState::NotMember,
+        };
+        let notice = permission_notice(&denied, false).expect("a denial shows a notice");
+        assert!(notice.contains("input group"));
+        assert!(notice.contains("usermod"));
+    }
+
+    #[test]
+    fn a_usable_pad_or_an_empty_controller_list_shows_no_notice() {
+        assert_eq!(permission_notice(&PadAccess::Usable, false), None);
+        assert_eq!(permission_notice(&PadAccess::NoDevices, false), None);
+    }
+
+    #[test]
+    fn a_denial_is_silenced_once_the_worker_names_a_pad() {
+        // The no-false-positive guard: input already reaches the launcher.
+        let denied = PadAccess::Denied {
+            devices: 1,
+            group: pitagames_input::GroupState::Member,
+        };
+        assert_eq!(permission_notice(&denied, true), None);
     }
 }
