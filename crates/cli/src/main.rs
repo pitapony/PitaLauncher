@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::str::FromStr;
@@ -20,6 +21,9 @@ use pitagames_core::{
     read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
+use pitagames_mods::ini::{IniSetting, IniSurface};
+use pitagames_mods::release::{MapFetcher, PinnedRelease};
+use pitagames_mods::tierb;
 use pitagames_mods::{ModManifest, RestoreReport, VerifyReport};
 use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
@@ -46,7 +50,8 @@ use pitagames_stores::steam_config::{
 };
 use pitagames_stores::sync::{self, Backends, SyncReport};
 use pitagames_stores::{
-    CliCommand, CliOptions, CliSpec, DEFAULT_PRIORITY, DownloadProgress, ProgressEvent,
+    CliCommand, CliHandle, CliOptions, CliSpec, DEFAULT_PRIORITY, DownloadProgress, ProgressEvent,
+    ProgressParser,
 };
 
 /// Give up on an install after an hour unless told otherwise.
@@ -1356,6 +1361,18 @@ fn parse_size_bytes(value: &str) -> Result<u64> {
     }
 }
 
+/// The mod diagnostics: a manifest in a game directory, or one of the shared
+/// primitives the mod systems are built on (`release`, `ini`, `capture`).
+fn mods(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("release") => mods_release(&args[1..]),
+        Some("ini") => mods_ini(&args[1..]),
+        Some("capture") => mods_capture(&args[1..]),
+        Some("tierb") => mods_tierb(&args[1..]),
+        _ => mods_manifest(args),
+    }
+}
+
 /// Read, verify or restore a mod manifest in a game directory.
 ///
 /// This is the diagnostic for `mods::manifest`: it reads the ledger a mod wrote
@@ -1364,7 +1381,7 @@ fn parse_size_bytes(value: &str) -> Result<u64> {
 /// `.gl-backup/`. It never installs anything — installation runs the upstream
 /// installer and is the GUI's job — and it writes only when `--restore` is
 /// asked for.
-fn mods(args: &[String]) -> Result<()> {
+fn mods_manifest(args: &[String]) -> Result<()> {
     let parsed = parse_mods_args(args)?;
     if parsed.help {
         println!("{}", mods_usage());
@@ -1609,7 +1626,13 @@ fn short_hash(hash: &str) -> &str {
 }
 
 fn mods_usage() -> String {
-    "USAGE:\n    pitagames-cli mods <dir> [--hash|--verify|--restore] [--json]\n\n\
+    "USAGE:\n    pitagames-cli mods <dir> [--hash|--verify|--restore] [--json]\n    \
+     pitagames-cli mods release --fixture <dir> [--dest <dir>] [--json]\n    \
+     pitagames-cli mods ini <file> --surface <name> [--set Section.Key=Value]... [--write] [--json]\n    \
+     pitagames-cli mods capture <file|-> [--json]\n    \
+     pitagames-cli mods capture --run <program> [args...] [--json]\n    \
+     pitagames-cli mods tierb <target> --fixture <dir> [--set Section.Key=Value]... [--json]\n    \
+     pitagames-cli mods tierb <target> --uninstall [--json]\n\n\
      ARGS:\n    \
      <dir>                  A game directory a mod was installed into\n\n\
      OPTIONS:\n    \
@@ -1619,7 +1642,672 @@ fn mods_usage() -> String {
      --json                 Print the result as JSON\n    \
      -h, --help             Show this help\n\n\
      With no action, prints the manifest a mod left in `<dir>/.gl-backup/`.\n\
-     `--verify` and `--restore` exit non-zero when a file or backup does not match."
+     `--verify` and `--restore` exit non-zero when a file or backup does not match.\n\
+     The `release`, `ini` and `capture` subcommands are the shared mod primitives; see\n\
+     `pitagames-cli mods release --help`, `mods ini --help` and `mods capture --help`.\n\
+     `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`."
+        .to_string()
+}
+
+// -- mods release -----------------------------------------------------------
+
+/// Fetch, verify and unpack a pinned mod release from a fixture directory.
+///
+/// The fixture stands in for the network so the whole `mods::release` pipeline
+/// runs offline: `<dir>/fixture.json` holds the pinned release (host, project,
+/// tag, asset, SHA-256 pin), `<dir>/release.json` is the release API body and
+/// `<dir>/<asset>` is the archive bytes. A wrong pin is refused; a matching
+/// fixture round-trips through fetch → verify → unpack into `--dest`.
+fn mods_release(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_release_args(args)?;
+    if parsed.help {
+        println!("{}", mods_release_usage());
+        return Ok(());
+    }
+    let fixture = parsed
+        .fixture
+        .with_context(|| format!("expected a fixture directory\n\n{}", mods_release_usage()))?;
+    if !fixture.is_dir() {
+        bail!("{} is not a directory", fixture.display());
+    }
+
+    let (config, fetcher) = load_release_fixture(&fixture)?;
+    let dest = parsed.dest.unwrap_or_else(|| fixture.join("unpacked"));
+    let report = config.fetch_and_unpack(&fetcher, &dest)?;
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "source": config.source.label(),
+            "project": config.project,
+            "tag": config.tag,
+            "asset": report.asset,
+            "sha256": report.sha256,
+            "archive": report.kind.label(),
+            "dest": report.dest,
+            "files": report.files,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "Fetched `{}` from {} {}@{}",
+            report.asset,
+            config.source.label(),
+            config.project,
+            config.tag
+        );
+        println!("  sha256       {}", report.sha256);
+        println!("  archive      {}", report.kind.label());
+        println!(
+            "  unpacked     {} file(s) to {}",
+            report.files.len(),
+            report.dest.display()
+        );
+        for file in &report.files {
+            println!("    {file}");
+        }
+    }
+    Ok(())
+}
+
+/// Load a release fixture into a pin and an offline [`MapFetcher`].
+///
+/// The directory holds `fixture.json` (the pin), `release.json` (the API body)
+/// and the asset itself. Both `mods release` and `mods tierb` drive the release
+/// pipeline from it, so a whole fetch → verify → unpack run needs no network.
+fn load_release_fixture(fixture: &Path) -> Result<(PinnedRelease, MapFetcher)> {
+    let config_path = fixture.join("fixture.json");
+    let config: PinnedRelease = serde_json::from_str(
+        &fs::read_to_string(&config_path)
+            .with_context(|| format!("cannot read {}", config_path.display()))?,
+    )
+    .with_context(|| format!("cannot parse {}", config_path.display()))?;
+
+    let release_path = fixture.join("release.json");
+    let release_body = fs::read(&release_path)
+        .with_context(|| format!("cannot read {}", release_path.display()))?;
+    let release = config
+        .source
+        .parse(std::str::from_utf8(&release_body).context("release.json is not UTF-8")?)?;
+    let asset = release.asset(&config.asset).with_context(|| {
+        format!(
+            "{} lists no asset named `{}`",
+            release_path.display(),
+            config.asset
+        )
+    })?;
+    let archive_path = fixture.join(&config.asset);
+    let fetcher = MapFetcher::new()
+        .with(
+            config.source.release_url(&config.project, &config.tag),
+            release_body,
+        )
+        .with(
+            asset.url.clone(),
+            fs::read(&archive_path)
+                .with_context(|| format!("cannot read {}", archive_path.display()))?,
+        );
+    Ok((config, fetcher))
+}
+
+/// Parsed `mods release` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsReleaseArgs {
+    fixture: Option<PathBuf>,
+    dest: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_release_args(args: &[String]) -> Result<ModsReleaseArgs> {
+    let mut parsed = ModsReleaseArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--fixture" => parsed.fixture = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--dest" => parsed.dest = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other => bail!(
+                "unexpected argument `{other}` for `mods release`\n\n{}",
+                mods_release_usage()
+            ),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn mods_release_usage() -> String {
+    "USAGE:\n    pitagames-cli mods release --fixture <dir> [--dest <dir>] [--json]\n\n\
+     Fetches, SHA-256-verifies and unpacks a pinned release from a fixture directory,\n\
+     so the `mods::release` pipeline runs with no network. The directory holds:\n    \
+     fixture.json   the pin: {source, project, tag, asset, sha256}\n    \
+     release.json   the release API body the source parses\n    \
+     <asset>        the archive bytes (zip, tar.zst or tar)\n\n\
+     OPTIONS:\n    \
+     --fixture <dir>        The fixture directory (required)\n    \
+     --dest <dir>           Where to unpack (default `<fixture>/unpacked`)\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help\n\n\
+     A digest that does not match the pin is refused."
+        .to_string()
+}
+
+// -- mods ini ---------------------------------------------------------------
+
+/// Read the allowed keys from an ini, or patch them line-preserving.
+///
+/// The diagnostic for `mods::ini`: with no `--set`, prints the keys the surface
+/// allows that the file currently sets; with `--set Section.Key=Value`, validates
+/// every setting against the surface, then rewrites only those value tokens
+/// (comments and ordering survive). An unknown section, key or value is refused.
+fn mods_ini(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_ini_args(args)?;
+    if parsed.help {
+        println!("{}", mods_ini_usage());
+        return Ok(());
+    }
+    let path = parsed
+        .file
+        .clone()
+        .with_context(|| format!("expected an ini file\n\n{}", mods_ini_usage()))?;
+    let surface_name = parsed
+        .surface
+        .as_deref()
+        .with_context(|| format!("`--surface` is required\n\n{}", mods_ini_usage()))?;
+    let surface = surface_by_name(surface_name)?;
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+
+    if parsed.settings.is_empty() {
+        let values = surface.current(&text);
+        if parsed.json {
+            let payload = serde_json::json!({
+                "path": path,
+                "surface": surface.name,
+                "values": values
+                    .iter()
+                    .map(|value| serde_json::json!({
+                        "section": value.section,
+                        "key": value.key,
+                        "value": value.value,
+                    }))
+                    .collect::<Vec<_>>(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else if values.is_empty() {
+            println!("No `{}` keys set in {}", surface.name, path.display());
+        } else {
+            println!("`{}` keys in {}", surface.name, path.display());
+            for value in &values {
+                println!("  [{}] {} = {}", value.section, value.key, value.value);
+            }
+        }
+        return Ok(());
+    }
+
+    let patched = surface.patch(&text, &parsed.settings)?;
+    if parsed.write {
+        fs::write(&path, &patched).with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    if parsed.json {
+        let applied = parsed
+            .settings
+            .iter()
+            .map(|setting| {
+                serde_json::json!({
+                    "section": setting.section,
+                    "key": setting.key,
+                    "value": setting.value,
+                })
+            })
+            .collect::<Vec<_>>();
+        let payload = serde_json::json!({
+            "path": path,
+            "surface": surface.name,
+            "written": parsed.write,
+            "applied": applied,
+            "text": patched,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if parsed.write {
+        println!(
+            "Patched {} ({} setting(s), surface `{}`)",
+            path.display(),
+            parsed.settings.len(),
+            surface.name
+        );
+    } else {
+        print!("{patched}");
+    }
+    Ok(())
+}
+
+/// The named safe surface for a mod.
+fn surface_by_name(name: &str) -> Result<IniSurface> {
+    Ok(match name {
+        "helixsr" => IniSurface::helixsr(),
+        "dlssnr" => IniSurface::dlssnr(),
+        "optiscaler" => IniSurface::optiscaler(),
+        other => {
+            bail!("unknown mod surface `{other}` (expected `helixsr`, `dlssnr` or `optiscaler`)")
+        }
+    })
+}
+
+/// Parsed `mods ini` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsIniArgs {
+    file: Option<PathBuf>,
+    surface: Option<String>,
+    settings: Vec<IniSetting>,
+    write: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_ini_args(args: &[String]) -> Result<ModsIniArgs> {
+    let mut parsed = ModsIniArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--surface" => parsed.surface = Some(flag_value(args, &mut index, arg)?),
+            "--set" => parsed
+                .settings
+                .push(IniSetting::parse(&flag_value(args, &mut index, arg)?)?),
+            "--write" => parsed.write = true,
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if other.starts_with("--surface=") => {
+                parsed.surface = Some(after_eq(other).to_string());
+            }
+            other if other.starts_with("--set=") => {
+                parsed.settings.push(IniSetting::parse(after_eq(other))?);
+            }
+            other if !other.starts_with('-') => {
+                if parsed.file.replace(PathBuf::from(other)).is_some() {
+                    bail!("`mods ini` takes one file\n\n{}", mods_ini_usage());
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `mods ini`\n\n{}",
+                mods_ini_usage()
+            ),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn mods_ini_usage() -> String {
+    "USAGE:\n    pitagames-cli mods ini <file> --surface <name> [--set Section.Key=Value]... [--write] [--json]\n\n\
+     Reads or patches one ini through a per-mod safe surface, line-preserving: only the\n\
+     value token of an allowed key changes, so comments, blank lines and ordering survive.\n\
+     An unknown section, key or value is refused.\n\n\
+     ARGS:\n    \
+     <file>                 The ini to read or patch\n\n\
+     OPTIONS:\n    \
+     --surface <name>       One of `helixsr`, `dlssnr`, `optiscaler` (required)\n    \
+     --set <Section.Key=Value>  A value to write (repeatable); with none, prints what is set\n    \
+     --write                Write the patch back to <file> (default: print the result)\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help"
+        .to_string()
+}
+
+// -- mods capture -----------------------------------------------------------
+
+/// Parse the launch options a mod installer printed into an allowlisted env.
+///
+/// The diagnostic for `mods::capture`: it reads a transcript file (or `-` for
+/// stdin), finds every line containing `%command%`, reads the `KEY=value`
+/// assignments ahead of it and keeps only those on the fixed allowlist, reporting
+/// the rest with a named reason. `--run` drives a program through the shared
+/// `stores::cli` PTY driver and captures its output live.
+fn mods_capture(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_capture_args(args)?;
+    if parsed.help {
+        println!("{}", mods_capture_usage());
+        return Ok(());
+    }
+    let source = parsed.source.with_context(|| {
+        format!(
+            "expected a transcript file, `-` or `--run`\n\n{}",
+            mods_capture_usage()
+        )
+    })?;
+    let text = match &source {
+        CaptureSource::Stdin => {
+            use std::io::Read as _;
+            let mut text = String::new();
+            std::io::stdin()
+                .read_to_string(&mut text)
+                .context("cannot read stdin")?;
+            text
+        }
+        CaptureSource::File(path) => {
+            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
+        }
+        CaptureSource::Run { program, args } => run_capture(program, args)?,
+    };
+    let captured = pitagames_mods::capture::capture(&text);
+
+    if parsed.json {
+        println!("{}", serde_json::to_string_pretty(&captured)?);
+    } else {
+        println!("Captured env ({} key(s))", captured.len());
+        for (key, value) in &captured.env {
+            println!("  {key}={value}");
+        }
+        if !captured.rejected.is_empty() {
+            println!("Rejected ({}):", captured.rejected.len());
+            for rejected in &captured.rejected {
+                println!("  {rejected}");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Drive a program through the shared PTY driver and return its output text.
+fn run_capture(program: &str, args: &[String]) -> Result<String> {
+    if args.is_empty() {
+        bail!(
+            "`--run {program}` needs at least one argument: the driver runs a program \
+             through an argv template"
+        );
+    }
+    let spec = CliSpec {
+        program: program.to_string(),
+        needs_tty: true,
+        progress: ProgressParser::Plain,
+        list_installed: Vec::new(),
+        list_owned: Vec::new(),
+        auth: Vec::new(),
+        logout: Vec::new(),
+        sync: Vec::new(),
+        install: Vec::new(),
+        verify: Vec::new(),
+        launch: Vec::new(),
+        status: Vec::new(),
+        version: args.to_vec(),
+    };
+    let handle = CliHandle::spawn(&spec, &CliCommand::Version, &CliOptions::default())?;
+    let mut transcript = String::new();
+    while let Some(event) = handle.next_event()? {
+        if let ProgressEvent::Line(line) = event {
+            transcript.push_str(&line);
+            transcript.push('\n');
+        }
+    }
+    let outcome = handle.wait()?;
+    if !outcome.success {
+        bail!(
+            "`{program}` exited {} while printing launch options",
+            outcome.code
+        );
+    }
+    Ok(transcript)
+}
+
+/// Where a `mods capture` transcript comes from.
+#[derive(Debug, PartialEq, Eq)]
+enum CaptureSource {
+    /// Standard input (`-`).
+    Stdin,
+    /// A transcript file.
+    File(PathBuf),
+    /// A program run through the PTY driver.
+    Run { program: String, args: Vec<String> },
+}
+
+/// Parsed `mods capture` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsCaptureArgs {
+    source: Option<CaptureSource>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_capture_args(args: &[String]) -> Result<ModsCaptureArgs> {
+    let mut parsed = ModsCaptureArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--run" => {
+                index += 1;
+                let program = args.get(index).cloned().with_context(|| {
+                    format!("`--run` requires a program\n\n{}", mods_capture_usage())
+                })?;
+                let rest = args[index + 1..].to_vec();
+                set_capture_source(
+                    &mut parsed,
+                    CaptureSource::Run {
+                        program,
+                        args: rest,
+                    },
+                )?;
+                index = args.len();
+                continue;
+            }
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            "-" => set_capture_source(&mut parsed, CaptureSource::Stdin)?,
+            other if !other.starts_with('-') => {
+                set_capture_source(&mut parsed, CaptureSource::File(PathBuf::from(other)))?;
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `mods capture`\n\n{}",
+                mods_capture_usage()
+            ),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn set_capture_source(parsed: &mut ModsCaptureArgs, source: CaptureSource) -> Result<()> {
+    if parsed.source.is_some() {
+        bail!(
+            "`mods capture` takes one transcript file or `--run`\n\n{}",
+            mods_capture_usage()
+        );
+    }
+    parsed.source = Some(source);
+    Ok(())
+}
+
+fn mods_capture_usage() -> String {
+    "USAGE:\n    pitagames-cli mods capture <file|-> [--json]\n    \
+     pitagames-cli mods capture --run <program> [args...] [--json]\n\n\
+     Finds every printed line containing `%command%`, reads the KEY=value assignments\n\
+     ahead of it and keeps only those on the fixed allowlist (WINEDLLOVERRIDES,\n\
+     VK_ADD_LAYER_PATH, VK_INSTANCE_LAYERS, DXVK_*, VKD3D_*). The rest are reported with\n\
+     a named reason. `--run` drives the program through the shared PTY driver.\n\n\
+     ARGS:\n    \
+     <file>                 A transcript to parse, or `-` for stdin\n\n\
+     OPTIONS:\n    \
+     --run <program> [args...]  Run a program and capture its output live\n    \
+     --json                 Print the captured env and rejects as JSON\n    \
+     -h, --help             Show this help"
+        .to_string()
+}
+
+// -- mods tierb -------------------------------------------------------------
+
+/// Deploy or uninstall a managed Tier B OptiScaler.
+///
+/// The diagnostic for `mods::tierb`: it resolves the game's exe directory
+/// (including an Unreal `*/Binaries/Win64`), chooses the first free DLL name,
+/// fetches and SHA-256-verifies a pinned release from a fixture directory (so
+/// the whole pipeline runs offline), patches the ini, writes the manifest, and
+/// prints the `WINEDLLOVERRIDES` env vector. `--uninstall` restores the tree
+/// from the manifest instead.
+fn mods_tierb(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_tierb_args(args)?;
+    if parsed.help {
+        println!("{}", mods_tierb_usage());
+        return Ok(());
+    }
+    let target = parsed.target.clone().with_context(|| {
+        format!(
+            "expected a game directory or executable\n\n{}",
+            mods_tierb_usage()
+        )
+    })?;
+
+    if parsed.uninstall {
+        let report = tierb::uninstall(&target)?;
+        if parsed.json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            for line in restore_lines(&target, &report) {
+                println!("{line}");
+            }
+        }
+        if report.tree_hash_ok {
+            return Ok(());
+        }
+        bail!(
+            "restore in {} did not reproduce the pre-install tree hash",
+            target.display()
+        );
+    }
+
+    let fixture = parsed.fixture.clone().with_context(|| {
+        format!(
+            "`--fixture` is required to deploy\n\n{}",
+            mods_tierb_usage()
+        )
+    })?;
+    if !fixture.is_dir() {
+        bail!("{} is not a directory", fixture.display());
+    }
+    let (pin, fetcher) = load_release_fixture(&fixture)?;
+    let staging = parsed
+        .staging
+        .clone()
+        .unwrap_or_else(|| fixture.join("unpacked"));
+    let deployment = tierb::deploy(&target, &pin, &fetcher, &staging, &parsed.settings)?;
+
+    if parsed.json {
+        let env: Vec<[&str; 2]> = deployment
+            .env
+            .iter()
+            .map(|(key, value)| [key.as_str(), value.as_str()])
+            .collect();
+        let payload = serde_json::json!({
+            "target": target,
+            "exe_dir": deployment.exe_dir,
+            "dll": deployment.dll.file_name(),
+            "override_key": deployment.dll.override_key(),
+            "env": env,
+            "asset": deployment.fetched.asset,
+            "sha256": deployment.fetched.sha256,
+            "archive": deployment.fetched.kind.label(),
+            "release_files": deployment.fetched.files,
+            "mod": deployment.manifest.mod_name,
+            "manifest_files": deployment.manifest.entries.len(),
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Deployed OptiScaler into {}", deployment.exe_dir.display());
+        println!("  dll          {}", deployment.dll.file_name());
+        for (key, value) in &deployment.env {
+            println!("  env          {key}={value}");
+        }
+        println!(
+            "  release      {} ({} {}, {} file(s))",
+            deployment.fetched.asset,
+            deployment.fetched.sha256,
+            deployment.fetched.kind.label(),
+            deployment.fetched.files.len()
+        );
+        println!(
+            "  manifest     {} ({} file(s) recorded)",
+            deployment.manifest.mod_name,
+            deployment.manifest.entries.len()
+        );
+    }
+    Ok(())
+}
+
+/// Parsed `mods tierb` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsTierbArgs {
+    target: Option<PathBuf>,
+    fixture: Option<PathBuf>,
+    staging: Option<PathBuf>,
+    settings: Vec<IniSetting>,
+    uninstall: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_tierb_args(args: &[String]) -> Result<ModsTierbArgs> {
+    let mut parsed = ModsTierbArgs::default();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--fixture" => parsed.fixture = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--staging" => parsed.staging = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--set" => parsed
+                .settings
+                .push(IniSetting::parse(&flag_value(args, &mut index, arg)?)?),
+            "--uninstall" => parsed.uninstall = true,
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if other.starts_with("--fixture=") => {
+                parsed.fixture = Some(PathBuf::from(after_eq(other)));
+            }
+            other if other.starts_with("--staging=") => {
+                parsed.staging = Some(PathBuf::from(after_eq(other)));
+            }
+            other if other.starts_with("--set=") => {
+                parsed.settings.push(IniSetting::parse(after_eq(other))?);
+            }
+            other if !other.starts_with('-') => {
+                if parsed.target.replace(PathBuf::from(other)).is_some() {
+                    bail!(
+                        "`mods tierb` takes one target directory or executable\n\n{}",
+                        mods_tierb_usage()
+                    );
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `mods tierb`\n\n{}",
+                mods_tierb_usage()
+            ),
+        }
+        index += 1;
+    }
+    Ok(parsed)
+}
+
+fn mods_tierb_usage() -> String {
+    "USAGE:\n    \
+     pitagames-cli mods tierb <target> --fixture <dir> [--staging <dir>] [--set Section.Key=Value]... [--json]\n    \
+     pitagames-cli mods tierb <target> --uninstall [--json]\n\n\
+     Deploys a managed Tier B OptiScaler into <target> — a game executable or its\n\
+     directory, including an Unreal `*/Binaries/Win64` — or, with `--uninstall`,\n\
+     restores the tree from its manifest. The DLL name is chosen from the ordered list\n\
+     dxgi -> d3d12 -> dbghelp -> winmm -> version, skipping names the game owns. The\n\
+     release comes from a fixture directory (fixture.json/release.json/<asset>) so the\n\
+     whole fetch -> verify -> unpack pipeline runs offline. `WINEDLLOVERRIDES` is\n\
+     reported as an env vector, never a shell string.\n\n\
+     ARGS:\n    \
+     <target>               The game executable or install directory\n\n\
+     OPTIONS:\n    \
+     --fixture <dir>        The release fixture directory (required to deploy)\n    \
+     --staging <dir>        Where to unpack the release (default `<fixture>/unpacked`)\n    \
+     --set <Section.Key=Value>  An OptiScaler.ini value to patch (repeatable)\n    \
+     --uninstall            Restore <target> from its manifest instead of deploying\n    \
+     --json                 Print the result as JSON\n    \
+     -h, --help             Show this help"
         .to_string()
 }
 
@@ -5869,7 +6557,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show, verify or restore a mod manifest in a game directory\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -7124,6 +7812,368 @@ mod tests {
         assert!(mods(&[]).is_err());
         assert!(mods(&["/no/such/dir".to_string()]).is_err());
         mods(&["--help".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn parses_mods_primitive_arguments() {
+        let release = parse_mods_release_args(&[
+            "--fixture".to_string(),
+            "/fixture".to_string(),
+            "--dest".to_string(),
+            "/out".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(release.fixture.as_deref(), Some(Path::new("/fixture")));
+        assert_eq!(release.dest.as_deref(), Some(Path::new("/out")));
+        assert!(release.json && !release.help);
+
+        let ini = parse_mods_ini_args(&[
+            "/x.ini".to_string(),
+            "--surface=helixsr".to_string(),
+            "--set".to_string(),
+            "HelixSR.Int8=on".to_string(),
+            "--write".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(ini.file.as_deref(), Some(Path::new("/x.ini")));
+        assert_eq!(ini.surface.as_deref(), Some("helixsr"));
+        assert_eq!(ini.settings, [IniSetting::new("HelixSR", "Int8", "on")]);
+        assert!(ini.write);
+
+        let capture = parse_mods_capture_args(&[
+            "--run".to_string(),
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            "echo hi".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            capture.source,
+            Some(CaptureSource::Run {
+                program: "/bin/sh".to_string(),
+                args: vec!["-c".to_string(), "echo hi".to_string()],
+            })
+        );
+        assert!(
+            parse_mods_capture_args(&["-".to_string()]).unwrap().source
+                == Some(CaptureSource::Stdin)
+        );
+        // A file and `--run` together are refused.
+        assert!(
+            parse_mods_capture_args(&[
+                "/log".to_string(),
+                "--run".to_string(),
+                "/bin/sh".to_string()
+            ])
+            .is_err()
+        );
+
+        // The dispatcher routes each subcommand.
+        assert!(mods(&["release".to_string(), "--help".to_string()]).is_ok());
+        assert!(mods(&["tierb".to_string(), "--help".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn mods_release_fetches_and_unpacks_a_fixture() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+
+        // A tiny zip with one file, and its SHA-256 pin.
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            writer
+                .start_file("mod/tool.dll", zip::write::SimpleFileOptions::default())
+                .unwrap();
+            writer.write_all(b"the tool").unwrap();
+            writer.finish().unwrap();
+        }
+        let archive = cursor.into_inner();
+        let digest = format!("{:x}", Sha256::digest(&archive));
+
+        fs::write(fixture.join("DLSSNR.zip"), &archive).unwrap();
+        fs::write(
+            fixture.join("fixture.json"),
+            serde_json::json!({
+                "source": "github",
+                "project": "mauri870/DLSSNR-RDNA3",
+                "tag": "v0.0.9",
+                "asset": "DLSSNR.zip",
+                "sha256": digest,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            fixture.join("release.json"),
+            serde_json::json!({
+                "tag_name": "v0.0.9",
+                "assets": [{
+                    "name": "DLSSNR.zip",
+                    "browser_download_url": "https://dl.test/DLSSNR.zip",
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let dir = fixture.display().to_string();
+        mods_release(&["--fixture".to_string(), dir.clone(), "--json".to_string()]).unwrap();
+        assert_eq!(
+            fs::read(fixture.join("unpacked/mod/tool.dll")).unwrap(),
+            b"the tool"
+        );
+
+        // A pin that does not match the archive is refused.
+        fs::write(
+            fixture.join("fixture.json"),
+            serde_json::json!({
+                "source": "github",
+                "project": "mauri870/DLSSNR-RDNA3",
+                "tag": "v0.0.9",
+                "asset": "DLSSNR.zip",
+                "sha256": "0".repeat(64),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(mods_release(&["--fixture".to_string(), dir.clone()]).is_err());
+
+        mods_release(&["--help".to_string()]).unwrap();
+        assert!(mods_release(&[]).is_err());
+    }
+
+    #[test]
+    fn mods_ini_reads_and_patches_a_surface() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("OptiScaler.ini");
+        fs::write(&path, "; a comment\n[FrameGen]\nEnabled=false\n").unwrap();
+        let file = path.display().to_string();
+
+        // Read the allowed keys, and in JSON.
+        mods_ini(&[
+            file.clone(),
+            "--surface".to_string(),
+            "optiscaler".to_string(),
+        ])
+        .unwrap();
+        mods_ini(&[
+            file.clone(),
+            "--surface".to_string(),
+            "optiscaler".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        // Patch one value in place: the comment survives.
+        mods_ini(&[
+            file.clone(),
+            "--surface".to_string(),
+            "optiscaler".to_string(),
+            "--set".to_string(),
+            "FrameGen.Enabled=true".to_string(),
+            "--write".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "; a comment\n[FrameGen]\nEnabled=true\n"
+        );
+
+        // An unknown key is refused and the file is left as it was.
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(
+            mods_ini(&[
+                file.clone(),
+                "--surface".to_string(),
+                "optiscaler".to_string(),
+                "--set".to_string(),
+                "FrameGen.Nope=1".to_string(),
+                "--write".to_string(),
+            ])
+            .is_err()
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        assert!(mods_ini(&[file.clone(), "--surface".to_string(), "bogus".to_string()]).is_err());
+        mods_ini(&["--help".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn mods_capture_parses_a_transcript_and_runs_a_program() {
+        let temp = tempfile::tempdir().unwrap();
+        let transcript = temp.path().join("install.log");
+        fs::write(
+            &transcript,
+            "Install finished.\n\
+             WINEDLLOVERRIDES=\"dxgi=n,b\" %command%\n\
+             PROTON_USE_OPTISCALER=0 %command%\n",
+        )
+        .unwrap();
+        mods_capture(&[transcript.display().to_string(), "--json".to_string()]).unwrap();
+
+        // `--run` drives a program through the shared PTY driver.
+        let script = fake_game(
+            temp.path(),
+            "installer.sh",
+            "#!/bin/sh\nprintf 'WINEDLLOVERRIDES=\"dxgi=n,b\" %%command%%\\n'\n",
+        );
+        mods_capture(&[
+            "--run".to_string(),
+            script.display().to_string(),
+            "game-dir".to_string(),
+        ])
+        .unwrap();
+
+        assert!(mods_capture(&["/no/such/transcript".to_string()]).is_err());
+        mods_capture(&["--help".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn mods_tierb_deploys_and_uninstalls_over_a_fixture() {
+        use sha2::{Digest as _, Sha256};
+        use std::io::Write as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let fixture = temp.path().join("fixture");
+        fs::create_dir_all(&fixture).unwrap();
+
+        // A fixture OptiScaler release: the DLL, the ini, and a support file.
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        {
+            let mut writer = zip::ZipWriter::new(&mut cursor);
+            for (name, data) in [
+                ("OptiScaler.dll", b"the dll bytes".as_slice()),
+                (
+                    "OptiScaler.ini",
+                    b"; upstream\n[Upscalers]\nDx12Upscaler=fsr4\n\n[FrameGen]\nEnabled=false\n"
+                        .as_slice(),
+                ),
+                (
+                    "OptiScaler/Licenses/OptiScaler.txt",
+                    b"the license".as_slice(),
+                ),
+            ] {
+                writer
+                    .start_file(name, zip::write::SimpleFileOptions::default())
+                    .unwrap();
+                writer.write_all(data).unwrap();
+            }
+            writer.finish().unwrap();
+        }
+        let archive = cursor.into_inner();
+        let digest = format!("{:x}", Sha256::digest(&archive));
+        fs::write(fixture.join("OptiScaler.zip"), &archive).unwrap();
+        fs::write(
+            fixture.join("fixture.json"),
+            serde_json::json!({
+                "source": "github",
+                "project": "optiscaler/OptiScaler",
+                "tag": "v0.9.0-test",
+                "asset": "OptiScaler.zip",
+                "sha256": digest,
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(
+            fixture.join("release.json"),
+            serde_json::json!({
+                "tag_name": "v0.9.0-test",
+                "assets": [{
+                    "name": "OptiScaler.zip",
+                    "browser_download_url": "https://dl.test/OptiScaler.zip",
+                }],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let game = temp.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("game.exe"), b"the game").unwrap();
+        let before = pitagames_mods::tree_hash(&game).unwrap();
+
+        let fixture_arg = fixture.display().to_string();
+        mods_tierb(&[
+            game.display().to_string(),
+            "--fixture".to_string(),
+            fixture_arg.clone(),
+            "--set".to_string(),
+            "FrameGen.Enabled=true".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(fs::read(game.join("dxgi.dll")).unwrap(), b"the dll bytes");
+        assert!(game.join("OptiScaler/Licenses/OptiScaler.txt").is_file());
+        assert!(
+            fs::read_to_string(game.join("OptiScaler.ini"))
+                .unwrap()
+                .contains("Enabled=true")
+        );
+        assert!(ModManifest::is_installed(&game));
+        let hash = pitagames_mods::tree_hash(&game).unwrap();
+        assert_ne!(hash, before);
+
+        // Uninstall restores the tree to its pre-install hash.
+        mods_tierb(&[game.display().to_string(), "--uninstall".to_string()]).unwrap();
+        assert!(!game.join("dxgi.dll").exists());
+        assert_eq!(pitagames_mods::tree_hash(&game).unwrap(), before);
+
+        // An occupied DLL name is skipped by the ordered list.
+        let taken = temp.path().join("taken");
+        fs::create_dir_all(&taken).unwrap();
+        fs::write(taken.join("game.exe"), b"the game").unwrap();
+        fs::write(taken.join("dxgi.dll"), b"the game's own dxgi").unwrap();
+        mods_tierb(&[
+            taken.display().to_string(),
+            "--fixture".to_string(),
+            fixture_arg.clone(),
+        ])
+        .unwrap();
+        assert_eq!(
+            fs::read(taken.join("dxgi.dll")).unwrap(),
+            b"the game's own dxgi"
+        );
+        assert_eq!(fs::read(taken.join("d3d12.dll")).unwrap(), b"the dll bytes");
+        mods_tierb(&[taken.display().to_string(), "--uninstall".to_string()]).unwrap();
+
+        // A pin that does not match the archive is refused, and nothing lands.
+        let bad = temp.path().join("bad");
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("game.exe"), b"the game").unwrap();
+        let clean = pitagames_mods::tree_hash(&bad).unwrap();
+        fs::write(
+            fixture.join("fixture.json"),
+            serde_json::json!({
+                "source": "github",
+                "project": "optiscaler/OptiScaler",
+                "tag": "v0.9.0-test",
+                "asset": "OptiScaler.zip",
+                "sha256": "0".repeat(64),
+            })
+            .to_string(),
+        )
+        .unwrap();
+        assert!(
+            mods_tierb(&[
+                bad.display().to_string(),
+                "--fixture".to_string(),
+                fixture.display().to_string(),
+            ])
+            .is_err()
+        );
+        assert_eq!(pitagames_mods::tree_hash(&bad).unwrap(), clean);
+
+        mods_tierb(&["--help".to_string()]).unwrap();
+        assert!(mods_tierb(&[]).is_err());
+        // Deploy needs a fixture.
+        assert!(mods_tierb(&[game.display().to_string()]).is_err());
     }
 
     #[test]

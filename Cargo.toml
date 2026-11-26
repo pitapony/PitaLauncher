@@ -41,6 +41,13 @@ axum = "0.8"
 # for release and Steam-config digests, which are SHA-256 by contract.
 blake3 = "1"
 walkdir = "2"
+# Mod release fetching (ticket #12): a pinned release archive arrives as a zip
+# or as a zstd-/plain-tar, so unpacking needs all three. `zip` is trimmed to the
+# deflate reader with flate2's pure-Rust zlib-rs backend — the mod packages are
+# read-only here, never written.
+tar = "0.4"
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zstd = "0.14"
 # 0.11 is the version whose SDL-derived mappings and evdev/udev backend the
 # console input slice was designed around; the launcher never uses the webview's
 # `navigator.getGamepads()` instead. Its default `wgi` feature is Windows-only
