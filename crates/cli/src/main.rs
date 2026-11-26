@@ -17,8 +17,8 @@ use anyhow::{Context, Result, bail};
 use pitagames_core::desktop::{self, DesktopEntry};
 use pitagames_core::paths;
 use pitagames_core::{
-    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, ProtonRef, ShimProfile, Store,
-    read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
+    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Profile, ProtonRef, ShimProfile,
+    Store, read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
 };
 use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
 use pitagames_mods::ini::{IniSetting, IniSurface};
@@ -28,6 +28,7 @@ use pitagames_mods::{ModManifest, RestoreReport, VerifyReport};
 use pitagames_platform::anticheat::{
     AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision,
 };
+use pitagames_platform::capability::{self, Availability, Field};
 use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::disk;
 use pitagames_platform::gpu::{self, GpuProbe, GpuProfile, HdrSupport};
@@ -84,6 +85,7 @@ fn run() -> Result<()> {
         "metadata" => metadata(&args.collect::<Vec<_>>()),
         "proton" => proton(&args.collect::<Vec<_>>()),
         "gpu" => gpu(&args.collect::<Vec<_>>()),
+        "capability" => capability(&args.collect::<Vec<_>>()),
         "compat" => compat(&args.collect::<Vec<_>>()),
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
@@ -763,6 +765,261 @@ fn gpu_lines(profile: &GpuProfile) -> Vec<String> {
         format!("  ntsync       {ntsync}"),
         format!("  hdr          {hdr}"),
     ]
+}
+
+/// Report which graphics options the capability matrix offers on this machine.
+///
+/// Read-only diagnostic for the graphics layer: it folds the detected GPU, the
+/// game's curated compat entry and the resolved Proton into one `Available` /
+/// `Hidden(reason)` verdict per field. The positional `<store> <id>` supplies
+/// the game's entry; `--root` points at a fixture sysfs tree and suppresses host
+/// Proton discovery — pass `--proton <dir>` to add a fixture build.
+fn capability(args: &[String]) -> Result<()> {
+    let parsed = parse_capability_args(args)?;
+    if parsed.help {
+        println!("{}", capability_usage());
+        return Ok(());
+    }
+
+    let mut probe = match &parsed.root {
+        Some(root) => GpuProbe::at(root),
+        None => GpuProbe::host(),
+    };
+    if let Some(file) = &parsed.vulkaninfo {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        probe = probe.with_vulkaninfo(text);
+    }
+    let gpu = gpu::detect(&probe);
+    for warning in &gpu.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let shipped = if parsed.shipped.is_empty() {
+        pitagames_platform::compat::default_shipped_dirs()
+    } else {
+        parsed.shipped.clone()
+    };
+    let user = if parsed.user.is_empty() {
+        pitagames_platform::compat::default_user_dirs()
+    } else {
+        parsed.user.clone()
+    };
+    let db = CompatDb::load_from(&shipped, &user);
+    for warning in db.warnings() {
+        eprintln!("warning: {warning}");
+    }
+
+    let game = match parsed.positional.as_slice() {
+        [] => None,
+        [store, id] => Some(GameId::new(
+            Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+            id.clone(),
+        )),
+        [_] => bail!(
+            "expected `<store> <id>` or no positional arguments\n\n{}",
+            capability_usage()
+        ),
+        _ => bail!("too many positional arguments\n\n{}", capability_usage()),
+    };
+    let entry = game.as_ref().and_then(|id| db.get(id));
+    if let Some(id) = &game
+        && entry.is_none()
+    {
+        eprintln!(
+            "warning: no compat entry for {}:{}",
+            id.store.as_str(),
+            id.store_id
+        );
+    }
+
+    let proton = capability_proton(&parsed)?;
+    let profile = Profile::new(
+        game.clone()
+            .unwrap_or_else(|| GameId::new(Store::Steam, "0")),
+        "capability",
+    );
+    let rows = capability::matrix(&profile, &gpu, entry, proton.as_ref());
+
+    if parsed.json {
+        let fields: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(field, verdict)| {
+                serde_json::json!({
+                    "field": field.as_str(),
+                    "label": field.label(),
+                    "available": verdict.is_available(),
+                    "reason": verdict.reason(),
+                })
+            })
+            .collect();
+        let payload = serde_json::json!({
+            "gpu": gpu,
+            "proton": proton,
+            "game": entry,
+            "fields": fields,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for line in capability_summary_lines(&gpu, proton.as_ref(), entry) {
+            println!("{line}");
+        }
+        println!();
+        for line in capability_field_lines(&rows) {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed `capability` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct CapabilityArgs {
+    positional: Vec<String>,
+    root: Option<PathBuf>,
+    vulkaninfo: Option<PathBuf>,
+    proton: Option<PathBuf>,
+    shipped: Vec<PathBuf>,
+    user: Vec<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_capability_args(args: &[String]) -> Result<CapabilityArgs> {
+    let mut parsed = CapabilityArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            "--root" | "--vulkaninfo" | "--proton" | "--shipped" | "--user" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                set_capability_path(&mut parsed, arg, value)?;
+            }
+            _ if arg.starts_with("--") && arg.contains('=') => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                set_capability_path(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
+            other => bail!(
+                "unexpected argument `{other}` for `capability`\n\n{}",
+                capability_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    match parsed.positional.len() {
+        0 | 2 => {}
+        1 => bail!(
+            "expected `<store> <id>` or no positional arguments\n\n{}",
+            capability_usage()
+        ),
+        _ => bail!("too many positional arguments\n\n{}", capability_usage()),
+    }
+
+    Ok(parsed)
+}
+
+fn set_capability_path(parsed: &mut CapabilityArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--vulkaninfo" => parsed.vulkaninfo = Some(PathBuf::from(value)),
+        "--proton" => parsed.proton = Some(PathBuf::from(value)),
+        "--shipped" => parsed.shipped.push(PathBuf::from(value)),
+        "--user" => parsed.user.push(PathBuf::from(value)),
+        other => bail!("internal error: unknown capability flag `{other}`"),
+    }
+    Ok(())
+}
+
+/// The resolved Proton for the diagnostic.
+///
+/// An explicit `--proton <dir>` wins; a fixture `--root` suppresses host
+/// discovery so a container run never reaches the machine's Steam tree.
+fn capability_proton(parsed: &CapabilityArgs) -> Result<Option<ProtonInstall>> {
+    if let Some(dir) = &parsed.proton {
+        let install = ProtonInstall::from_dir(dir, ProtonSource::Explicit)
+            .with_context(|| format!("{} is not a Proton build", dir.display()))?;
+        return Ok(Some(install));
+    }
+    if parsed.root.is_some() {
+        return Ok(None);
+    }
+    Ok(proton::discover().resolve(&ProtonRef::Auto).ok().flatten())
+}
+
+fn capability_summary_lines(
+    gpu: &GpuProfile,
+    proton: Option<&ProtonInstall>,
+    game: Option<&CompatEntry>,
+) -> Vec<String> {
+    let name = gpu.name.as_deref().unwrap_or("unknown GPU");
+    let proton = match proton {
+        Some(install) => match install.distinct_version() {
+            Some(version) => format!("{version} ({})", install.kind.label()),
+            None => format!("{} ({})", install.name, install.kind.label()),
+        },
+        None => "none resolved (Steam decides)".to_string(),
+    };
+    let game = match game {
+        Some(entry) => format!(
+            "{}:{} {}",
+            entry.id.store.as_str(),
+            entry.id.store_id,
+            entry.title
+        ),
+        None => "none (no compat entry)".to_string(),
+    };
+
+    vec![
+        format!("GPU: {name} ({})", gpu.arch.label()),
+        format!("Proton: {proton}"),
+        format!("Game: {game}"),
+    ]
+}
+
+fn capability_field_lines(rows: &[(Field, Availability)]) -> Vec<String> {
+    rows.iter()
+        .map(|(field, verdict)| match verdict {
+            Availability::Available => format!("  {:<9} {}", "available", field.label()),
+            Availability::Hidden { reason } => {
+                format!("  {:<9} {} — {reason}", "hidden", field.label())
+            }
+        })
+        .collect()
+}
+
+fn capability_usage() -> String {
+    "USAGE:\n    \
+     pitagames-cli capability [<store> <id>] [--root <dir>] [--vulkaninfo <file>]\n    \
+     \x20                         [--proton <dir>] [--shipped <dir>] [--user <dir>] [--json]\n\n\
+     ARGS:\n    \
+     <store> <id>           Curate against one game's compat entry, e.g. `steam 1091500`\n\n\
+     OPTIONS:\n    \
+     --root <dir>           Read a fixture sysfs tree (suppresses host Proton discovery)\n    \
+     --vulkaninfo <file>    Captured `vulkaninfo --summary` output\n    \
+     --proton <dir>         Resolve this Proton build for the runtime gates\n    \
+     --shipped <dir>        Read shipped compat entries from this directory (repeatable)\n    \
+     --user <dir>           Read user compat overrides from this directory (repeatable)\n    \
+     --json                 Print the verdicts as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Each graphics field resolves to `available` or `hidden <reason>`, the same\n\
+     reason the UI shows and docs/m3-capability.md lists. Without a positional game\n\
+     the hardware-only paths are checked; game-dependent routes report the game\n\
+     is not in the compatibility database yet."
+        .to_string()
 }
 
 /// Show the compiled shim profile the launcher writes for one game.
@@ -6698,7 +6955,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    gpu        Report the detected GPU, its architecture and VRAM\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -9413,5 +9670,67 @@ verified = ["rdna4"]
         .unwrap_err()
         .to_string();
         assert!(error.contains("no running PitaGames"), "{error}");
+    }
+
+    #[test]
+    fn parses_capability_targets_and_flags() {
+        let parsed = parse_capability_args(&[
+            "steam".to_string(),
+            "1091500".to_string(),
+            "--root".to_string(),
+            "/sys-fixture".to_string(),
+            "--proton=/p".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.positional, ["steam", "1091500"]);
+        assert_eq!(parsed.root, Some(PathBuf::from("/sys-fixture")));
+        assert_eq!(parsed.proton, Some(PathBuf::from("/p")));
+        assert!(parsed.json && !parsed.help);
+
+        let error = parse_capability_args(&["a".to_string(), "b".to_string(), "c".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("too many positional"), "{error}");
+
+        let error = parse_capability_args(&["--root".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("requires a path"), "{error}");
+    }
+
+    #[test]
+    fn capability_resolves_every_field_from_a_fixture() {
+        let temp = tempfile::tempdir().unwrap();
+        let sys = temp.path().join("sys");
+        let card = sys.join("class/drm/card0/device");
+        fs::create_dir_all(&card).unwrap();
+        fs::write(card.join("vendor"), "0x1002\n").unwrap();
+        fs::write(card.join("device"), "0x7550\n").unwrap();
+
+        let shipped = temp.path().join("compat");
+        fs::create_dir_all(&shipped).unwrap();
+        fs::write(
+            shipped.join("steam-1.toml"),
+            "[game]\nstore = \"steam\"\nstore_id = \"1\"\ntitle = \"x\"\n\n[upscaling]\nsupported = [\"dlss\"]\n",
+        )
+        .unwrap();
+        let user = temp.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+
+        // A fixture sysfs tree reads no host Proton, so the runtime gate sees
+        // `None` and every field still resolves to available or a reason.
+        capability(&[
+            "steam".to_string(),
+            "1".to_string(),
+            "--root".to_string(),
+            sys.display().to_string(),
+            "--shipped".to_string(),
+            shipped.display().to_string(),
+            "--user".to_string(),
+            user.display().to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
     }
 }

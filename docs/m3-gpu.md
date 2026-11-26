@@ -133,12 +133,14 @@ JSON round trip.
   cards report `None` for now.
 - **The HDR hint is a compositor guess**, not a display/pipe capability check;
   the actual HDR verdict belongs to the hardware/TV checklist (ADR-0004).
-- **No capability verdict yet.** This slice detects; `platform::capability`
-  (M3) turns `GpuArch` + `compat` into what is `Available` or `Hidden(reason)`.
+- **No capability verdict here.** This slice detects; `platform::capability`
+  turns `GpuArch` + `compat` + the resolved Proton into what is `Available` or
+  `Hidden(reason)` — see `docs/m3-capability.md`.
 
 ## Deliberately not in this slice
 
-- Selecting upscalers, frame generation or injection tiers (`platform::capability`).
+- Selecting upscalers, frame generation or injection tiers (`platform::capability`
+  now ships that as a pure verdict; `envc` compiling the env from it is M3).
 - Compiling any environment (`envc` becomes the full M3 compiler on top of the
   capability verdict).
 - A GUI graphics screen.

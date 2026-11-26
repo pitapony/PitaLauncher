@@ -11,9 +11,12 @@
 //! non-Steam stores) and [`launch`] (the umu/Proton hand-off plus process
 //! supervision). M3 begins with [`gpu`], the injected GPU probe (sysfs, the
 //! `const` vendor/device table, `vulkaninfo`, VRAM and the ntsync/HDR hints)
-//! that the capability matrix will build on.
+//! that the capability matrix will build on. [`capability`] is that matrix: it
+//! folds detection, curation and Proton resolution into one `Available` /
+//! `Hidden(reason)` verdict and one reason string per field.
 
 pub mod anticheat;
+pub mod capability;
 pub mod compat;
 pub mod disk;
 pub mod envc;
@@ -27,6 +30,7 @@ pub use anticheat::{
     AnticheatFinding, AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision, ScanLimits,
     detect, detect_limited, effective, gate,
 };
+pub use capability::{Availability, Field, REASONS, availability, matrix, reason};
 pub use compat::{
     Arch, CompatDb, CompatEntry, CompatError, CompatWarning, GameApi, HelixsrMode, HelixsrPlan,
     NeuralRules, NrBackendChoice, PreferredDll, RuntimeRules, UpscalerId, Version, WrapperId,

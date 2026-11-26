@@ -258,7 +258,11 @@ impl ProtonInstall {
     }
 
     /// Numeric components of the version, newest first when reversed.
-    fn version_key(&self) -> Vec<u64> {
+    ///
+    /// `capability` compares this against the version floors the plan's gates
+    /// name (`Proton-CachyOS ≥ 11.0-20260506`, …), so the extraction lives here
+    /// rather than being reimplemented per consumer.
+    pub(crate) fn version_key(&self) -> Vec<u64> {
         numeric_runs(self.version.as_deref().unwrap_or(&self.name))
     }
 
