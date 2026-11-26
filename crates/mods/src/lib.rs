@@ -24,11 +24,16 @@
 //!   section, key or value is refused by name.
 //! - [`capture`] — read the `%command%` launch options an installer prints into
 //!   an env map, keeping only the fixed allowlist and naming every reject.
+//! - [`tierb`] — deploy managed OptiScaler: resolve the exe dir, choose a free
+//!   DLL name from the ordered candidate list, fetch/verify the pinned release,
+//!   patch the ini, write the manifest, and return the `WINEDLLOVERRIDES` env as
+//!   a vector. Uninstall restores the tree from the manifest.
 
 pub mod capture;
 pub mod ini;
 pub mod manifest;
 pub mod release;
+pub mod tierb;
 
 pub use capture::{ALLOWED_KEYS, ALLOWED_PREFIXES, CapturedEnv, RejectReason, RejectedAssignment};
 pub use ini::{
@@ -42,4 +47,7 @@ pub use release::{
     ArchiveKind, FetchError, Fetched, FetchedRelease, Fetcher, LinkPolicy, MapFetcher,
     PinnedRelease, Release, ReleaseAsset, ReleaseError, ReleaseSource, Unpacked, sha256_hex,
     unpack_bytes, unpack_bytes_with,
+};
+pub use tierb::{
+    Deployment, DllName, TierBError, choose_dll, deploy, override_env, resolve_exe_dir, uninstall,
 };

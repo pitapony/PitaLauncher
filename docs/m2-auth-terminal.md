@@ -83,31 +83,45 @@ closed `stdin`. `pitagames-cli epic|amazon|gog auth` are three one-line wrappers
 over `AuthRun::attach`. That deleted ~150 lines of duplicated prompt handling —
 and with it the risk that the terminal and the CLI answer different prompts.
 
-## `app::auth` — the window's model
+## `app::terminal` — one terminal for every interactive flow
 
-Framework-free, so it is unit-tested without Dioxus.
+The sign-in model was generalized into `app::terminal` (ADR-0029), so the M3/M3.5
+mod installers can render in the same bottom sheet instead of copying it.
 
 | Item | Role |
 |---|---|
-| `AuthEvent` | `Line`, `Prompt`, `Finished` — one report from the worker, tagged with the run id |
-| `AuthTerminal` | what the panel renders: lines, the current hint, the status, the transcript path |
-| `AuthStatus` | `Running`, `SignedIn`, `Failed(message)`, `Cancelled` |
-| `AuthInputs` | the non-blocking handle the input row types through (`answer`, `cancel`) |
-| `auth::spawn(run, store, options, sender)` | the reader thread, plus the writer thread that applies typed lines |
-| `AuthChannel` | the app's `sender()` + `async next()` pair, like the install and play channels |
+| `TerminalEvent` | `Line`, `Prompt`, `Finished` — one report from the worker, tagged with the run id |
+| `Terminal` | what the panel renders: lines, the current hint, the status, the transcript path, and the caller's `title` |
+| `TerminalStatus` | `Running`, `Succeeded`, `Failed(message)`, `Cancelled` |
+| `TerminalInputs` | the non-blocking handle the input row types through (`answer`, `cancel`) |
+| `TerminalDriver` | the seam: `next_step`, `answer`, `cancel`, `finish` — what the terminal drives |
+| `terminal::spawn(run, name, start, events)` | the reader thread, plus the writer thread that applies typed lines, over one `Arc<dyn TerminalDriver>` |
+| `TerminalChannel` | the app's `sender()` + `async next()` pair, like the install and play channels |
 | `next_run()` | the id that makes a late report from a closed panel harmless |
 
-`AuthTerminal::apply` folds a report in and returns whether the store's row
-should be re-probed — true exactly when a session was stored. A report for
-another run id is ignored, so closing a panel and opening a new one cannot be
-coloured by the old one's verdict.
+`Terminal::apply` folds a report in and returns whether the run completed
+**successfully** — the caller's cue to act on a win. A report for another run id is
+ignored, so closing a panel and opening a new one cannot be coloured by the old
+one's verdict.
 
-`auth::spawn` starts two threads. The reader drives `AuthRun::next` and reports
-each step; the writer applies `AuthInputs` (one typed line, or a cancel). They
-share the run through an `Arc`, which is what the driver's two locks exist for.
+`terminal::spawn` runs the caller's `start()` **inside the worker thread**: a slow
+or failing spawn becomes a failed run rather than a blocked click, and the thread
+owns the driver while the window keeps only the inputs. Dropping the inputs
+cancels the run — the same cancel-on-close the panel relies on.
+
+## `app::auth` — the store sign-in, on the shared terminal
+
+`app::auth` is now the thin adapter from a store's sign-in CLI to the shared
+terminal: an `AuthDriver` (`Arc`-shared across the reader and writer threads) maps
+`stores::auth::AuthStep` → `TerminalStep` and `AuthOutcome` → `TerminalOutcome`,
+and `auth::spawn(run, store, options, events)` starts it with the store's own
+thread name (`pitagames-auth-<store>`). The relay's prompt policy and verdict are
+untouched, so the panel behaves exactly as before.
+
 The writer also cancels when the window drops the inputs: leaving the Stores
 screen with a sign-in open stops the CLI instead of leaving it waiting for an
-answer nobody can type. A `done` flag ends the writer as soon as the run does.
+answer nobody can type. `Terminal::apply`'s success return is what re-probes the
+row — true exactly when a session was stored.
 
 ## The GUI
 
@@ -140,13 +154,17 @@ and a Close button, so the transcript can be read.
   went from 12.5 s to 5.5 s in the container — the starvation was real.
 - `pitagames-cli` 53 tests unchanged: the three sign-in commands were rewritten
   onto the relay without changing what they print or accept.
-- `crates/app` 104 → 112 (`auth` 8): lines and a prompt land in order; a stored
-  session asks for a re-probe; a failure keeps the CLI's message and does not; a
-  cancelled run says so; a run that never started reports the I/O error; a late
-  report from a closed panel is ignored; a chatty CLI cannot grow the terminal
-  without bound; and an end-to-end run against a fake `legendary` — prompt,
-  typed answer, `Authentication successful.` — reaches `SignedIn`.
-- Xvfb smoke run in `archlinux:latest` with a fake `legendary` on `PATH`:
+- `crates/app` (`terminal` 10 + `auth` 2; 270 total): the generalized terminal —
+  lines and a prompt land in order; a successful run reports success; a failure
+  keeps the driver's message and does not; a cancelled run says so; a run that
+  never started reports the error; a late report from a closed panel is ignored;
+  a chatty process cannot grow the terminal without bound — plus a **scripted
+  test-double `TerminalDriver`** driving the same `spawn`: it streams an answer
+  and finishes, an explicit cancel reports cancelled, and dropping the inputs
+  cancels the run. The `auth` adapter keeps the end-to-end fake-`legendary` test
+  (prompt, typed answer, `Authentication successful.` → `Succeeded`) and adds one
+  for a missing program.
+- Xvfb smoke run in the container with a fake `legendary` on `PATH`:
   the Epic row showed **sign in required** and a **Sign in** button; clicking it
   opened the panel, which streamed the fake's URL line and its prompt; typing
   `123456` and pressing Enter produced `[cli] INFO: Authentication successful.`,
@@ -165,10 +183,10 @@ and a Close button, so the transcript can be read.
   panel and in the transcript under `<data>/pitagames/logs/`. That is the CLI's
   own behaviour (it also prints it in a terminal); it is local diagnostics only,
   never written to SQLite or the library. Redaction is M4.
-- **The terminal is auth-only.** It renders lines and takes one line of input; it
-  is not a general PTY terminal (no cursor control, no history, no ANSI layout).
-  The HelixSR/DLSSNR installers will want the same panel — the pieces are the
-  relay plus `AuthTerminal`, but nothing else has been wired to it.
+- **The terminal is a stream + one line + Cancel.** It renders lines and takes one
+  line of input; it is not a general PTY terminal (no cursor control, no history,
+  no ANSI layout). The model is now generic (`app::terminal`, ADR-0029) and the
+  HelixSR/DLSSNR installers are the next caller, but nothing else drives it yet.
 - **Closing the panel stops the flow.** There is no "leave it running"; the
   input handle is what keeps the CLI alive, so closing (or leaving the Stores
   screen) cancels it. Nothing is left half-signed-in: the CLI either stored a

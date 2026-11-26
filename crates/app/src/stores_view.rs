@@ -24,11 +24,14 @@ use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport};
 use pitagames_stores::sync::{Backends, StoreLibrary};
 
 use crate::View;
-use crate::auth::{self, AuthEvent, AuthInputs, AuthStatus, AuthTerminal};
+use crate::auth;
 use crate::copy::CopyButton;
 use crate::focus::{self, ActionChannel};
 use crate::library::Library;
 use crate::store_sync;
+use crate::terminal::{
+    self, Terminal, TerminalChannel, TerminalEvent, TerminalInputs, TerminalStatus,
+};
 use pitagames_input::Action;
 
 /// A finished probe: the rows and the `list` flag they were fetched with.
@@ -146,9 +149,11 @@ pub fn StoresView(props: StoresViewProps) -> Element {
     let mut sync_message = use_signal(String::new);
     let mut sync_problems = use_signal(Vec::<String>::new);
     // The one sign-in terminal: what the running CLI said, and the handle that
-    // types back into it.
-    let mut auth_state = use_signal(|| None::<AuthTerminal>);
-    let mut auth_inputs = use_signal(|| None::<AuthInputs>);
+    // types back into it. `auth_store` remembers which store started the run, so
+    // its row can show `signing in…` while it is live.
+    let mut auth_state = use_signal(|| None::<Terminal>);
+    let mut auth_inputs = use_signal(|| None::<TerminalInputs>);
+    let mut auth_store = use_signal(|| None::<Store>);
     let mut auth_text = use_signal(String::new);
 
     let mut session = crate::context::use_session();
@@ -157,7 +162,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
 
     let probes = use_hook(Channel::<ProbeReply>::new);
     let syncs = use_hook(Channel::<SyncReply>::new);
-    let auth_channel = use_hook(auth::AuthChannel::new);
+    let auth_channel = use_hook(TerminalChannel::new);
     let auth_events = use_signal(|| Some(auth_channel.sender()));
     let db_state = props.db;
     let mut library_state = props.library;
@@ -248,6 +253,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                     // Drops the input handle, which stops the run's typing
                     // thread; the CLI has already exited.
                     auth_inputs.set(None);
+                    auth_store.set(None);
                     auth_text.set(String::new());
                 }
             }
@@ -341,7 +347,13 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         }
                         Some(index) if index >= 3 => {
                             if let Some(report) = reports.get(index - 3) {
-                                start_sign_in(report.store, auth_state, auth_inputs, auth_events);
+                                start_sign_in(
+                                    report.store,
+                                    auth_state,
+                                    auth_inputs,
+                                    auth_store,
+                                    auth_events,
+                                );
                                 screen_focus.set(Some(0));
                             }
                         }
@@ -449,6 +461,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         focus: screen_focus,
                         auth: auth_state,
                         auth_inputs,
+                        auth_store,
                         auth_events,
                     }
                 }
@@ -474,7 +487,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                             style: "display:flex;align-items:center;gap:10px;",
                             span {
                                 style: "font-size:var(--text-heading);font-weight:600;color:#ffffff;",
-                                "Sign in to {store_label(terminal.store())}"
+                                "Sign in to {terminal.title()}"
                             }
                             span {
                                 style: "padding:2px 8px;border-radius:999px;font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;background:{status_background(terminal.status())};color:var(--text);",
@@ -567,7 +580,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
 ///
 /// Only called when the terminal is running, so a stale click (the button of a
 /// finished run) is a no-op rather than a write into nothing.
-fn submit_auth_line(auth_inputs: Signal<Option<AuthInputs>>, mut auth_text: Signal<String>) {
+fn submit_auth_line(auth_inputs: Signal<Option<TerminalInputs>>, mut auth_text: Signal<String>) {
     let Some(inputs) = (*auth_inputs.read()).clone() else {
         return;
     };
@@ -587,8 +600,8 @@ fn submit_auth_line(auth_inputs: Signal<Option<AuthInputs>>, mut auth_text: Sign
 /// here, so a running CLI is asked to stop and a finished panel is dismissed
 /// without leaving a dead handle behind.
 fn cancel_or_close_auth(
-    mut auth_state: Signal<Option<AuthTerminal>>,
-    mut auth_inputs: Signal<Option<AuthInputs>>,
+    mut auth_state: Signal<Option<Terminal>>,
+    mut auth_inputs: Signal<Option<TerminalInputs>>,
     mut auth_text: Signal<String>,
 ) {
     let running = auth_state
@@ -608,38 +621,40 @@ fn cancel_or_close_auth(
 
 /// Start a store's sign-in from a controller or keyboard action.
 ///
-/// The row's button does the same three steps; this is the one copy the action
-/// drain calls so a controller cannot start a run the pointer could not.
+/// The row's button does the same steps; this is the one copy the action drain
+/// calls so a controller cannot start a run the pointer could not.
 fn start_sign_in(
     store: Store,
-    mut auth_state: Signal<Option<AuthTerminal>>,
-    mut auth_inputs: Signal<Option<AuthInputs>>,
-    auth_events: Signal<Option<UnboundedSender<AuthEvent>>>,
+    mut auth_state: Signal<Option<Terminal>>,
+    mut auth_inputs: Signal<Option<TerminalInputs>>,
+    mut auth_store: Signal<Option<Store>>,
+    auth_events: Signal<Option<UnboundedSender<TerminalEvent>>>,
 ) {
     let Some(sender) = (*auth_events.read()).clone() else {
         return;
     };
-    let run = auth::next_run();
+    let run = terminal::next_run();
     let inputs = auth::spawn(run, store, auth_options(), sender);
     auth_inputs.set(Some(inputs));
-    auth_state.set(Some(AuthTerminal::new(run, store)));
+    auth_store.set(Some(store));
+    auth_state.set(Some(Terminal::new(run, store_label(store))));
 }
 
-fn status_label(status: &AuthStatus) -> &'static str {
+fn status_label(status: &TerminalStatus) -> &'static str {
     match status {
-        AuthStatus::Running => "running",
-        AuthStatus::SignedIn => "signed in",
-        AuthStatus::Failed(_) => "failed",
-        AuthStatus::Cancelled => "cancelled",
+        TerminalStatus::Running => "running",
+        TerminalStatus::Succeeded => "signed in",
+        TerminalStatus::Failed(_) => "failed",
+        TerminalStatus::Cancelled => "cancelled",
     }
 }
 
-fn status_background(status: &AuthStatus) -> &'static str {
+fn status_background(status: &TerminalStatus) -> &'static str {
     match status {
-        AuthStatus::Running => "#2c3a56",
-        AuthStatus::SignedIn => "#2e4a34",
-        AuthStatus::Failed(_) => "#4a2a2a",
-        AuthStatus::Cancelled => "#2c2c38",
+        TerminalStatus::Running => "#2c3a56",
+        TerminalStatus::Succeeded => "#2e4a34",
+        TerminalStatus::Failed(_) => "#4a2a2a",
+        TerminalStatus::Cancelled => "#2c2c38",
     }
 }
 
@@ -663,12 +678,15 @@ struct StoreRowProps {
     /// into the modal.
     focus: focus::ScreenFocus,
     /// The sign-in terminal, so a row can show that its own run is live.
-    auth: Signal<Option<AuthTerminal>>,
+    auth: Signal<Option<Terminal>>,
     /// The running sign-in's input, which the button starts and the terminal
     /// types into.
-    auth_inputs: Signal<Option<AuthInputs>>,
+    auth_inputs: Signal<Option<TerminalInputs>>,
+    /// Which store started the live sign-in, so this row can tell whether the
+    /// terminal is *its* run.
+    auth_store: Signal<Option<Store>>,
     /// Where a started sign-in reports.
-    auth_events: Signal<Option<UnboundedSender<AuthEvent>>>,
+    auth_events: Signal<Option<UnboundedSender<TerminalEvent>>>,
 }
 
 #[allow(non_snake_case)]
@@ -678,6 +696,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
     let focus = props.focus;
     let mut auth = props.auth;
     let mut auth_inputs = props.auth_inputs;
+    let mut auth_store = props.auth_store;
     let auth_events = props.auth_events;
     let ring = focus::ring_style(focused);
     let state = report.state();
@@ -725,10 +744,11 @@ fn StoreRow(props: StoreRowProps) -> Element {
     // The CLI that owns the login is the store's first program: `legendary`,
     // `nile`, or `lgogdownloader` (never `gogdl`, which is the game runner).
     let login_cli_ready = report.tools.first().is_some_and(|tool| tool.is_ready());
-    let signing_in = auth
-        .read()
-        .as_ref()
-        .is_some_and(|terminal| terminal.store() == store && terminal.running());
+    let signing_in = auth_store() == Some(store)
+        && auth
+            .read()
+            .as_ref()
+            .is_some_and(|terminal| terminal.running());
     let install_hint = (state == RowState::CliMissing).then(|| install_hint(store));
 
     rsx! {
@@ -752,10 +772,11 @@ fn StoreRow(props: StoreRowProps) -> Element {
                             let Some(sender) = (*auth_events.read()).clone() else {
                                 return;
                             };
-                            let run = auth::next_run();
+                            let run = terminal::next_run();
                             let inputs = auth::spawn(run, store, auth_options(), sender);
                             auth_inputs.set(Some(inputs));
-                            auth.set(Some(AuthTerminal::new(run, store)));
+                            auth_store.set(Some(store));
+                            auth.set(Some(Terminal::new(run, store_label(store))));
                             // The modal's cells start at Cancel; the ring
                             // follows so a controller sees where it landed.
                             focus.set(Some(0));
