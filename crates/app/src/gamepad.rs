@@ -173,6 +173,17 @@ impl MapReload {
     pub fn send(&self, maps: InputMaps) -> bool {
         self.sender.send(maps).is_ok()
     }
+
+    /// A handle with no worker listening, for a test that only needs the value
+    /// (the session model holds one without spawning the gamepad thread).
+    #[cfg(test)]
+    pub(crate) fn detached() -> Self {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        drop(receiver);
+        Self {
+            sender: Rc::new(sender),
+        }
+    }
 }
 
 impl PartialEq for MapReload {

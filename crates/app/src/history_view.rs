@@ -24,9 +24,6 @@ const HISTORY_LIMIT: usize = 200;
 #[derive(Props, Clone, PartialEq)]
 pub struct HistoryViewProps {
     pub db: DbHandle,
-    /// Bumped when a session is recorded (or the history is cleared), so the
-    /// list reloads without leaving the screen.
-    pub revision: Signal<u64>,
 }
 
 /// One rendered row, framework-free so the mapping is unit-tested.
@@ -72,7 +69,10 @@ pub fn history_row(stored: &StoredLaunch, now: OffsetDateTime) -> HistoryRow {
 #[allow(non_snake_case)]
 pub fn HistoryView(props: HistoryViewProps) -> Element {
     let db: Option<Db> = props.db.0;
-    let mut revision = props.revision;
+    // The history revision reaches this screen through the session handle, so a
+    // recorded session reloads the list without a prop from `App`.
+    let session = crate::context::use_session();
+    let mut revision = session.read().history_revision();
     let stored = use_signal(Vec::<StoredLaunch>::new);
     let mut error = use_signal(String::new);
     let mut confirming = use_signal(|| false);

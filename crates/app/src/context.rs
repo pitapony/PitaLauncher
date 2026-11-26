@@ -10,12 +10,16 @@ use dioxus::prelude::*;
 use crate::navigation::View;
 use crate::session::Session;
 
+pub(crate) use crate::session::SessionHandles;
+
 /// Build the session and put it in context for every descendant screen.
 ///
 /// Called once from `App`; returns the same handle the screens will read, so
-/// the root keeps direct access without a second copy of the state.
-pub(crate) fn provide_session(view: View) -> Signal<Session> {
-    let session = use_signal(move || Session::new(view));
+/// the root keeps direct access without a second copy of the state. The concern
+/// handles are the app's own signals, handed in so a screen reaches them
+/// through the session rather than through a props field.
+pub(crate) fn provide_session(view: View, handles: SessionHandles) -> Signal<Session> {
+    let session = use_signal(move || Session::new(view, handles));
     provide_context(session);
     session
 }
