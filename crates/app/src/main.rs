@@ -391,6 +391,11 @@ fn App() -> Element {
     // The pads the worker has named, for the Controls screen's target list.
     let pads = use_signal(Vec::<pitagames_input::Device>::new);
 
+    // The read-only pad-permission probe. It opens `/dev/input/event*` nodes
+    // read-only and never grabs, so a game keeps receiving input; the Controls
+    // screen shows the one-line fix when the platform denies the user a pad.
+    let pad_access = use_signal(|| pitagames_input::assess(&pitagames_input::DevInput::new()));
+
     // The last device that produced input, for glyph hints and cursor hiding.
     // The keyboard and gamepad pumps set it; a pointer move counts as the
     // desktop side. `pad_active` is `false` until the first pad action.
@@ -437,6 +442,7 @@ fn App() -> Element {
             download_events: events,
             input_maps,
             map_reload,
+            pad_access,
             notice,
             history_revision,
         },

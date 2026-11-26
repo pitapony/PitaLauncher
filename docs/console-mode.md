@@ -88,6 +88,21 @@ a pad cannot type a number, so tuning them waits on a couch-numeric surface.
 `Back` cancels a pending capture, which is why `Back` itself cannot be captured
 into another action by pressing it (it can still be rebound, removed and reset).
 
+## Controller permissions
+
+Pad access normally comes from logind's `uaccess` tag on `/dev/input/event*`.
+When the platform does not hand the node to the user — the user is not in the
+`input` group, or the ACL was never applied — the Controls screen shows one line
+naming the fix, instead of the pad silently doing nothing:
+
+> A controller is present but the launcher may not read it. Add your user to the
+> input group: `sudo usermod -aG input $USER` — then log out and back in.
+
+The probe only ever opens a node read-only, so a running game keeps receiving
+input; the launcher never `EVIOCGRAB`s. It stays quiet when a node is readable or
+when there is no controller at all, so a working pad never trips it. Details in
+`docs/m2.5-pad-permission.md`.
+
 ## The console top bar and `Tab`
 
 The console shell mounts **no text field**. Where the desktop header has a search
