@@ -78,6 +78,7 @@ mod store_installs;
 mod store_sync;
 mod stores_view;
 mod supervisor;
+mod terminal;
 mod tray;
 mod wrappers;
 
