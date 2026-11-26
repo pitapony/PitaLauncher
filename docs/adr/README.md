@@ -48,6 +48,7 @@ anything not covered here.
 | [0026](0026-open-questions.md) | Open questions | Proposed |
 | [0027](0027-app-shell-session-model.md) | The app shell session model and the screen seam | Accepted |
 | [0028](0028-design-tokens-and-legibility-floor.md) | Design tokens and the legibility floor | Accepted |
+| [0029](0029-one-in-app-terminal.md) | One in-app terminal, generalized from the sign-in panel | Accepted |
 
 ## See also
 
