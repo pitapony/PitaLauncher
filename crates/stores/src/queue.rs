@@ -18,6 +18,37 @@ use std::path::{Path, PathBuf};
 
 use pitagames_core::GameId;
 
+/// What a queued job will do.
+///
+/// An update is not a second path: it is an install of an **existing** game
+/// followed by a verify, so it rides the same queue and the same worker thread
+/// as a fresh install. The only difference is the second command
+/// [`crate::installer::run`] runs, which is why the kind travels on the job
+/// rather than living in a separate code path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JobKind {
+    /// Fetch and lay down a game's files (a fresh install or a repair).
+    #[default]
+    Install,
+    /// Install an existing game, then verify the files it just wrote.
+    Update,
+}
+
+impl JobKind {
+    /// A short word for a log line or a row.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Install => "install",
+            Self::Update => "update",
+        }
+    }
+
+    /// Whether the run follows the install with a verify.
+    pub const fn verifies(self) -> bool {
+        matches!(self, Self::Update)
+    }
+}
+
 /// What a queued install needs.
 #[derive(Debug, Clone, PartialEq)]
 pub struct InstallJob {
@@ -27,6 +58,8 @@ pub struct InstallJob {
     pub target: PathBuf,
     /// The size the store reports for the game, when it reports one.
     pub size: Option<u64>,
+    /// Whether this is a fresh install or an install-then-verify update.
+    pub kind: JobKind,
     pub state: JobState,
     pub progress: JobProgress,
 }
@@ -39,6 +72,7 @@ impl InstallJob {
             title: title.into(),
             target: target.into(),
             size: None,
+            kind: JobKind::Install,
             state: JobState::Queued,
             progress: JobProgress::default(),
         }
@@ -48,6 +82,16 @@ impl InstallJob {
     #[must_use]
     pub fn with_size(mut self, size: u64) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// The same, as an update: install the existing game, then verify it.
+    ///
+    /// The target is unchanged — an update fills the directory the game is
+    /// already installed in, never the store's default for a new install.
+    #[must_use]
+    pub fn as_update(mut self) -> Self {
+        self.kind = JobKind::Update;
         self
     }
 
@@ -371,6 +415,25 @@ mod tests {
         assert_eq!(job.state, JobState::Queued);
         assert!(job.state.is_active() && !job.state.is_finished());
         assert_eq!(job.state.label(), "queued");
+    }
+
+    #[test]
+    fn a_new_job_is_a_plain_install() {
+        let job = job("Gizmo", "Gizmo");
+        assert_eq!(job.kind, JobKind::Install);
+        assert!(!job.kind.verifies());
+        assert_eq!(job.kind.label(), "install");
+    }
+
+    #[test]
+    fn an_update_job_keeps_its_target_and_verifies() {
+        let job = job("Gizmo", "Gizmo").as_update();
+        assert_eq!(job.kind, JobKind::Update);
+        assert!(job.kind.verifies());
+        assert_eq!(job.kind.label(), "update");
+        // The target is the existing install, not the store's default.
+        assert_eq!(job.target, PathBuf::from("/games/epic/Gizmo"));
+        assert_eq!(job.state, JobState::Queued);
     }
 
     #[test]

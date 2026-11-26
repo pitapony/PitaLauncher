@@ -9,10 +9,15 @@ description = "Host platform detection for PitaGames: Proton discovery, GPU and 
 [dependencies]
 libc.workspace = true
 pitagames-core.workspace = true
+# `proton_update` reuses the shared release fetch/verify/unpack (ticket #12)
+# instead of inventing a second download path.
+pitagames-mods.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+flate2.workspace = true
 serde_json.workspace = true
+tar.workspace = true
 tempfile.workspace = true

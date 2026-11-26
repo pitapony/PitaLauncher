@@ -13,11 +13,19 @@
 //!          │                              │
 //!          │                              └─ .job() ──► queue::InstallJob
 //!          ▼
-//!  installer::run(backends, job, options, on_progress) ──► Ok/Err
+//!  installer::run(backends, job, options, control, on_progress) ──► Ok/Err
 //!          │            │
-//!          │            └─ backends.epic/amazon/gog.stream(install, …)
+//!          │            ├─ install phase ──► backends.epic/amazon/gog
+//!          │            └─ verify phase (JobKind::Update only) ──► the same
 //!          └─ JobProgress { percent, stage } per change
 //! ```
+//!
+//! **An update is an install of an existing id plus a verify.** It is not a
+//! second path: [`update_plan`] produces the same [`InstallPlan`]/[`InstallJob`]
+//! a fresh install does (with the directory the game already occupies), only
+//! [`crate::queue::JobKind::Update`], and [`run`] then follows the install with
+//! the backend's own verify. The Updates chip, the store-status list and the
+//! grid's Install button therefore all drive one queue.
 //!
 //! The split is deliberate: a plan is pure and can be computed when the user
 //! clicks Install (so the queue row shows its target before any process exists),
@@ -39,13 +47,13 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use pitagames_core::{GameId, Store};
+use pitagames_core::{Game, GameId, Store};
 
 use crate::amazon;
 use crate::cli::{CliCommand, CliError, CliHandle, CliOptions, CliOutcome, ProgressEvent};
 use crate::epic;
 use crate::gog;
-use crate::queue::{InstallJob, JobProgress};
+use crate::queue::{InstallJob, JobKind, JobProgress};
 use crate::report::RunReport;
 use crate::sync::Backends;
 
@@ -58,6 +66,9 @@ pub struct InstallPlan {
     pub program: &'static str,
     /// The directory the store will fill: `games/<store>/<safe title>`.
     pub target: PathBuf,
+    /// Whether this fills a fresh directory or updates an existing install
+    /// (install, then verify).
+    pub kind: JobKind,
 }
 
 impl InstallPlan {
@@ -66,7 +77,11 @@ impl InstallPlan {
     /// The job carries the target, so a retry after a restart still installs
     /// into the directory the user saw — `run` reads the job, never the title.
     pub fn job(&self) -> InstallJob {
-        InstallJob::new(self.id.clone(), self.title.clone(), self.target.clone())
+        let job = InstallJob::new(self.id.clone(), self.title.clone(), self.target.clone());
+        match self.kind {
+            JobKind::Install => job,
+            JobKind::Update => job.as_update(),
+        }
     }
 
     /// The command a backend needs, addressed to this plan's directory.
@@ -103,6 +118,43 @@ pub struct InstallRun {
     /// queue row says `cancelled` rather than quoting the driver's exit code.
     /// Whatever the store had already written to `target` stays.
     pub cancelled: bool,
+    /// The verify phase of an update run, when one ran (never for a plain
+    /// install, and never for an install that was cancelled before it started).
+    pub verify: Option<VerifyRun>,
+}
+
+/// What an update's verify phase reported.
+///
+/// Each backend judges its own verify differently — legendary always exits `0`
+/// and its verdict is a summary line, nile's repair is judged by its error lines
+/// and gogdl's by its exit code — so `verified` is the backend's own answer and
+/// `message` is that backend's own reason when it is not `true`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct VerifyRun {
+    /// The program that ran the verify (`legendary`, `nile`, `gogdl`).
+    pub program: &'static str,
+    /// The raw transcript of the verify, when logging was on.
+    pub transcript: Option<PathBuf>,
+    /// The user stopped the verify before it finished.
+    pub cancelled: bool,
+    /// The backend's own verdict.
+    pub verified: bool,
+    /// Why it did not verify, in the backend's words.
+    pub message: Option<String>,
+}
+
+impl VerifyRun {
+    /// A verify the user stopped, or that never ran because the install was
+    /// cancelled first. Neither counts against the backend.
+    fn cancelled(store: Store) -> Self {
+        Self {
+            program: program_for(store),
+            transcript: None,
+            cancelled: true,
+            verified: false,
+            message: None,
+        }
+    }
 }
 
 /// The other thread's end of a running install.
@@ -213,10 +265,44 @@ pub fn plan(id: &GameId, title: &str) -> Result<InstallPlan, InstallerError> {
         title: title.to_string(),
         program,
         target: target.ok_or(InstallerError::NoDataDir)?,
+        kind: JobKind::Install,
     })
 }
 
-/// Run one queued install to completion, or until `control` cancels it.
+/// Plan an **update** for an installed game: install its existing id, then
+/// verify the files that land.
+///
+/// An update fills the directory the game already occupies. The row usually
+/// knows it (`Game::install_dir`, written by the library sync or a previous
+/// install), and that path wins — re-deriving it from the title would move an
+/// update to the store's default directory and leave the real install behind.
+/// When the row does not know it, [`plan`]'s store directory is the fallback.
+///
+/// The plan's [`JobKind::Update`] makes [`run`] follow the install with the
+/// backend's own verify, so the update rides the queue exactly like an install.
+pub fn update_plan(game: &Game) -> Result<InstallPlan, InstallerError> {
+    let program = match game.id.store {
+        Store::Epic => epic::PROGRAM,
+        Store::Amazon => amazon::PROGRAM,
+        Store::Gog => gog::GAME_PROGRAM,
+        other => return Err(InstallerError::Unsupported(other)),
+    };
+    let target = match &game.install_dir {
+        Some(dir) => dir.clone(),
+        // The row does not know where the game is; fall back to the store's
+        // default, which is what a fresh install would have used.
+        None => plan(&game.id, &game.title)?.target,
+    };
+    Ok(InstallPlan {
+        id: game.id.clone(),
+        title: game.title.clone(),
+        program,
+        target,
+        kind: JobKind::Update,
+    })
+}
+
+/// Run one queued job to completion, or until `control` cancels it.
 ///
 /// Blocks while the store CLI works: call this on a worker thread. Every
 /// change in progress is handed to `on_progress` as a [`JobProgress`], which is
@@ -225,6 +311,12 @@ pub fn plan(id: &GameId, title: &str) -> Result<InstallPlan, InstallerError> {
 /// path when one was written). A run `control` stopped comes back as an
 /// `Ok` [`InstallRun`] with `cancelled` set — it is a user decision, not a
 /// store failure.
+///
+/// The job's [`JobKind`] decides the phases: `Install` runs the backend's
+/// install once; `Update` runs the install **and then** the backend's verify, so
+/// an update is the same queue entry and the same worker as an install with one
+/// extra command. A verify that does not pass turns an update into an error, the
+/// same way a failed install does.
 pub fn run(
     backends: &Backends,
     job: &InstallJob,
@@ -232,19 +324,92 @@ pub fn run(
     control: &InstallControl,
     mut on_progress: impl FnMut(JobProgress),
 ) -> Result<InstallRun, String> {
-    if !matches!(job.id.store, Store::Epic | Store::Amazon | Store::Gog) {
+    if !is_installable(job.id.store) {
         return Err(InstallerError::Unsupported(job.id.store).to_string());
     }
 
-    // Cancelled before the CLI started: no process, no directory.
-    if control.is_cancelled() {
-        return Ok(cancelled_run(job));
+    let command = install_command(&job.id, &job.target);
+    let report = match run_phase(
+        backends,
+        job.id.store,
+        &command,
+        options,
+        control,
+        &mut on_progress,
+    )? {
+        Phase::Cancelled => return Ok(cancelled_run(job)),
+        Phase::Finished(report) => report,
+    };
+    if !report.succeeded() {
+        return Err(failure_message(&job.id, "install", &report));
+    }
+    let mut install = InstallRun {
+        program: program_for(job.id.store),
+        target: job.target.clone(),
+        transcript: report.log_path().map(Path::to_path_buf),
+        cancelled: false,
+        verify: None,
+    };
+
+    // A plain install is done; only an update carries the extra verify.
+    if !job.kind.verifies() {
+        return Ok(install);
     }
 
-    let command = install_command(&job.id, &job.target);
+    let verify_command = verify_command(&job.id, &job.target);
+    install.verify = Some(
+        match run_phase(
+            backends,
+            job.id.store,
+            &verify_command,
+            options,
+            control,
+            &mut on_progress,
+        )? {
+            Phase::Cancelled => VerifyRun::cancelled(job.id.store),
+            Phase::Finished(report) => verify_run(job.id.store, &report),
+        },
+    );
+
+    if let Some(verify) = &install.verify
+        && !verify.cancelled
+        && !verify.verified
+    {
+        return Err(verify_failure_message(&job.id, verify));
+    }
+    Ok(install)
+}
+
+/// The end of one command a run drove.
+enum Phase {
+    /// The user stopped it (or it was already stopped before it started).
+    Cancelled,
+    /// It ran to completion; the report carries the backend's verdict.
+    Finished(RunReport),
+}
+
+/// Spawn one backend command, stream it to `on_progress`, and judge it.
+///
+/// `run` calls this once for an install and, for an update, a second time for
+/// the verify. The handle is registered with `control` for as long as the CLI
+/// runs, so a Cancel reaches a worker blocked on a silent process.
+fn run_phase(
+    backends: &Backends,
+    store: Store,
+    command: &CliCommand,
+    options: &CliOptions,
+    control: &InstallControl,
+    on_progress: &mut impl FnMut(JobProgress),
+) -> Result<Phase, String> {
+    // Cancelled before the CLI started: no process, no directory.
+    if control.is_cancelled() {
+        return Ok(Phase::Cancelled);
+    }
+
+    let label = command.as_str();
     let handle = Arc::new(
-        spawn_backend(backends, job.id.store, &command, options)
-            .map_err(|error| format!("could not run the {} install: {error}", job.id.store))?,
+        spawn_backend(backends, store, command, options)
+            .map_err(|error| format!("could not run the {store} {label}: {error}"))?,
     );
     if control.attach(&handle) {
         handle.cancel();
@@ -253,14 +418,11 @@ pub fn run(
     let mut tracker = ProgressTracker::default();
     loop {
         match handle.next_event() {
-            Ok(Some(event)) => tracker.observe(&event, &mut on_progress),
+            Ok(Some(event)) => tracker.observe(&event, on_progress),
             Ok(None) => break,
             Err(error) => {
                 control.detach();
-                return Err(format!(
-                    "could not read the {} install: {error}",
-                    job.id.store
-                ));
+                return Err(format!("could not read the {store} {label}: {error}"));
             }
         }
     }
@@ -268,22 +430,13 @@ pub fn run(
     control.detach();
 
     let outcome =
-        outcome.map_err(|error| format!("could not read the {} install: {error}", job.id.store))?;
-    let report = report_backend(backends, job.id.store, &command, outcome);
-
+        outcome.map_err(|error| format!("could not read the {store} {label}: {error}"))?;
+    let report = report_backend(backends, store, command, outcome);
     if report.outcome.cancelled {
-        return Ok(cancelled_run(job));
+        Ok(Phase::Cancelled)
+    } else {
+        Ok(Phase::Finished(report))
     }
-    if !report.succeeded() {
-        return Err(failure_message(&job.id, &report));
-    }
-
-    Ok(InstallRun {
-        program: program_for(job.id.store),
-        target: job.target.clone(),
-        transcript: report.log_path().map(Path::to_path_buf),
-        cancelled: false,
-    })
 }
 
 /// The report for a run that ended before doing any work.
@@ -293,6 +446,43 @@ fn cancelled_run(job: &InstallJob) -> InstallRun {
         target: job.target.clone(),
         transcript: None,
         cancelled: true,
+        verify: None,
+    }
+}
+
+/// Judge an update's verify phase with the backend's own rule.
+///
+/// legendary always exits `0` (its verdict is a summary line), nile exits `0`
+/// for a refusal too (its verdict is its error lines), and gogdl exits non-zero
+/// on a failed repair — so each backend answers for itself rather than sharing
+/// one exit-code rule.
+fn verify_run(store: Store, report: &RunReport) -> VerifyRun {
+    let (verified, message) = match store {
+        Store::Epic => {
+            let verdict = epic::verify_report(&report.text);
+            let message = (!verdict.verified).then(|| {
+                format!(
+                    "{} file(s) corrupted, {} file(s) missing",
+                    verdict.corrupted, verdict.missing
+                )
+            });
+            (verdict.verified, message)
+        }
+        Store::Amazon => {
+            let verdict = amazon::verify_report(report);
+            let message = (!verdict.verified).then(|| verdict.errors.join("; "));
+            (verdict.verified, message)
+        }
+        // gogdl's exit status is the verdict; `_` also covers the unsupported
+        // store `run` refuses before ever getting here.
+        _ => (report.succeeded(), report.failure_message()),
+    };
+    VerifyRun {
+        program: program_for(store),
+        transcript: report.log_path().map(Path::to_path_buf),
+        cancelled: false,
+        verified,
+        message,
     }
 }
 
@@ -338,6 +528,18 @@ fn install_command(id: &GameId, target: &Path) -> CliCommand {
     }
 }
 
+/// The verify command for an update of `id` in `target`.
+///
+/// The directory is always supplied: legendary and nile ignore it, and `gogdl`
+/// needs it (`repair {id} --path {dir}`). A spec whose verify template does not
+/// use `{dir}` simply ignores the extra value.
+fn verify_command(id: &GameId, target: &Path) -> CliCommand {
+    CliCommand::Verify {
+        id: id.store_id.clone(),
+        install_dir: Some(target.to_path_buf()),
+    }
+}
+
 const fn program_for(store: Store) -> &'static str {
     match store {
         Store::Epic => epic::PROGRAM,
@@ -347,16 +549,32 @@ const fn program_for(store: Store) -> &'static str {
     }
 }
 
-/// A failed run as one line: what the CLI said, and where the transcript is.
-fn failure_message(id: &GameId, report: &RunReport) -> String {
+/// A failed phase as one line: what the CLI said, and where the transcript is.
+fn failure_message(id: &GameId, phase: &str, report: &RunReport) -> String {
     let mut message = format!(
-        "{} install failed: {}",
+        "{} {phase} failed: {}",
         id.store,
         report
             .failure_message()
             .unwrap_or_else(|| "the client exited without a status line".to_string())
     );
     if let Some(path) = report.log_path() {
+        message.push_str(&format!(" (transcript: {})", path.display()));
+    }
+    message
+}
+
+/// An update whose verify did not pass, as one line.
+fn verify_failure_message(id: &GameId, verify: &VerifyRun) -> String {
+    let mut message = format!(
+        "{} update verify failed: {}",
+        id.store,
+        verify
+            .message
+            .as_deref()
+            .unwrap_or("the client did not confirm the files")
+    );
+    if let Some(path) = &verify.transcript {
         message.push_str(&format!(" (transcript: {})", path.display()));
     }
     message
@@ -784,6 +1002,202 @@ mod tests {
         let stage = seen[0].stage.as_deref().unwrap();
         assert!(stage.ends_with('…'));
         assert_eq!(stage.chars().count(), STAGE_LIMIT + 1);
+    }
+
+    // -- updates: an install of an existing id plus a verify ----------------
+
+    #[test]
+    fn an_update_plan_reuses_the_directory_the_game_is_installed_in() {
+        let installed = tempfile::tempdir().unwrap();
+        let mut game = Game::new(game(Store::Epic, "Gizmo"), "Gizmo");
+        game.installed = true;
+        game.install_dir = Some(installed.path().join("Gizmo"));
+
+        let plan = update_plan(&game).unwrap();
+        assert_eq!(plan.kind, JobKind::Update);
+        assert_eq!(plan.program, "legendary");
+        assert_eq!(plan.target, installed.path().join("Gizmo"));
+        // The queue entry an update produces is an update, so `run` will verify.
+        assert!(plan.job().kind.verifies());
+        assert_eq!(plan.job().target, installed.path().join("Gizmo"));
+    }
+
+    #[test]
+    fn an_update_plan_falls_back_to_the_stores_directory() {
+        let _guard = env_lock();
+        let data = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("XDG_DATA_HOME", data.path()) };
+
+        let mut game = Game::new(game(Store::Epic, "Gizmo"), "Gizmo Deluxe");
+        game.installed = true;
+        let plan = update_plan(&game).unwrap();
+        assert_eq!(plan.kind, JobKind::Update);
+        assert_eq!(
+            plan.target,
+            data.path().join("pitagames/games/epic/Gizmo Deluxe")
+        );
+
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+    }
+
+    #[test]
+    fn update_plan_refuses_a_store_with_no_installer() {
+        let mut game = Game::new(game(Store::Steam, "620"), "Portal 2");
+        game.install_dir = Some(PathBuf::from("/games/Portal 2"));
+        assert_eq!(
+            update_plan(&game),
+            Err(InstallerError::Unsupported(Store::Steam))
+        );
+    }
+
+    #[test]
+    fn an_update_installs_and_then_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_marker = dir.path().join("installed");
+        let verify_marker = dir.path().join("verified");
+        let program = script(
+            dir.path(),
+            "legendary",
+            &format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 install) : > '{installed}'; \
+                 echo '[cli] INFO: = Progress: 100.00% (1000/1000)'; exit 0 ;;\n\
+                 verify) : > '{verified}'; \
+                 echo 'Verification finished successfully.'; exit 0 ;;\n\
+                 *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+                 esac\n",
+                installed = install_marker.display(),
+                verified = verify_marker.display(),
+            ),
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        )
+        .as_update();
+
+        let run = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap();
+
+        assert!(install_marker.exists(), "the install phase ran");
+        assert!(verify_marker.exists(), "the verify ran after the install");
+        let verify = run.verify.expect("an update carries its verify");
+        assert!(verify.verified);
+        assert_eq!(verify.program, "legendary");
+        assert!(!verify.cancelled);
+        assert!(verify.transcript.is_none(), "logging was off");
+    }
+
+    #[test]
+    fn a_plain_install_never_runs_a_verify() {
+        let dir = tempfile::tempdir().unwrap();
+        // The fake refuses anything but an install, so a stray verify would
+        // fail the run instead of going unnoticed.
+        let program = script(
+            dir.path(),
+            "legendary",
+            "#!/bin/sh\n\
+             if [ \"$1\" = install ]; then exit 0; fi\n\
+             echo \"unexpected: $*\" >&2\n\
+             exit 2\n",
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        );
+
+        let run = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap();
+        assert!(run.verify.is_none());
+    }
+
+    #[test]
+    fn an_update_whose_verify_does_not_pass_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        // legendary's verify exits `0` even for corrupt files; the summary line
+        // is the verdict.
+        let program = script(
+            dir.path(),
+            "legendary",
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             install) exit 0 ;;\n\
+             verify) echo 'Verification failed, 3 file(s) corrupted, \
+             1 file(s) are missing.'; exit 0 ;;\n\
+             *) exit 2 ;;\n\
+             esac\n",
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        )
+        .as_update();
+
+        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        assert!(error.contains("epic update verify failed"), "{error}");
+        assert!(error.contains("3 file(s) corrupted"), "{error}");
+    }
+
+    #[test]
+    fn a_gog_update_judges_the_verify_by_gogdls_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        // gogdl's argv is `--auth-config-path <file> <command> …`, so match the
+        // command anywhere in the line rather than at a fixed position.
+        let program = script(
+            dir.path(),
+            "gogdl",
+            "#!/bin/sh\n\
+             case \" $* \" in\n\
+             *' download '*) exit 0 ;;\n\
+             *' repair '*) echo '[gogdl] ERROR: repair failed' >&2; exit 1 ;;\n\
+             *) exit 2 ;;\n\
+             esac\n",
+        );
+        let backends = backends(
+            "/nonexistent/legendary",
+            "/nonexistent/nile",
+            program.to_str().unwrap(),
+        );
+        let job = InstallJob::new(
+            game(Store::Gog, "1207658930"),
+            "The Witcher 3",
+            dir.path().join("The Witcher 3"),
+        )
+        .as_update();
+
+        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        assert!(error.contains("gog update verify failed"), "{error}");
+    }
+
+    #[test]
+    fn an_update_cancelled_before_it_starts_never_verifies() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("ran");
+        let program = script(
+            dir.path(),
+            "legendary",
+            &format!("#!/bin/sh\n: > '{m}'\nexit 0\n", m = marker.display()),
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        )
+        .as_update();
+
+        let control = InstallControl::new();
+        control.cancel();
+
+        let run = run(&backends, &job, &options(), &control, |_| {}).unwrap();
+        assert!(run.cancelled);
+        assert!(run.verify.is_none(), "nothing ran, so nothing verified");
+        assert!(!marker.exists());
     }
 
     fn env_lock() -> std::sync::MutexGuard<'static, ()> {

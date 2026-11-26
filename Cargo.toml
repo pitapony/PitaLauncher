@@ -42,9 +42,11 @@ axum = "0.8"
 blake3 = "1"
 walkdir = "2"
 # Mod release fetching (ticket #12): a pinned release archive arrives as a zip
-# or as a zstd-/plain-tar, so unpacking needs all three. `zip` is trimmed to the
-# deflate reader with flate2's pure-Rust zlib-rs backend — the mod packages are
+# or as a zstd-/gzip-/plain-tar, so unpacking needs all four. `flate2` provides
+# the gzip reader a GE-Proton `.tar.gz` needs (ticket #34) and the deflate reader
+# `zip` uses; both take its pure-Rust zlib-rs backend — these packages are
 # read-only here, never written.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 tar = "0.4"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 zstd = "0.14"

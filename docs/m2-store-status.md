@@ -201,5 +201,8 @@ noted that GOG exposes no signal.
 - The install queue's GUI consumer (the library sync, `docs/m2-store-sync.md`, is
   the first half of the wiring).
 - The in-app PTY terminal for auth — shipped in `docs/m2-auth-terminal.md`.
-- Per-store update *application* (running the store's update command).
+- Per-store update *application* — it shipped with M4 (`stores::queue`'s
+  `JobKind::Update`, `stores::installer::update_plan` and
+  `pitagames-cli stores update`; `docs/m4-updates.md`). The last thing this model
+  needed was a caller that turns an entry into a queue job, which is one call.
 - SteamGridDB or artwork for imported games.

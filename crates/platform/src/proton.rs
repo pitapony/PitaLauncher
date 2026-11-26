@@ -12,6 +12,8 @@
 //!    Hotfix).
 //! 4. umu-managed builds: `~/.local/share/umu/compatibilitytools` plus the
 //!    `~/.local/share/Steam/compatibilitytools.d` copies umu downloads.
+//! 5. builds PitaGames downloaded itself into our own
+//!    `~/.local/share/pitagames/proton` (`crate::proton_update`).
 //!
 //! Within one kind the newest build wins (numeric version comparison), and a
 //! system build wins over a user copy of the same version.
@@ -55,6 +57,10 @@ pub enum ProtonSource {
     Umu,
     /// A directory the user pointed at directly (a [`ProtonRef::Path`]).
     Explicit,
+    /// A build PitaGames downloaded into `<data>/pitagames/proton`
+    /// ([`crate::proton_update`]). It sits outside Steam, so Steam cannot be
+    /// asked to use it (`compat_tool_name` is `None`).
+    Managed,
 }
 
 impl ProtonSource {
@@ -65,17 +71,24 @@ impl ProtonSource {
             Self::SteamCommon => "steam",
             Self::Umu => "umu",
             Self::Explicit => "explicit",
+            Self::Managed => "managed",
         }
     }
 
     /// Tie-breaker inside one [`ProtonKind`]: lower wins.
+    ///
+    /// A managed build ranks between a user compatibility tool and one of
+    /// Steam's own: it is opt-in, so it should win over a Steam build of the
+    /// same kind, but a build the user dropped into `compatibilitytools.d`
+    /// themselves still wins.
     const fn rank(self) -> u8 {
         match self {
             Self::SystemCompatibilityTools => 0,
             Self::UserCompatibilityTools => 1,
-            Self::SteamCommon => 2,
-            Self::Umu => 3,
-            Self::Explicit => 4,
+            Self::Managed => 2,
+            Self::SteamCommon => 3,
+            Self::Umu => 4,
+            Self::Explicit => 5,
         }
     }
 }
@@ -248,7 +261,10 @@ impl ProtonInstall {
             ProtonSource::SystemCompatibilityTools | ProtonSource::UserCompatibilityTools => {
                 Some(self.name.as_str())
             }
-            ProtonSource::SteamCommon | ProtonSource::Umu | ProtonSource::Explicit => None,
+            ProtonSource::SteamCommon
+            | ProtonSource::Umu
+            | ProtonSource::Explicit
+            | ProtonSource::Managed => None,
         }
     }
 
@@ -258,7 +274,11 @@ impl ProtonInstall {
     }
 
     /// Numeric components of the version, newest first when reversed.
-    fn version_key(&self) -> Vec<u64> {
+    ///
+    /// `capability` compares this against the version floors the plan's gates
+    /// name (`Proton-CachyOS ≥ 11.0-20260506`, …), so the extraction lives here
+    /// rather than being reimplemented per consumer.
+    pub(crate) fn version_key(&self) -> Vec<u64> {
         numeric_runs(self.version.as_deref().unwrap_or(&self.name))
     }
 
@@ -458,6 +478,16 @@ fn roots_from(
         push_unique(
             &mut roots,
             ProtonRoot::new(steam.join("steamapps/common"), ProtonSource::SteamCommon),
+        );
+    }
+
+    // Builds PitaGames downloaded itself (`crate::proton_update`): our own
+    // `pitagames/proton`, not a Steam compatibility-tools directory, so an
+    // update never writes into a path Steam owns.
+    if let Some(data_home) = data_home.as_ref() {
+        push_unique(
+            &mut roots,
+            ProtonRoot::new(data_home.join("pitagames/proton"), ProtonSource::Managed),
         );
     }
 
@@ -970,10 +1000,36 @@ mod tests {
         assert!(paths.contains(&steam.join("steamapps/common").as_path()));
         assert!(paths.contains(&data.join("umu/compatibilitytools").as_path()));
         assert!(paths.contains(&data.join("Steam/compatibilitytools.d").as_path()));
+        // Our own downloads live under `pitagames/proton`, never Steam's dirs.
+        assert!(paths.contains(&data.join("pitagames/proton").as_path()));
 
         let sources: Vec<ProtonSource> = roots.iter().map(|root| root.source).collect();
         assert!(sources.contains(&ProtonSource::SystemCompatibilityTools));
         assert!(sources.contains(&ProtonSource::Umu));
+        assert!(sources.contains(&ProtonSource::Managed));
+    }
+
+    #[test]
+    fn discovers_a_managed_build_in_our_own_directory() {
+        let temp = temp();
+        let data = temp.path().join("data");
+        let managed = data.join("pitagames/proton");
+        fake_proton(&managed.join("GE-Proton11-14"), Some("GE-Proton11-14"));
+
+        let roots = roots_from(&[], Some(data), None);
+        let report = discover_in(&roots);
+
+        let install = report
+            .installs
+            .iter()
+            .find(|install| install.name == "GE-Proton11-14")
+            .expect("the managed build is discovered");
+        assert_eq!(install.source, ProtonSource::Managed);
+        assert_eq!(install.source.label(), "managed");
+        assert_eq!(install.kind, ProtonKind::Ge);
+        // A managed build sits outside Steam's search paths, so no
+        // CompatToolMapping name is invented for it.
+        assert_eq!(install.compat_tool_name(), None);
     }
 
     #[test]

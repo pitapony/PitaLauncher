@@ -1,0 +1,24 @@
+# Shipped Proton/GE build pins (ticket #34).
+#
+# Each pin is the shipped data ADR-0024 requires: a user opts in to fetch the
+# pinned tag, the archive's SHA-256 is checked against `sha256` before a byte is
+# unpacked, and the build lands in `<XDG_DATA_HOME>/pitagames/proton`, which
+# `platform::proton` scans. `kind` is one of `ge`, `cachy_os`, `valve`,
+# `experimental`, `umu`, `other`; `source` is `github` or `gitlab`.
+#
+# x86_64 only: the target machines are x86_64, so the aarch64 asset is not
+# pinned. A user can add or replace a pin in
+# `<XDG_CONFIG_HOME>/pitagames/proton/updates.toml`.
+#
+# NOTE: not yet driven against a real download (no target machine has been
+# reachable); the digest below is GE-Proton's own published SHA-256 for the
+# asset, and `mods::release` refuses the bytes if it does not match.
+
+[[builds]]
+name = "GE-Proton11-14-x86_64"
+kind = "ge"
+source = "github"
+project = "GloriousEggroll/proton-ge-custom"
+tag = "GE-Proton11-14"
+asset = "GE-Proton11-14-x86_64.tar.gz"
+sha256 = "26bcea3324b68dee68bf6b9b005f4425cdb9c29872e126d790df5abfebe332a8"
