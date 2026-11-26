@@ -9,12 +9,15 @@
 //! and the read-only [`logs`] reader. M2 adds [`disk`] (free space and bounded
 //! directory sizes), [`prefix`] (the per-game Wine/Proton prefix layout for the
 //! non-Steam stores) and [`launch`] (the umu/Proton hand-off plus process
-//! supervision). GPU detection and the graphics env table arrive in M3.
+//! supervision). M3 begins with [`gpu`], the injected GPU probe (sysfs, the
+//! `const` vendor/device table, `vulkaninfo`, VRAM and the ntsync/HDR hints)
+//! that the capability matrix will build on.
 
 pub mod anticheat;
 pub mod compat;
 pub mod disk;
 pub mod envc;
+pub mod gpu;
 pub mod launch;
 pub mod logs;
 pub mod prefix;
@@ -31,6 +34,9 @@ pub use compat::{
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
 pub use envc::{CompileRequest, CompiledRuntime, EnvcError, compile_runtime, shim_proton};
+// `detect` stays namespaced (`gpu::detect`) so it cannot collide with
+// `anticheat::detect`.
+pub use gpu::{GpuArch, GpuProbe, GpuProfile, GpuVendor, HdrSupport, arch_for};
 pub use launch::{
     DEFAULT_GRACE, Handoff, LaunchError, LaunchMode, Outcome, Prepared, RunOptions, Session,
     UMU_RUN, prepare, start, terminate,
