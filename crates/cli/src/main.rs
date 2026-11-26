@@ -30,6 +30,7 @@ use pitagames_platform::anticheat::{
 };
 use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::disk;
+use pitagames_platform::gpu::{self, GpuProbe, GpuProfile, HdrSupport};
 use pitagames_platform::launch as handoff;
 use pitagames_platform::launch::{Outcome, Prepared};
 use pitagames_platform::logs as log_files;
@@ -82,6 +83,7 @@ fn run() -> Result<()> {
         "install" => install(&args.collect::<Vec<_>>()),
         "metadata" => metadata(&args.collect::<Vec<_>>()),
         "proton" => proton(&args.collect::<Vec<_>>()),
+        "gpu" => gpu(&args.collect::<Vec<_>>()),
         "compat" => compat(&args.collect::<Vec<_>>()),
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
@@ -622,6 +624,145 @@ fn format_install(install: &ProtonInstall, name_width: usize) -> String {
         install.path.display(),
         name_width = name_width,
     )
+}
+
+/// Report the GPU `platform::gpu` detects.
+///
+/// Read-only diagnostic for the graphics layer: it reads sysfs, runs
+/// `vulkaninfo --summary` and prints the architecture, Mesa version, VRAM and
+/// the ntsync/HDR hints the graphics layer will offer. `--root` points at a
+/// sysfs-style tree (and suppresses `vulkaninfo` and the host hints), so a
+/// fixture can be checked on a machine with no GPU; `--vulkaninfo <file>`
+/// supplies captured output.
+fn gpu(args: &[String]) -> Result<()> {
+    let parsed = parse_gpu_args(args)?;
+    if parsed.help {
+        println!("{}", gpu_usage());
+        return Ok(());
+    }
+
+    let mut probe = match &parsed.root {
+        Some(root) => GpuProbe::at(root),
+        None => GpuProbe::host(),
+    };
+    if let Some(file) = &parsed.vulkaninfo {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        probe = probe.with_vulkaninfo(text);
+    }
+
+    let profile = gpu::detect(&probe);
+    for warning in &profile.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    if parsed.json {
+        let env: Vec<[&str; 2]> = profile
+            .suggested_env()
+            .into_iter()
+            .map(|(key, value)| [key, value])
+            .collect();
+        let payload = serde_json::json!({ "profile": profile, "suggested_env": env });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for line in gpu_lines(&profile) {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Parsed `gpu` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct GpuArgs {
+    root: Option<PathBuf>,
+    vulkaninfo: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_gpu_args(args: &[String]) -> Result<GpuArgs> {
+    let mut parsed = GpuArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--root" | "--vulkaninfo" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                set_gpu_path(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--root=") || arg.starts_with("--vulkaninfo=") => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                set_gpu_path(&mut parsed, flag, value)?;
+            }
+            other => bail!("unexpected argument `{other}` for `gpu`\n\n{}", gpu_usage()),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn set_gpu_path(parsed: &mut GpuArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--vulkaninfo" => parsed.vulkaninfo = Some(PathBuf::from(value)),
+        other => bail!("internal error: unknown gpu flag `{other}`"),
+    }
+    Ok(())
+}
+
+/// Render a detected GPU profile as plain lines (no colours, pipe-friendly).
+fn gpu_lines(profile: &GpuProfile) -> Vec<String> {
+    let device = profile
+        .device_id
+        .map(|id| format!("0x{id:04x}"))
+        .unwrap_or_else(|| "-".to_string());
+    let arch = match profile.arch.compat_arch() {
+        Some(bucket) => format!("{}  [compat: {}]", profile.arch.label(), bucket.as_str()),
+        None => profile.arch.label().to_string(),
+    };
+    let mesa = profile
+        .mesa
+        .map(|version| version.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    let vram = match (profile.vram_bytes, profile.vram_gib()) {
+        (Some(bytes), Some(gib)) => format!("{gib:.1} GiB ({bytes} bytes)"),
+        _ => "-".to_string(),
+    };
+    let ntsync = if profile.ntsync {
+        "present (suggest PROTON_USE_NTSYNC=1)"
+    } else {
+        "absent"
+    };
+    let hdr = match profile.hdr {
+        HdrSupport::Supported => "compositor HDR-capable (suggest DXVK_HDR=1)",
+        HdrSupport::Unsupported => "compositor not HDR-capable",
+        HdrSupport::Unknown => "unknown (no desktop detected)",
+    };
+
+    vec![
+        format!("GPU: {}", profile.name.as_deref().unwrap_or("unknown GPU")),
+        format!("  vendor       {}", profile.vendor.label()),
+        format!("  device       {device}"),
+        format!("  arch         {arch}"),
+        format!("  mesa         {mesa}"),
+        format!("  vram         {vram}"),
+        format!("  ntsync       {ntsync}"),
+        format!("  hdr          {hdr}"),
+    ]
 }
 
 /// Show the compiled shim profile the launcher writes for one game.
@@ -6557,7 +6698,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds and the auto-selected runtime\n    gpu        Report the detected GPU, its architecture and VRAM\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, or sync its library\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -6574,6 +6715,21 @@ fn proton_usage() -> String {
      -h, --help             Show this help\n\n\
      Without --root/--steam-root the default locations are scanned:\n\
      system compatibilitytools.d, every Steam root, and umu's data directories."
+        .to_string()
+}
+
+fn gpu_usage() -> String {
+    "USAGE:\n    pitagames-cli gpu [--root <dir>] [--vulkaninfo <file>] [--json]\n\n\
+     OPTIONS:\n    \
+     --root <dir>           Read a sysfs-style tree instead of /sys (for fixtures)\n    \
+     --vulkaninfo <file>    Use captured `vulkaninfo --summary` output from a file\n    \
+     --json                 Print the profile and suggested env as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Without --root the running machine is probed: /sys, /dev/ntsync,\n\
+     $XDG_CURRENT_DESKTOP and `vulkaninfo --summary`. With --root the Vulkan\n\
+     and host hints are skipped unless --vulkaninfo supplies them. Missing\n\
+     vulkaninfo degrades to the architecture table and sysfs VRAM; the Mesa\n\
+     version is reported as unknown rather than guessed."
         .to_string()
 }
 
@@ -8867,6 +9023,74 @@ mod tests {
         assert!(parse_proton_args(&["--bogus".to_string()]).is_err());
         assert!(parse_proton_args(&["--root".to_string()]).is_err());
         assert!(parse_proton_args(&["--root=".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parses_gpu_arguments_and_rejects_unknown_flags() {
+        let parsed = parse_gpu_args(&[
+            "--root=/sys-fixture".to_string(),
+            "--vulkaninfo".to_string(),
+            "/tmp/summary.txt".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.root, Some(PathBuf::from("/sys-fixture")));
+        assert_eq!(parsed.vulkaninfo, Some(PathBuf::from("/tmp/summary.txt")));
+        assert!(parsed.json && !parsed.help);
+
+        assert_eq!(parse_gpu_args(&[]).unwrap(), GpuArgs::default());
+        assert!(parse_gpu_args(&["--help".to_string()]).unwrap().help);
+        assert!(parse_gpu_args(&["--bogus".to_string()]).is_err());
+        assert!(parse_gpu_args(&["--root".to_string()]).is_err());
+        assert!(parse_gpu_args(&["--root=".to_string()]).is_err());
+    }
+
+    #[test]
+    fn renders_a_gpu_profile_with_arch_vram_and_hints() {
+        use pitagames_platform::compat::Version;
+        use pitagames_platform::gpu::{GpuArch, GpuVendor};
+
+        let profile = GpuProfile {
+            vendor: GpuVendor::Amd,
+            arch: GpuArch::Rdna4,
+            device_id: Some(0x7550),
+            name: Some("AMD Radeon RX 9070 XT (RADV NAVI48)".to_string()),
+            mesa: Version::parse("25.3.0"),
+            vram_bytes: Some(17_179_869_184),
+            ntsync: true,
+            hdr: HdrSupport::Supported,
+            warnings: Vec::new(),
+        };
+
+        let lines = gpu_lines(&profile);
+        assert!(lines[0].contains("RX 9070 XT"), "{lines:?}");
+        assert!(lines.iter().any(|line| line.contains("rdna4")), "{lines:?}");
+        assert!(
+            lines.iter().any(|line| line.contains("16.0 GiB")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("PROTON_USE_NTSYNC=1")),
+            "{lines:?}"
+        );
+        assert!(
+            lines.iter().any(|line| line.contains("DXVK_HDR=1")),
+            "{lines:?}"
+        );
+
+        // The unknown profile renders dashes, never a guess.
+        let blank = GpuProfile::default();
+        let blank_lines = gpu_lines(&blank);
+        assert!(blank_lines[0].contains("unknown GPU"), "{blank_lines:?}");
+        assert!(
+            blank_lines
+                .iter()
+                .any(|line| line.contains("mesa") && line.contains("unknown")),
+            "{blank_lines:?}"
+        );
     }
 
     #[test]
