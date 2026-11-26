@@ -1,0 +1,9 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_XESS_UPGRADE=1
+wrappers:
+ini:
+warnings:
