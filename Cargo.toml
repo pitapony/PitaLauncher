@@ -77,4 +77,8 @@ dioxus = { version = "0.7", features = ["desktop"] }
 futures-channel = "0.3"
 futures-util = "0.3"
 
+# Golden-file snapshots for the M3 env compiler (`platform::envc`, ticket #18).
+# No inline snapshots: the matrix is committed as files under `tests/snapshots`.
+insta = "1"
+
 tempfile = "3.15"
