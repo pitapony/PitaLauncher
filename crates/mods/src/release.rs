@@ -290,13 +290,28 @@ impl PinnedRelease {
     }
 
     /// Fetch the pinned asset and unpack it into `dest`.
+    ///
+    /// Link entries are refused ([`LinkPolicy::Refuse`]). A caller extracting a
+    /// tree that ships symlinks — a Proton build — uses
+    /// [`fetch_and_unpack_with`](Self::fetch_and_unpack_with) instead.
     pub fn fetch_and_unpack(
         &self,
         fetcher: &dyn Fetcher,
         dest: &Path,
     ) -> Result<FetchedRelease, ReleaseError> {
+        self.fetch_and_unpack_with(fetcher, dest, LinkPolicy::Refuse)
+    }
+
+    /// Fetch the pinned asset and unpack it into `dest` with an explicit
+    /// link policy.
+    pub fn fetch_and_unpack_with(
+        &self,
+        fetcher: &dyn Fetcher,
+        dest: &Path,
+        links: LinkPolicy,
+    ) -> Result<FetchedRelease, ReleaseError> {
         let fetched = self.fetch(fetcher)?;
-        let unpacked = unpack_bytes(&fetched.bytes, dest)?;
+        let unpacked = unpack_bytes_with(&fetched.bytes, dest, links)?;
         Ok(FetchedRelease {
             asset: fetched.asset,
             sha256: fetched.sha256,
@@ -330,6 +345,8 @@ pub enum ArchiveKind {
     Zip,
     /// A zstd-compressed tar.
     TarZstd,
+    /// A gzip-compressed tar (`1f 8b`), the shape GE-Proton ships.
+    TarGz,
     /// An uncompressed tar.
     Tar,
 }
@@ -340,6 +357,7 @@ impl ArchiveKind {
         match self {
             Self::Zip => "zip",
             Self::TarZstd => "tar.zst",
+            Self::TarGz => "tar.gz",
             Self::Tar => "tar",
         }
     }
@@ -358,6 +376,10 @@ impl ArchiveKind {
         if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
             return Some(Self::TarZstd);
         }
+        // gzip's fixed two-byte magic (`\x1f\x8b`).
+        if bytes.starts_with(&[0x1f, 0x8b]) {
+            return Some(Self::TarGz);
+        }
         // A ustar magic sits at offset 257 in a tar header.
         if bytes.len() > 262 && &bytes[257..262] == b"ustar" {
             return Some(Self::Tar);
@@ -375,16 +397,99 @@ pub struct Unpacked {
     pub files: Vec<String>,
 }
 
+/// Whether the unpacker creates link entries or refuses them.
+///
+/// The default refuses them: a mod release is ordinary files, and following a
+/// link out of a game directory is not a thing this will do. A Proton build, by
+/// contrast, ships relative symlinks (its built-in-DLL links) and must be
+/// extracted as it shipped, so the caller that fetches one opts in — and even
+/// then only a **relative** target that stays inside `dest` is created. The
+/// `tar` crate does not validate a symlink's target, so this module does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkPolicy {
+    /// Refuse every symlink and hardlink entry.
+    #[default]
+    Refuse,
+    /// Create a symlink only when its target is relative and stays inside
+    /// `dest`; a hardlink only when the `tar` crate's own check accepts it.
+    AllowContained,
+}
+
+impl LinkPolicy {
+    const fn allows_links(self) -> bool {
+        matches!(self, Self::AllowContained)
+    }
+}
+
+/// Whether a symlink `entry_path` → `target` stays inside `dest`.
+///
+/// Purely lexical: nothing is created or canonicalized, so a target that only
+/// resolves out of `dest` through an existing symlink is not followed. An
+/// absolute target, an entry path that is itself absolute or contains `..`, or
+/// a target that climbs above `dest` all fail.
+fn link_target_is_contained(dest: &Path, entry_path: &Path, target: &Path) -> bool {
+    use std::path::Component;
+
+    if target.is_absolute() {
+        return false;
+    }
+    if entry_path.is_absolute()
+        || entry_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return false;
+    }
+    let Some(parent) = dest.join(entry_path).parent().map(Path::to_path_buf) else {
+        return false;
+    };
+    normalize_lexically(&parent.join(target)).starts_with(normalize_lexically(dest))
+}
+
+/// Drop `.` components and resolve `..` lexically, without touching the disk.
+fn normalize_lexically(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Unpack an archive into `dest`, creating it if it does not exist.
 ///
 /// An entry whose path escapes `dest` (`..`, absolute) is refused before it is
 /// written, and a symlink or hardlink entry is refused too — a mod release is
 /// ordinary files, and following a link out of the game directory is not a
 /// thing this will do. The format is chosen by magic bytes:
-/// zip, zstd-compressed tar or plain tar.
+/// zip, zstd-compressed tar, gzip-compressed tar or plain tar.
 pub fn unpack_bytes(bytes: &[u8], dest: &Path) -> Result<Unpacked, ReleaseError> {
+    unpack_bytes_with(bytes, dest, LinkPolicy::Refuse)
+}
+
+/// [`unpack_bytes`] with an explicit [`LinkPolicy`].
+///
+/// `LinkPolicy::AllowContained` is for a tree that legitimately ships symlinks
+/// (a Proton build); it still refuses an entry whose path escapes `dest`, and
+/// the `tar` crate refuses a link whose target would escape it. It applies to
+/// the tar formats; a zip symlink entry is still refused.
+pub fn unpack_bytes_with(
+    bytes: &[u8],
+    dest: &Path,
+    links: LinkPolicy,
+) -> Result<Unpacked, ReleaseError> {
     let kind = ArchiveKind::of(bytes).ok_or(ReleaseError::UnknownArchive {
-        detail: "not a zip, tar.zst or tar archive".to_string(),
+        detail: "not a zip, tar.zst, tar.gz or tar archive".to_string(),
     })?;
     fs::create_dir_all(dest).map_err(|error| ReleaseError::Io {
         action: "create",
@@ -401,9 +506,13 @@ pub fn unpack_bytes(bytes: &[u8], dest: &Path) -> Result<Unpacked, ReleaseError>
                         detail: error.to_string(),
                     }
                 })?;
-            unpack_tar(decoder, dest)?
+            unpack_tar(decoder, dest, links)?
         }
-        ArchiveKind::Tar => unpack_tar(bytes, dest)?,
+        ArchiveKind::TarGz => {
+            let decoder = flate2::read::GzDecoder::new(Cursor::new(bytes));
+            unpack_tar(decoder, dest, links)?
+        }
+        ArchiveKind::Tar => unpack_tar(bytes, dest, links)?,
     };
     files.sort();
     files.dedup();
@@ -461,7 +570,11 @@ fn unpack_zip(bytes: &[u8], dest: &Path) -> Result<Vec<String>, ReleaseError> {
     Ok(files)
 }
 
-fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<Vec<String>, ReleaseError> {
+fn unpack_tar<R: Read>(
+    reader: R,
+    dest: &Path,
+    links: LinkPolicy,
+) -> Result<Vec<String>, ReleaseError> {
     let mut archive = tar::Archive::new(reader);
     let entries = archive.entries().map_err(|error| ReleaseError::Unpack {
         kind: ArchiveKind::Tar.label(),
@@ -479,12 +592,29 @@ fn unpack_tar<R: Read>(reader: R, dest: &Path) -> Result<Vec<String>, ReleaseErr
         })?;
         let path = path.into_owned();
         let entry_type = entry.header().entry_type();
-        if !(entry_type.is_file() || entry_type.is_dir()) {
+        let is_link = entry_type.is_symlink() || entry_type.is_hard_link();
+        let allowed =
+            entry_type.is_file() || entry_type.is_dir() || (is_link && links.allows_links());
+        if !allowed {
             return Err(ReleaseError::UnsupportedEntry {
                 path: path.to_string_lossy().into_owned(),
                 kind: "symlink, hardlink or special file",
             });
         }
+        // The `tar` crate validates a hardlink's target but *not* a symlink's,
+        // so a contained symlink is checked here by name before it is created.
+        if entry_type.is_symlink() {
+            let contained = matches!(
+                entry.link_name(),
+                Ok(Some(target)) if link_target_is_contained(dest, &path, &target)
+            );
+            if !contained {
+                return Err(ReleaseError::UnsafeEntry(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
+        }
+        // `unpack_in` refuses an entry whose path escapes `dest`.
         let unpacked = entry
             .unpack_in(dest)
             .map_err(|error| ReleaseError::Unpack {
@@ -720,6 +850,31 @@ mod tests {
         builder.into_inner().unwrap()
     }
 
+    /// The tar, gzip-compressed — the shape GE-Proton ships.
+    fn gz_tar_bytes(files: &[(&str, &[u8])]) -> Vec<u8> {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&tar_bytes(files)).unwrap();
+        encoder.finish().unwrap()
+    }
+
+    /// A tar holding one symlink entry `link_name` → `target`.
+    fn tar_with_symlink(link_name: &str, target: &str) -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_mode(0o777);
+        header.set_link_name(target).unwrap();
+        header.set_cksum();
+        builder
+            .append_data(&mut header, link_name, io::empty())
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
     fn github_release_json(tag: &str, asset: &str, url: &str, digest: Option<&str>) -> String {
         serde_json::json!({
             "tag_name": tag,
@@ -886,8 +1041,8 @@ mod tests {
     // -- unpacking ----------------------------------------------------------
 
     #[test]
-    fn unpacks_zip_zstd_tar_and_plain_tar() {
-        let cases: [(&str, Vec<u8>, ArchiveKind); 3] = [
+    fn unpacks_zip_zstd_gzip_tar_and_plain_tar() {
+        let cases: [(&str, Vec<u8>, ArchiveKind); 4] = [
             (
                 "zip",
                 zip_bytes(&[("a.txt", b"alpha"), ("dir/b.bin", b"beta")]),
@@ -901,6 +1056,11 @@ mod tests {
                 )
                 .unwrap(),
                 ArchiveKind::TarZstd,
+            ),
+            (
+                "tar.gz",
+                gz_tar_bytes(&[("a.txt", b"alpha"), ("dir/b.bin", b"beta")]),
+                ArchiveKind::TarGz,
             ),
             (
                 "tar",
@@ -967,6 +1127,97 @@ mod tests {
             matches!(error, ReleaseError::UnknownArchive { .. }),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_gzip_tar_is_detected_by_its_magic() {
+        let bytes = gz_tar_bytes(&[("a.txt", b"alpha")]);
+        assert_eq!(ArchiveKind::of(&bytes), Some(ArchiveKind::TarGz));
+        assert_eq!(ArchiveKind::TarGz.label(), "tar.gz");
+    }
+
+    #[test]
+    fn a_gzip_tar_round_trips_through_fetch_and_unpack() {
+        // The GE-Proton shape: a `.tar.gz` with a top-level build directory.
+        let archive = gz_tar_bytes(&[
+            ("GE-Proton11-14/proton", b"#!/usr/bin/env python3\n"),
+            ("GE-Proton11-14/version", b"GE-Proton11-14\n"),
+        ]);
+        let digest = sha256_hex(&archive);
+        let api =
+            ReleaseSource::GitHub.release_url("GloriousEggroll/proton-ge-custom", "GE-Proton11-14");
+        let body = github_release_json(
+            "GE-Proton11-14",
+            "GE-Proton11-14-x86_64.tar.gz",
+            "https://dl.test/ge.tar.gz",
+            None,
+        );
+        let fetcher = MapFetcher::new()
+            .with(api, body)
+            .with("https://dl.test/ge.tar.gz", archive);
+        let pinned = PinnedRelease {
+            source: ReleaseSource::GitHub,
+            project: "GloriousEggroll/proton-ge-custom".to_string(),
+            tag: "GE-Proton11-14".to_string(),
+            asset: "GE-Proton11-14-x86_64.tar.gz".to_string(),
+            sha256: digest.clone(),
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let report = pinned
+            .fetch_and_unpack_with(&fetcher, dir.path(), LinkPolicy::AllowContained)
+            .unwrap();
+        assert_eq!(report.kind, ArchiveKind::TarGz);
+        assert_eq!(report.sha256, digest);
+        assert!(dir.path().join("GE-Proton11-14/proton").is_file());
+    }
+
+    #[test]
+    fn symlinks_are_refused_by_default() {
+        let bytes = tar_with_symlink("sub/link", "../target");
+        let dir = tempfile::tempdir().unwrap();
+        let error = unpack_bytes(&bytes, &dir.path().join("out")).unwrap_err();
+        assert!(
+            matches!(error, ReleaseError::UnsupportedEntry { .. }),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_contained_symlink_is_created_when_links_are_allowed() {
+        // A relative target that resolves inside `dest` — what a Proton build's
+        // built-in-DLL links are.
+        let bytes = tar_with_symlink("sub/link", "../target");
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out");
+
+        let unpacked = unpack_bytes_with(&bytes, &dest, LinkPolicy::AllowContained).unwrap();
+        assert!(
+            unpacked.files.is_empty(),
+            "a link is not a regular file entry"
+        );
+        let link = dest.join("sub/link");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_link(&link).unwrap(), PathBuf::from("../target"));
+    }
+
+    #[test]
+    fn an_escaping_symlink_is_refused_even_when_links_are_allowed() {
+        // The `tar` crate does not validate a symlink target; this module does.
+        for target in ["/etc/passwd", "../../outside"] {
+            let bytes = tar_with_symlink("link", target);
+            let dir = tempfile::tempdir().unwrap();
+            let dest = dir.path().join("out");
+            let error = unpack_bytes_with(&bytes, &dest, LinkPolicy::AllowContained).unwrap_err();
+            assert!(
+                matches!(error, ReleaseError::UnsafeEntry(_)),
+                "{target}: {error}"
+            );
+            assert!(
+                !dest.join("link").exists(),
+                "the escaping link must not be created"
+            );
+        }
     }
 
     #[test]
