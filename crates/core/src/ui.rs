@@ -213,6 +213,104 @@ impl DisplayConfig {
     pub fn hides_cursor(&self) -> bool {
         self.hide_cursor_ms > 0
     }
+
+    /// The index of the attached monitor this config names, if any.
+    ///
+    /// See [`select_monitor`]: `None` is the primary, whether the config names
+    /// no monitor or names one that is not attached.
+    pub fn select_monitor(&self, monitors: &[MonitorInfo]) -> Option<usize> {
+        select_monitor(self.monitor.as_deref(), monitors)
+    }
+
+    /// Where a `width × height` window should open.
+    ///
+    /// See [`placement`].
+    pub fn placement(&self, width: u32, height: u32, monitors: &[MonitorInfo]) -> Placement {
+        placement(self.monitor.as_deref(), width, height, monitors)
+    }
+}
+
+/// A monitor the window may open on, in the shape the placement logic needs.
+///
+/// The geometry is in physical pixels, which is what the window layer reports;
+/// the startup placement compares a logical window size against it, so a HiDPI
+/// scale factor other than 1 is not accounted for. That is part of the deferred
+/// 4K/HiDPI pass (see `docs/m2.5-shells.md`), not a bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MonitorInfo {
+    /// The connector name, e.g. `HDMI-A-1`; `None` when the platform has none.
+    pub name: Option<String>,
+    /// The monitor's top-left in physical pixels.
+    pub x: i32,
+    pub y: i32,
+    /// The monitor's size in physical pixels.
+    pub width: u32,
+    pub height: u32,
+}
+
+impl MonitorInfo {
+    /// Build a monitor from the values the window layer reports.
+    pub fn new(name: Option<String>, x: i32, y: i32, width: u32, height: u32) -> Self {
+        Self {
+            name,
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// The top-left a `width × height` window needs to sit centred here.
+    ///
+    /// A window larger than the monitor is pinned to the monitor's origin
+    /// rather than pushed off its top-left edge.
+    pub fn center(&self, width: u32, height: u32) -> (i32, i32) {
+        let dx = (self.width.saturating_sub(width) / 2) as i32;
+        let dy = (self.height.saturating_sub(height) / 2) as i32;
+        (self.x + dx, self.y + dy)
+    }
+}
+
+/// Where a window should open, resolved against the attached monitors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Leave the window where the window manager puts it: the primary monitor.
+    Default,
+    /// Move the window's top-left to this physical position so a window is
+    /// centred on the chosen monitor.
+    Center { x: i32, y: i32 },
+}
+
+/// The index of the attached monitor a configured name selects, if any.
+///
+/// `None` means "the platform default" (the primary): either no name is
+/// configured, or the name is not attached. Either way the window is left where
+/// the window manager puts it, which is the primary monitor.
+pub fn select_monitor(name: Option<&str>, monitors: &[MonitorInfo]) -> Option<usize> {
+    let name = name?;
+    monitors
+        .iter()
+        .position(|monitor| monitor.name.as_deref() == Some(name))
+}
+
+/// Where a `width × height` window should open.
+///
+/// The configured monitor wins when it is attached; otherwise (the default, or
+/// a name that is not attached) the window opens on the primary, which needs no
+/// move.
+pub fn placement(
+    name: Option<&str>,
+    width: u32,
+    height: u32,
+    monitors: &[MonitorInfo],
+) -> Placement {
+    match select_monitor(name, monitors) {
+        Some(index) => {
+            let (x, y) = monitors[index].center(width, height);
+            Placement::Center { x, y }
+        }
+        None => Placement::Default,
+    }
 }
 
 /// The `[ui]` section of `config.toml`.
@@ -554,6 +652,63 @@ mod tests {
             assert_eq!(StartMode::from_str(mode.as_str()).unwrap(), mode);
         }
         assert!(StartMode::from_str("sometimes").is_err());
+    }
+
+    #[test]
+    fn a_configured_monitor_is_selected_by_name() {
+        let monitors = [
+            MonitorInfo::new(Some("eDP-1".to_string()), 0, 0, 1920, 1080),
+            MonitorInfo::new(Some("HDMI-A-1".to_string()), 1920, 0, 2560, 1440),
+        ];
+        let named = DisplayConfig {
+            monitor: Some("HDMI-A-1".to_string()),
+            ..DisplayConfig::default()
+        };
+        assert_eq!(named.select_monitor(&monitors), Some(1));
+
+        // No name means the primary: the platform default, never index 0 by
+        // assumption.
+        assert_eq!(DisplayConfig::default().select_monitor(&monitors), None);
+
+        // A name that is not attached falls back to the primary too.
+        let missing = DisplayConfig {
+            monitor: Some("DP-9".to_string()),
+            ..DisplayConfig::default()
+        };
+        assert_eq!(missing.select_monitor(&monitors), None);
+    }
+
+    #[test]
+    fn placement_centers_the_window_on_the_chosen_monitor() {
+        let monitors = [
+            MonitorInfo::new(Some("eDP-1".to_string()), 0, 0, 1920, 1080),
+            MonitorInfo::new(Some("HDMI-A-1".to_string()), 1920, 0, 2560, 1440),
+        ];
+        let named = DisplayConfig {
+            monitor: Some("HDMI-A-1".to_string()),
+            ..DisplayConfig::default()
+        };
+        // 1280×800 centred on a 2560×1440 monitor at x=1920.
+        assert_eq!(
+            named.placement(1280, 800, &monitors),
+            Placement::Center {
+                x: 1920 + (2560 - 1280) / 2,
+                y: (1440 - 800) / 2,
+            }
+        );
+        // The primary needs no move: the window manager owns it.
+        assert_eq!(
+            DisplayConfig::default().placement(1280, 800, &monitors),
+            Placement::Default
+        );
+    }
+
+    #[test]
+    fn a_window_larger_than_the_monitor_is_pinned_to_its_origin() {
+        let monitor = MonitorInfo::new(Some("small".to_string()), 100, 50, 800, 600);
+        assert_eq!(monitor.center(1280, 800), (100, 50));
+        // An exact fit is the origin too.
+        assert_eq!(monitor.center(800, 600), (100, 50));
     }
 
     #[test]
