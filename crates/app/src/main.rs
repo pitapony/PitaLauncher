@@ -25,6 +25,7 @@ use pitagames_core::ui::Shell;
 use pitagames_core::{GameId, Store};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
+use pitagames_platform::power::{self, PowerAction};
 use pitagames_stores::queue::{InstallJob, JobState};
 use time::OffsetDateTime;
 
@@ -2173,6 +2174,7 @@ fn overlay_context(
     });
     OverlayContext {
         console: shell.is_console(),
+        session: crate::runtime::session_mode(),
         game,
     }
 }
@@ -2266,7 +2268,28 @@ fn apply_overlay_choice(
             }
         }
         OverlayChoice::ToggleShell => toggle_shell(shell, session),
+        OverlayChoice::Power(action) => spawn_power(action, notice),
     }
+}
+
+/// Run one power action off the UI thread.
+///
+/// `platform::power` speaks logind over D-Bus, and a polkit prompt can hold the
+/// call open, so it runs on the blocking pool rather than the event loop. A
+/// refusal lands in the notice line; a success usually means the machine is
+/// about to suspend or power off, so it says nothing.
+fn spawn_power(action: PowerAction, mut notice: Signal<String>) {
+    spawn(async move {
+        let result = tokio::task::spawn_blocking(move || power::request(action)).await;
+        let failure = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(message) = failure {
+            notice.set(format!("Could not {action}: {message}"));
+        }
+    });
 }
 
 /// The overlay's controller line: the last pad's name and battery, or keyboard.
