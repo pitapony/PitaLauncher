@@ -174,12 +174,15 @@ Results:
 
 ## Known limits
 
-- **Not on the AUR or the CachyOS repo.** No `.SRCINFO` is checked in yet: for a
-  `-git` package it changes with every commit, so it is generated at submission
-  time (M4's "AUR `-git` + release PKGBUILD" item) with
-  `makepkg --printsrcinfo > .SRCINFO`.
-- **Unsigned and untagged.** `pitagames-git` clones `main`; there is no release
-  tag, no signature and no reproducible-build note until M4.
+- **Not on the AUR or the CachyOS repo.** No `.SRCINFO` is checked in for the
+  `-git` package: it changes with every commit, so it is generated at submission
+  time with `makepkg --printsrcinfo > .SRCINFO`. The release package
+  (`packaging/PKGBUILD.release`) checks in the `.SRCINFO` its tag generates —
+  see `docs/m4-release.md`.
+- **The dev package is unsigned and untagged.** `pitagames-git` clones `main`;
+  it has no release tag, no signature and no reproducible-build note. The
+  tag-driven `pitagames` release package, the signed-tag process and the
+  reproducible-build notes are `docs/m4-release.md`.
 - **No gamescope session entry.** `/usr/share/wayland-sessions/pitagames.desktop`
   belongs to v1.1, never as the default session.
 - **AppStream has no screenshots** and the reverse-DNS ID is fixed before
