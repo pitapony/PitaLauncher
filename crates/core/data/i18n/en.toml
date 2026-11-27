@@ -206,6 +206,8 @@
 "overlay.power_restart_detail" = "Restart the machine"
 "overlay.power_shutdown" = "Shut down"
 "overlay.power_shutdown_detail" = "Power the machine off"
+"overlay.exit_to_desktop" = "Exit to desktop"
+"overlay.exit_to_desktop_detail" = "End the console session; the next login returns to it"
 "overlay.power_suspend" = "Suspend"
 "overlay.power_suspend_detail" = "Suspend the machine"
 "overlay.controller" = "Controller: {status}"

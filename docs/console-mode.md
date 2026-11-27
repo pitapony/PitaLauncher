@@ -198,11 +198,13 @@ The footer cheat-sheet on the game page names the page's own actions —
 the running/open game's **Game details** and (Steam) **Store page**, **Exit
 console mode** / **Enter console mode**, and the power rows (**Suspend**,
 **Restart**, **Shut down**) — enabled in the console session
-(`PITAGAMES_SESSION=1`, over logind) and disabled off it. It also carries the
+(`PITAGAMES_SESSION=1`, over logind) and disabled off it. In the session a fourth
+row, **Exit to desktop**, ends the gamescope session (`loginctl
+terminate-session`), so the next login returns to it. It also carries the
 connected controller and its battery and the local clock. It is a modal: the pumps
 route every action into it while it is open, `Back`/`Menu`/`Guide` closes it, and
-the screen beneath keeps its focus and scroll. See `docs/m2.5-overlay.md` and
-`docs/v1.1-power.md`.
+the screen beneath keeps its focus and scroll. See `docs/m2.5-overlay.md`,
+`docs/v1.1-power.md` and `docs/v1.1-session.md`.
 
 ## The launch hand-off
 

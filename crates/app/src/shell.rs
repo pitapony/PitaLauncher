@@ -22,7 +22,7 @@ use pitagames_core::design::{self, DesignTokens};
 use pitagames_core::i18n::t;
 use pitagames_core::ui::{
     AppConfig, DESKTOP_HEIGHT, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH, DESKTOP_WIDTH, DisplayConfig,
-    MonitorInfo, Placement, Shell,
+    MonitorInfo, Placement, Shell, UiConfig,
 };
 
 /// The base type size of each shell, before the UI scale is applied.
@@ -36,6 +36,9 @@ pub struct ShellArgs {
     pub shell: Option<Shell>,
     /// `--safe-mode`: the DMABUF renderer off, animations and blur off.
     pub safe_mode: bool,
+    /// `--session`: this run is the console session (`PITAGAMES_SESSION=1`),
+    /// which forces the console shell and suppresses a per-game gamescope wrap.
+    pub session: bool,
     /// `-V` / `--version`.
     pub version: bool,
     /// Flags the launcher does not recognise, so `main` can warn about them.
@@ -53,11 +56,26 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> ShellArgs {
             "--console" => parsed.shell = Some(Shell::Console),
             "--desktop" => parsed.shell = Some(Shell::Desktop),
             "--safe-mode" => parsed.safe_mode = true,
+            "--session" => parsed.session = true,
             "-V" | "--version" => parsed.version = true,
             _ => parsed.unknown.push(arg),
         }
     }
     parsed
+}
+
+impl ShellArgs {
+    /// The shell a run starts in.
+    ///
+    /// `--session` forces the console shell — a console session is never the
+    /// desktop one — otherwise the command line wins over the preference.
+    pub fn start_shell(&self, ui: &UiConfig) -> Shell {
+        if self.session {
+            Shell::Console
+        } else {
+            ui.resolve_start(self.shell)
+        }
+    }
 }
 
 /// The startup values the app needs from `main`.
@@ -542,6 +560,7 @@ pub fn destination_strip_style(active: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pitagames_core::ui::StartMode;
     use std::path::Path;
 
     #[test]
@@ -583,6 +602,24 @@ mod tests {
         let args = parse_args(["--console".to_string(), "--safe-mode".to_string()]);
         assert_eq!(args.shell, Some(Shell::Console));
         assert!(args.safe_mode);
+    }
+
+    #[test]
+    fn the_session_flag_is_recognised_and_forces_the_console_shell() {
+        let args = parse_args(["--session".to_string()]);
+        assert!(args.session);
+        assert!(args.unknown.is_empty());
+
+        // A session is a console run, whatever the preference says.
+        let ui = UiConfig {
+            start_mode: StartMode::Desktop,
+            ..UiConfig::default()
+        };
+        assert_eq!(args.start_shell(&ui), Shell::Console);
+
+        // Without the flag, the preference wins.
+        let plain = parse_args(Vec::<String>::new());
+        assert_eq!(plain.start_shell(&ui), Shell::Desktop);
     }
 
     #[test]

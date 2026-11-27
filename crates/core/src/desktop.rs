@@ -257,7 +257,7 @@ fn push_list(out: &mut String, values: &[String]) -> Result<(), DesktopEntryErro
 }
 
 /// The generic "string" escaping applied to every value before anything else.
-fn escape_string(value: &str) -> String {
+pub(crate) fn escape_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for character in value.chars() {
         match character {
@@ -272,7 +272,7 @@ fn escape_string(value: &str) -> String {
 }
 
 /// Render an argv as an `Exec` value.
-fn render_exec(argv: &[String]) -> Result<String, DesktopEntryError> {
+pub(crate) fn render_exec(argv: &[String]) -> Result<String, DesktopEntryError> {
     let mut rendered = Vec::with_capacity(argv.len());
     for argument in argv {
         if argument.contains(['\n', '\r', '\0']) {
@@ -316,7 +316,7 @@ fn quote_argument(argument: &str) -> String {
 }
 
 /// Write `bytes` through a sibling temp file so a reader never sees half a file.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DesktopEntryError> {
+pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), DesktopEntryError> {
     let directory = path
         .parent()
         .filter(|dir| !dir.as_os_str().is_empty())

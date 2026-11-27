@@ -42,12 +42,13 @@ impl PowerAction {
         Self::TerminateSession,
     ];
 
-    /// The actions the console overlay offers, in menu order.
+    /// The actions the console overlay offers as the machine-power menu, in
+    /// order.
     ///
-    /// [`TerminateSession`](Self::TerminateSession) is the session unit's
-    /// exit-to-desktop action (it lands with the gamescope session, see
-    /// `docs/v1.1-power.md`), so it is reachable through the API but has no menu
-    /// row yet.
+    /// [`TerminateSession`](Self::TerminateSession) is the session's own
+    /// exit-to-desktop action (`docs/v1.1-session.md`): the overlay adds it as a
+    /// separate row **only in the console session**, so it is deliberately not
+    /// part of this always-visible menu.
     pub const MENU: [PowerAction; 3] = [Self::Suspend, Self::Restart, Self::Shutdown];
 
     /// A short human label, for a message or a log line.
@@ -263,7 +264,7 @@ mod tests {
         }
         assert!(
             !PowerAction::MENU.contains(&PowerAction::TerminateSession),
-            "the session's exit-to-desktop action has no menu row yet"
+            "exit-to-desktop is a session row, not part of the machine-power menu"
         );
     }
 

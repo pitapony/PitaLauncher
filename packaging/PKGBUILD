@@ -23,7 +23,7 @@ depends=(
 makedepends=('git' 'rust' 'pkgconf')
 optdepends=(
   'proton-cachyos: recommended Proton build for FSR 4 / OptiScaler injection'
-  'gamescope: gamescope wrapper and the future console session'
+  'gamescope: the console session and the per-game wrapper'
   'mangohud: performance-overlay wrapper'
   'lib32-mangohud: performance-overlay wrapper for 32-bit games'
   'gamemode: CPU governor and scheduling wrapper'
@@ -75,6 +75,14 @@ package() {
     "$pkgdir/usr/share/metainfo/io.github.pitapony.PitaGames.metainfo.xml"
   install -Dm644 packaging/pitagames.svg \
     "$pkgdir/usr/share/icons/hicolor/scalable/apps/pitagames.svg"
+
+  # The console session: the login entry the display manager offers (never the
+  # default session) and the systemd user unit it starts. The unit restarts the
+  # launcher on failure, inside the gamescope session.
+  install -Dm644 packaging/pitagames-session.desktop \
+    "$pkgdir/usr/share/wayland-sessions/pitagames.desktop"
+  install -Dm644 packaging/pitagames-session.service \
+    "$pkgdir/usr/lib/systemd/user/pitagames-session.service"
 
   # The shipped compat database: platform::compat reads this directory (or a
   # user copy under the data dir) and merges $XDG_CONFIG_HOME overrides on top.

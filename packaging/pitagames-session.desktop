@@ -1,0 +1,6 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=PitaGames (console)
+Comment=Boot straight into the PitaGames console shell under gamescope
+Exec=gamescope --fullscreen --expose-wayland --force-windows-fullscreen -- systemctl --user start --wait pitagames-session.service

@@ -16,6 +16,7 @@ use anyhow::{Context, Result, bail};
 
 use pitagames_core::desktop::{self, DesktopEntry};
 use pitagames_core::paths;
+use pitagames_core::session::{SessionEntry, SystemdUnit, launcher_argv};
 use pitagames_core::{
     AntiCheat, Budget, Game, GameId, GameMetadata, LaunchSpec, Measurement, Metric, Platforms,
     Profile, ProtonRef, ShimProfile, Store, Verdict, read_shim_profile, shim_launch_options,
@@ -110,6 +111,7 @@ fn run() -> Result<()> {
         "launch" => launch(&args.collect::<Vec<_>>()),
         "stores" => stores(&args.collect::<Vec<_>>()),
         "desktop-entry" => desktop_entry(&args.collect::<Vec<_>>()),
+        "session" => session(&args.collect::<Vec<_>>()),
         "activate" => activate(&args.collect::<Vec<_>>()),
         "launch-options" => launch_options(&args.collect::<Vec<_>>()),
         "compat-tool" => compat_tool(&args.collect::<Vec<_>>()),
@@ -4384,6 +4386,246 @@ fn apply_desktop_entry_flag(parsed: &mut DesktopEntryArgs, flag: &str, value: &s
     Ok(())
 }
 
+/// Print, install or remove the console session files.
+///
+/// v1.1 ships the console session as two generated files: a wayland-sessions
+/// entry whose `Exec` starts gamescope around the launcher's systemd unit, and
+/// the unit itself. Both are generated from `[ui.display.session]` in
+/// `config.toml` (resolution, monitor, HDR, VRR), so a TV's mode is configured
+/// once and the entry follows. `--print`/`--print-unit` are how the checked-in
+/// `packaging/pitagames-session.desktop` and `.../pitagames-session.service` are
+/// regenerated.
+fn session(args: &[String]) -> Result<()> {
+    let parsed = parse_session_args(args)?;
+    if parsed.help {
+        println!("{}", session_usage());
+        return Ok(());
+    }
+
+    let display = pitagames_core::ui::AppConfig::load_default().0.ui.display;
+    let entry = SessionEntry::default_for(&display);
+    let unit_exec = if parsed.exec.is_empty() {
+        launcher_argv()
+    } else {
+        parsed.exec.clone()
+    };
+    let unit = SystemdUnit::default_for(unit_exec);
+
+    if parsed.print {
+        print!("{}", entry.render()?);
+        return Ok(());
+    }
+    if parsed.print_unit {
+        print!("{}", unit.render()?);
+        return Ok(());
+    }
+
+    let entry_path = match parsed.path.clone() {
+        Some(path) => path,
+        None => paths::session_entry_file()
+            .context("cannot determine the XDG data dir; pass --path <file>")?,
+    };
+    let unit_path = match parsed.unit_path.clone() {
+        Some(path) => path,
+        None => paths::session_unit_file()
+            .context("cannot determine the XDG config dir; pass --unit-path <file>")?,
+    };
+
+    if parsed.remove {
+        let entry_removed = SessionEntry::remove(&entry_path)?;
+        let unit_removed = SystemdUnit::remove(&unit_path)?;
+        if parsed.json {
+            let payload = serde_json::json!({
+                "entry": entry_path,
+                "entry_removed": entry_removed,
+                "unit": unit_path,
+                "unit_removed": unit_removed,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "{} {}",
+                if entry_removed {
+                    "Removed"
+                } else {
+                    "No session entry at"
+                },
+                entry_path.display()
+            );
+            println!(
+                "{} {}",
+                if unit_removed {
+                    "Removed"
+                } else {
+                    "No session unit at"
+                },
+                unit_path.display()
+            );
+        }
+        return Ok(());
+    }
+
+    if parsed.write {
+        let entry_outcome = entry.install(&entry_path)?;
+        let unit_outcome = unit.install(&unit_path)?;
+        if parsed.json {
+            let payload = serde_json::json!({
+                "entry": entry_path,
+                "entry_outcome": entry_outcome.label(),
+                "unit": unit_path,
+                "unit_outcome": unit_outcome.label(),
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!("{} {}", entry_outcome.label(), entry_path.display());
+            println!("{} {}", unit_outcome.label(), unit_path.display());
+        }
+        return Ok(());
+    }
+
+    let entry_state = session_file_state(&entry_path, &entry.render()?);
+    let unit_state = session_file_state(&unit_path, &unit.render()?);
+    if parsed.json {
+        let payload = serde_json::json!({
+            "entry": entry_path,
+            "entry_state": entry_state,
+            "entry_exec": entry.exec,
+            "unit": unit_path,
+            "unit_state": unit_state,
+            "unit_exec": unit.exec,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Console session entry: {}", entry_path.display());
+        println!("  state:      {entry_state}");
+        println!("  exec:       {}", entry.exec.join(" "));
+        println!("Console session unit:  {}", unit_path.display());
+        println!("  state:      {unit_state}");
+        println!("  exec:       {}", unit.exec.join(" "));
+    }
+
+    Ok(())
+}
+
+/// Describe a generated session file: current, stale, absent or unreadable.
+fn session_file_state(path: &Path, expected: &str) -> &'static str {
+    match fs::read_to_string(path) {
+        Ok(current) if current == expected => "current",
+        Ok(_) => "stale (run --write)",
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => "absent",
+        Err(_) => "unreadable",
+    }
+}
+
+/// Parsed `session` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct SessionArgs {
+    exec: Vec<String>,
+    path: Option<PathBuf>,
+    unit_path: Option<PathBuf>,
+    print: bool,
+    print_unit: bool,
+    write: bool,
+    remove: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_session_args(args: &[String]) -> Result<SessionArgs> {
+    let mut parsed = SessionArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--print" => parsed.print = true,
+            "--print-unit" => parsed.print_unit = true,
+            "--write" => parsed.write = true,
+            "--remove" => parsed.remove = true,
+            "--json" => parsed.json = true,
+            "--exec" | "--path" | "--unit-path" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                apply_session_flag(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--exec=")
+                || arg.starts_with("--path=")
+                || arg.starts_with("--unit-path=") =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                apply_session_flag(&mut parsed, flag, value)?;
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `session`\n\n{}",
+                session_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let actions = [parsed.print, parsed.print_unit, parsed.write, parsed.remove]
+        .into_iter()
+        .filter(|chosen| *chosen)
+        .count();
+    if actions > 1 {
+        bail!(
+            "--print, --print-unit, --write and --remove are exclusive\n\n{}",
+            session_usage()
+        );
+    }
+
+    Ok(parsed)
+}
+
+fn apply_session_flag(parsed: &mut SessionArgs, flag: &str, value: &str) -> Result<()> {
+    match flag {
+        "--exec" => {
+            if value.is_empty() {
+                bail!("--exec requires a path or program name");
+            }
+            parsed.exec.push(value.to_string());
+        }
+        "--path" => {
+            if value.is_empty() {
+                bail!("--path requires a file path");
+            }
+            parsed.path = Some(PathBuf::from(value));
+        }
+        "--unit-path" => {
+            if value.is_empty() {
+                bail!("--unit-path requires a file path");
+            }
+            parsed.unit_path = Some(PathBuf::from(value));
+        }
+        other => bail!("internal error: unknown session flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn session_usage() -> String {
+    "USAGE:\n    pitagames-cli session [options]\n\n\
+     The console session: a wayland-sessions entry generated from\n\
+     `[ui.display.session]` (resolution, monitor, HDR, VRR) that starts gamescope\n\
+     around the launcher's systemd user unit, plus that unit (`Restart=on-failure`).\n\
+     Never the default session.\n\n\
+     OPTIONS:\n    \
+     --print             Print the wayland-sessions entry\n    \
+     --print-unit        Print the systemd user unit\n    \
+     --write             Write both files to their XDG locations\n    \
+     --remove            Remove both files\n    \
+     --path <file>       The entry path (default: <data>/wayland-sessions/pitagames.desktop)\n    \
+     --unit-path <file>  The unit path (default: <config>/systemd/user/pitagames-session.service)\n    \
+     --exec <arg>        Launcher argv for the unit (repeatable; default: pitagames --console --session)\n    \
+     --json              Print the result as JSON\n    \
+     -h, --help          Show this help"
+        .to_string()
+}
+
 /// Ask a running launcher to come to the front.
 ///
 /// The second launch of the GUI does exactly this through
@@ -8633,7 +8875,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    nr         Resolve the neural-rendering backend, its pin and cost preset\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    eac        Report EAC Linux v2 readiness and the game's verdict\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    perf       Check a performance measurement against the plan's budgets\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n         Run `pitagames-cli <command> --help` for command options."
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    nr         Resolve the neural-rendering backend, its pin and cost preset\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    eac        Report EAC Linux v2 readiness and the game's verdict\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    perf       Check a performance measurement against the plan's budgets\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    session    Print, install or remove the console session entry + unit\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n         Run `pitagames-cli <command> --help` for command options."
     )
 }
 
@@ -11695,6 +11937,91 @@ verified = ["rdna4"]
 
         desktop_entry(&args("--remove")).unwrap();
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn parses_session_actions_and_exec_argv() {
+        let parsed = parse_session_args(&[
+            "--print".to_string(),
+            "--exec".to_string(),
+            "/opt/pitagames".to_string(),
+            "--exec".to_string(),
+            "--console".to_string(),
+            "--exec".to_string(),
+            "--session".to_string(),
+            "--path".to_string(),
+            "/tmp/pitagames.desktop".to_string(),
+            "--unit-path".to_string(),
+            "/tmp/pitagames-session.service".to_string(),
+        ])
+        .unwrap();
+        assert!(parsed.print && !parsed.print_unit && !parsed.write && !parsed.remove);
+        assert_eq!(parsed.exec, ["/opt/pitagames", "--console", "--session"]);
+        assert_eq!(parsed.path, Some(PathBuf::from("/tmp/pitagames.desktop")));
+        assert_eq!(
+            parsed.unit_path,
+            Some(PathBuf::from("/tmp/pitagames-session.service"))
+        );
+
+        let unit = parse_session_args(&["--print-unit".to_string()]).unwrap();
+        assert!(unit.print_unit && !unit.print);
+
+        for args in [
+            vec!["--print", "--write"],
+            vec!["--write", "--remove"],
+            vec!["--print", "--print-unit"],
+            vec!["--exec"],
+            vec!["--unit-path="],
+            vec!["extra"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_session_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        let help = parse_session_args(&["--help".to_string()]).unwrap();
+        assert!(help.help);
+    }
+
+    #[test]
+    fn session_writes_reads_back_and_removes() {
+        let temp = tempfile::tempdir().unwrap();
+        let entry_path = temp
+            .path()
+            .join("wayland-sessions")
+            .join("pitagames.desktop");
+        let unit_path = temp
+            .path()
+            .join("systemd")
+            .join("user")
+            .join("pitagames-session.service");
+
+        let args = |action: &str| -> Vec<String> {
+            vec![
+                "--path".to_string(),
+                entry_path.display().to_string(),
+                "--unit-path".to_string(),
+                unit_path.display().to_string(),
+                action.to_string(),
+            ]
+        };
+
+        session(&args("--write")).unwrap();
+        let entry = std::fs::read_to_string(&entry_path).unwrap();
+        assert!(entry.contains("Exec=gamescope "), "{entry}");
+        assert!(entry.contains("pitagames-session.service"), "{entry}");
+        let unit = std::fs::read_to_string(&unit_path).unwrap();
+        assert!(
+            unit.contains("ExecStart=pitagames --console --session"),
+            "{unit}"
+        );
+        assert!(unit.contains("Restart=on-failure"), "{unit}");
+
+        // Writing again is a no-op rather than an error.
+        session(&args("--write")).unwrap();
+
+        session(&args("--remove")).unwrap();
+        assert!(!entry_path.exists());
+        assert!(!unit_path.exists());
     }
 
     #[test]
