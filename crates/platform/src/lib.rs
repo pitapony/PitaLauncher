@@ -35,6 +35,7 @@ pub mod prefix;
 pub mod proton;
 pub mod proton_update;
 pub mod tier_a;
+pub mod validation;
 
 pub use anticheat::{
     AnticheatFinding, AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision, ScanLimits,
@@ -77,3 +78,4 @@ pub use proton_update::{
     BuildState, ProtonPin, ProtonUpdateError, Registry, RegistryError, UpdateReport,
 };
 pub use tier_a::{TierAGate, dll_name, env as tier_a_env, gate as tier_a_gate};
+pub use validation::{Claim, Machine, ValidationPath};

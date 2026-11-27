@@ -982,9 +982,10 @@ mod tests {
         };
         let mut session = start(&spec, &options).unwrap();
         // Wait for the child to be running before signalling it; the marker
-        // keeps the test off a sleep-and-hope race.
+        // keeps the test off a sleep-and-hope race. The budget is generous
+        // because a saturated CI box can take seconds to schedule the child.
         let mut waited = 0;
-        while !marker.exists() && waited < 2000 {
+        while !marker.exists() && waited < 10_000 {
             std::thread::sleep(Duration::from_millis(10));
             waited += 10;
         }
