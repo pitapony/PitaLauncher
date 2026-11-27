@@ -79,22 +79,36 @@ hardware layer has been exercised in an `archlinux:latest` container.
 - **Store status and updates** — a Stores screen and `pitagames-cli stores` show
   each CLI store's program, version, session and game counts, and one unified
   list folds Steam's manifest state with the CLI stores' own install flags
-  (`pitagames-cli stores updates`).
+  (`pitagames-cli stores updates`). Updates ride the same serial install queue (an
+  install plus that store's own verify); Proton/GE builds are fetched opt-in from
+  a pinned release.
+- **Graphics screen** — the upscaler/frame-gen/injection choices this machine may
+  actually offer, each hidden option carrying the matrix's own "why", with one
+  injection slot, the anti-cheat gate, the DLSSNR install/uninstall flow and the
+  NR verification card. Built and unit-tested; not driven against a real GPU.
+- **Console shell** — `--console` (or `F11`/the pad's `Guide`): a 10-foot
+  fullscreen shell over the same routes, with a d-pad-driven filter chip row, a
+  full-bleed game page, an on-screen keyboard, a system overlay and a launch
+  hand-off that hides the window while a game runs. A `gamescope` login-screen
+  **console session** ships generated and marked "not tested on a TV".
 - **`pitagames-shim`** — argv-only env injection and exit-code forwarding.
-- **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `compat`,
-  `anticheat`, `profile`, `logs`, `import`, `prefix`, `disk`, `stores`,
-  `launch-options`, `compat-tool`, `steam-account`, `desktop-entry`, `activate`,
-  `epic`, `amazon`, `gog`.
+- **Headless CLI** — `scan`, `install`, `metadata`, `proton`, `gpu`,
+  `capability`, `nr`, `compat`, `anticheat`, `eac`, `profile`, `logs`, `import`,
+  `prefix`, `disk`, `perf`, `mods`, `history`, `launch`, `stores`,
+  `launch-options`, `compat-tool`, `steam-account`, `desktop-entry`, `session`,
+  `activate`, `epic`, `amazon`, `gog`.
 
 ## Not there yet
 
-- Hardware validation on the RX 9070 and RX 5700 XT.
-- Graphics/upscaler orchestration (FSR 4, OptiScaler, DLSSNR, HelixSR) and the
-  graphics screen that enforces the anti-cheat gate.
-- The store status *wiring* (running installs through the queue, caching the CLI
-  stores' libraries), the in-app re-auth terminal and the umu/Proton launch
-  hand-off; mod orchestration; and release/AUR packaging (the `-git` package
-  builds and installs today).
+- Hardware validation on the RX 9070 and RX 5700 XT. The M0 closer — launching one
+  real Steam game with `DXVK_HUD=fps` — is still blocked on machine access.
+- The store backends, the graphics/NR paths and the console/TV claims have not
+  been driven against real hardware, a real store CLI, a real GPU or a TV. They
+  ship labelled "not tested by us" / "not tested on a TV" (ADR-0004).
+- The live HTTP fetch for pinned Proton/GE and DLSSNR releases (the diagnostics
+  drive a fixture today); the GUI's own store-update button; and release/AUR
+  packaging, signatures and the CachyOS repo proposal (the `-git` package builds
+  and installs today).
 
 ## Requirements
 
@@ -199,6 +213,10 @@ issue templates in [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE).
 
 ## Documentation
 
+- [`docs/user-guide.md`](docs/user-guide.md) — how to install, run and use the launcher, screen by screen.
+- [`docs/architecture.md`](docs/architecture.md) — the crate boundaries, the vocabulary and the rules a change must keep.
+- [`docs/compat-contribution.md`](docs/compat-contribution.md) — the compat-DB TOML schema, as a copy-paste guide for adding an entry.
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — a symptom → cause → fix guide.
 - [`docs/M0-test.md`](docs/M0-test.md) — the hardware launch checklist.
 - [`docs/m1-detail-page.md`](docs/m1-detail-page.md) — game detail page and profiles.
 - [`docs/m1-metadata.md`](docs/m1-metadata.md) — store metadata and caching.
