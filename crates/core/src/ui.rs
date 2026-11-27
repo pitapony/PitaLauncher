@@ -42,7 +42,7 @@ pub const DESKTOP_MIN_HEIGHT: f64 = 560.0;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Shell {
-    /// A windowed, decorated shell for the desktop.
+    /// A windowed, frameless shell for the desktop.
     #[default]
     Desktop,
     /// A 10-foot, undecorated shell for a TV or a controller.

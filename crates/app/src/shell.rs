@@ -5,8 +5,9 @@
 //! shell asks for, the CSS its root wears, and the toggle that reconfigures the
 //! same window without restarting the process.
 //!
-//! Two shells, one process. The desktop shell is a windowed, decorated frame at
-//! 1280×800; the console shell is undecorated and fullscreen with a TV overscan
+//! Two shells, one process. The desktop shell is a frameless, windowed frame at
+//! 1280×800 whose app header doubles as the titlebar (drag to move, minimize and
+//! close); the console shell is undecorated and fullscreen with a TV overscan
 //! margin and a larger base type. Toggling only changes the window flags and the
 //! CSS — the same components, the same focus graphs, the same session.
 
