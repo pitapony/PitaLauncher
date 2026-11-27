@@ -4342,6 +4342,7 @@ dependencies = [
  "pitagames-metadata",
  "pitagames-mods",
  "pitagames-platform",
+ "pitagames-repair",
  "pitagames-secrets",
  "pitagames-stores",
  "tempfile",

@@ -15,6 +15,7 @@
 use dioxus::prelude::*;
 
 use pitagames_core::AntiCheat;
+use pitagames_core::i18n::t;
 use pitagames_core::paths;
 use pitagames_core::profile::{NeuralRendering, Profile, ProtonRef};
 use pitagames_core::ui::Shell;
@@ -237,9 +238,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             })
                         };
                         if !allows {
-                            status.set(
-                                "Acknowledge the anti-cheat warning before applying.".to_string(),
-                            );
+                            status.set(t("graphics.acknowledge_required").to_string());
                             continue;
                         }
                         // The write guard must be released before the arm reads
@@ -291,15 +290,19 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                                 match pitagames_mods::ModManifest::restore(&dir) {
                                     Ok(report) => {
                                         let tree = if report.tree_hash_ok {
-                                            ", the tree matches its pre-install hash"
+                                            t("graphics.tree_matches")
                                         } else {
                                             ""
                                         };
-                                        status.set(format!(
-                                            "Restored {} ({} file(s) back{tree}).",
-                                            report.mod_name,
-                                            report.restored.len()
-                                        ));
+                                        status.set(
+                                            t("graphics.restored_mod")
+                                                .replace("{name}", &report.mod_name)
+                                                .replace(
+                                                    "{files}",
+                                                    &report.restored.len().to_string(),
+                                                )
+                                                .replace("{tree}", tree),
+                                        );
                                         manifest.set(None);
                                     }
                                     Err(error) => status.set(error.to_string()),
@@ -317,7 +320,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
         return rsx! {
             div {
                 style: "padding:32px;color:var(--text-muted);",
-                "Loading graphics settings…"
+                {t("graphics.loading")}
             }
         };
     };
@@ -348,7 +351,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 Vec::new(),
                 Vec::new(),
                 String::new(),
-                Some("Waiting for the GPU and Proton discovery…".to_string()),
+                Some(t("graphics.waiting_discovery").to_string()),
             ),
         };
 
@@ -427,7 +430,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
             .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
             .or_else(|| bundle_entry.game.install_dir.clone());
         let Some(dir) = dir else {
-            bundle_status.set("This game has no directory to collect logs from.".to_string());
+            bundle_status.set(t("graphics.no_log_dir").to_string());
             return;
         };
         let versions = pitagames_platform::support::versions(gpu.read().as_ref(), None);
@@ -435,7 +438,11 @@ pub fn Graphics(props: GraphicsProps) -> Element {
         let bundle = pitagames_platform::support::collect(&request);
         let out_dir = paths::data_dir().unwrap_or_default().join("support");
         if let Err(error) = std::fs::create_dir_all(&out_dir) {
-            bundle_status.set(format!("Cannot create {}: {error}", out_dir.display()));
+            bundle_status.set(
+                t("graphics.cannot_create_dir")
+                    .replace("{dir}", &out_dir.display().to_string())
+                    .replace("{error}", &error.to_string()),
+            );
             return;
         }
         let stamp = std::time::SystemTime::now()
@@ -446,11 +453,11 @@ pub fn Graphics(props: GraphicsProps) -> Element {
             &stamp.to_string(),
         ));
         match bundle.write_zip(&out) {
-            Ok(()) => bundle_status.set(format!(
-                "Wrote {} ({} file(s)).",
-                out.display(),
-                bundle.items.len()
-            )),
+            Ok(()) => bundle_status.set(
+                t("graphics.bundle_written")
+                    .replace("{path}", &out.display().to_string())
+                    .replace("{files}", &bundle.items.len().to_string()),
+            ),
             Err(error) => bundle_status.set(error.to_string()),
         }
     };
@@ -477,6 +484,11 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let dirty = editor_state.is_dirty();
     let status_text = status.read().clone();
     let console = props.shell.read().is_console();
+    let command_hint = if console {
+        t("graphics.command_hint_console")
+    } else {
+        t("graphics.command_hint_desktop")
+    };
     // The injection gate: a draft that injects into an anti-cheat-protected
     // game cannot be applied until the risk is acknowledged.
     let eac_v2 = compat_snapshot.as_ref().is_some_and(|entry| entry.eac_v2);
@@ -513,6 +525,13 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     // The NR install panel reports its finished value back here; this owns the
     // report so the default-Proton choice is the NR one (GE, then Valve).
     let nr_report = report.clone();
+    // The line naming the durable mod manifest, so the copy is looked up by key
+    // rather than spelled in the RSX (i18n guard: no literal user-facing copy).
+    let installed_mod_line = manifest_snapshot.as_ref().map(|revert| {
+        t("graphics.installed_mod")
+            .replace("{name}", &revert.mod_name)
+            .replace("{files}", &revert.files.to_string())
+    });
 
     rsx! {
         div {
@@ -522,7 +541,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 style: "display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;",
                 h2 {
                     style: "margin:0;font-size:var(--text-title);font-weight:600;color:#ffffff;",
-                    "Graphics"
+                    {t("graphics.title")}
                 }
                 span {
                     style: "font-size:var(--text-body);color:var(--text-secondary);",
@@ -530,12 +549,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 }
                 span {
                     style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
-                    "profile {profile_name}"
+                    {t("graphics.profile").replace("{name}", &profile_name)}
                 }
                 if dirty {
                     span {
                         style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--warning);",
-                        "unsaved"
+                        {t("graphics.unsaved")}
                     }
                 }
             }
@@ -561,7 +580,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                                 style: "display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:#1a1e28;border:1px solid #2c3444;",
                                 span {
                                     style: "font-size:var(--text-caption);font-weight:600;color:#ffffff;",
-                                    "Upscaler"
+                                    {t("graphics.upscaler")}
                                 }
                                 span {
                                     style: "font-size:var(--text-caption);color:var(--text-secondary);",
@@ -600,7 +619,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                                         span {
                                             key: "reason-{index}",
                                             style: "font-size:var(--text-micro);color:var(--warning);",
-                                            "not available on this machine: {reason}"
+                                            {t("graphics.not_available").replace("{reason}", &reason)}
                                         }
                                     }
                                 }
@@ -615,7 +634,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "display:flex;flex-direction:column;gap:4px;padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;",
                     span {
                         style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
-                        "Not offered here"
+                        {t("graphics.not_offered")}
                     }
                     for (index, item) in hidden.iter().enumerate() {
                         span {
@@ -639,10 +658,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                         if let Some(editor) = editor.write().as_mut() {
                             editor.enable_neural_rendering(nr, default_proton);
                         }
-                        status.set(
-                            "Added the NR profile to the draft — press Apply & verify to save."
-                                .to_string(),
-                        );
+                        status.set(t("graphics.nr_added").to_string());
                     },
                 }
             }
@@ -653,27 +669,27 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
                     h3 {
                         style: "margin:0;font-size:var(--text-heading);font-weight:600;color:#ffffff;",
-                        "Verification"
+                        {t("graphics.verification")}
                     }
                     span {
                         style: "font-size:var(--text-micro);color:var(--text-muted);",
-                        "read from the mod's own log — no in-game menu needed"
+                        {t("graphics.verification_hint")}
                     }
                     button {
                         onclick: recheck,
                         style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
-                        "Re-check"
+                        {t("graphics.recheck")}
                     }
                     button {
                         onclick: write_bundle,
                         style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
-                        "Write support bundle"
+                        {t("graphics.write_bundle")}
                     }
                 }
                 if verify_snapshot.is_empty() {
                     span {
                         style: "font-size:var(--text-caption);color:var(--text-secondary);",
-                        "Nothing to verify yet — choose an upscaler or install DLSSNR, launch the game once, then Re-check."
+                        {t("graphics.nothing_to_verify")}
                     }
                 } else {
                     for (index, row) in verify_snapshot.iter().enumerate() {
@@ -713,12 +729,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                     span {
                         style: "font-size:var(--text-caption);font-weight:600;color:var(--text);",
-                        "Resolved command"
+                        {t("graphics.resolved_command")}
                     }
                     CopyButton { text: preview_command.clone() }
                     span {
                         style: "font-size:var(--text-micro);color:var(--text-muted);",
-                        if console { "what the launcher will run" } else { "the same line the detail page's Command panel shows" }
+                        "{command_hint}"
                     }
                 }
                 if let Some(message) = preview_error.clone() {
@@ -739,7 +755,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "display:flex;flex-direction:column;gap:8px;padding:12px 14px;border-radius:10px;background:#3a2a1e;color:#e8c890;font-size:var(--text-caption);",
                     span {
                         style: "font-weight:600;",
-                        "Anti-cheat injection warning"
+                        {t("graphics.anticheat_warning")}
                     }
                     span { "{message}" }
                     button {
@@ -749,11 +765,11 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             }
                         },
                         style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
-                        "I understand the risk and want to inject anyway"
+                        {t("graphics.inject_anyway")}
                     }
                     span {
                         style: "font-size:var(--text-micro);color:var(--text-muted);",
-                        "The confirmation is recorded in the profile and can be undone."
+                        {t("graphics.confirm_recorded")}
                     }
                 }
             }
@@ -784,7 +800,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                         }
                     },
                     style: "{action_button_style(focused == Some(Control::Apply), dirty && gate_allows, \"#2e3a56\", \"#ffffff\")}",
-                    "Apply & verify"
+                    {t("graphics.apply_verify")}
                 }
                 if dirty {
                     button {
@@ -795,7 +811,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             status.set(String::new());
                         },
                         style: "{action_button_style(focused == Some(Control::Revert), true, \"#2a1e1e\", \"#e0a0a0\")}",
-                        "Revert"
+                        {t("graphics.revert")}
                     }
                 }
                 if editor_state.can_undo() {
@@ -807,7 +823,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             status.set(String::new());
                         },
                         style: "{action_button_style(focused == Some(Control::Undo), true, \"#1e1e28\", \"var(--text-secondary)\")}",
-                        "Undo"
+                        {t("graphics.undo")}
                     }
                 }
                 button {
@@ -818,7 +834,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                         status.set(String::new());
                     },
                     style: "{action_button_style(focused == Some(Control::Reset), true, \"#1e1e28\", \"var(--text-secondary)\")}",
-                    "Reset to safe defaults"
+                    {t("graphics.reset_defaults")}
                 }
                 if manifest_snapshot.is_some() {
                     button {
@@ -829,11 +845,15 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                                 spawn(async move {
                                     match pitagames_mods::ModManifest::restore(&dir) {
                                         Ok(report) => {
-                                            status.set(format!(
-                                                "Restored {} ({} file(s) back).",
-                                                report.mod_name,
-                                                report.restored.len()
-                                            ));
+                                            status.set(
+                                                t("graphics.restored_mod")
+                                                    .replace("{name}", &report.mod_name)
+                                                    .replace(
+                                                        "{files}",
+                                                        &report.restored.len().to_string(),
+                                                    )
+                                                    .replace("{tree}", ""),
+                                            );
                                             manifest.set(None);
                                         }
                                         Err(error) => status.set(error.to_string()),
@@ -842,15 +862,15 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             }
                         },
                         style: "{action_button_style(focused == Some(Control::Restore), true, \"#2a1e1e\", \"#e0a0a0\")}",
-                        "Restore installed files"
+                        {t("graphics.restore_files")}
                     }
                 }
             }
 
-            if let Some(revert) = manifest_snapshot {
+            if let Some(line) = installed_mod_line {
                 div {
                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                    "Installed mod: {revert.mod_name} ({revert.files} file(s)). The durable revert is the mod manifest; restoring returns the game directory to its pre-install state."
+                    "{line}"
                 }
             }
 
@@ -866,7 +886,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-micro);",
                     span {
                         style: "font-weight:600;color:var(--text);",
-                        "Pre-flight: injection files already in the game folder"
+                        {t("graphics.preflight")}
                     }
                     for line in conflict_lines {
                         span { style: "overflow-wrap:anywhere;", "{line}" }
@@ -906,12 +926,15 @@ async fn save_and_write(
 
     let graphics = GraphicsContext::new(&gpu, compat.as_ref());
     match runtime::write_shim_profile_with_graphics(&profile, &report, graphics) {
-        Ok((path, compiled)) => status.set(format!(
-            "Applied · wrote {} · {} environment entr{}",
-            path.display(),
-            compiled.env.len(),
-            if compiled.env.len() == 1 { "y" } else { "ies" }
-        )),
+        Ok((path, compiled)) => {
+            let entries = if compiled.env.len() == 1 { "y" } else { "ies" };
+            status.set(
+                t("graphics.applied")
+                    .replace("{path}", &path.display().to_string())
+                    .replace("{count}", &compiled.env.len().to_string())
+                    .replace("{entries}", entries),
+            );
+        }
         Err(message) => status.set(message),
     }
 }

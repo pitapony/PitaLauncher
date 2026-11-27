@@ -895,7 +895,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;",
                         span {
                             style: "font-weight:600;color:#ffffff;",
-                            "EAC Linux v2"
+                            {t("detail.eac_linux_v2")}
                         }
                         span {
                             style: "font-size:var(--text-micro);color:#a8b4d0;",
@@ -929,34 +929,35 @@ pub fn Detail(props: DetailProps) -> Element {
                                         command.args(&argv[1..]);
                                         match command.spawn() {
                                             Ok(_) => eac_message.set(
-                                                "Rebooting into the EAC entry…".to_string(),
+                                                t("detail.eac_rebooting").to_string(),
                                             ),
-                                            Err(error) => eac_message.set(format!(
-                                                "could not run `{}`: {error}",
-                                                argv.join(" ")
-                                            )),
+                                            Err(error) => eac_message.set(
+                                                t("detail.eac_reboot_error")
+                                                    .replace("{command}", &argv.join(" "))
+                                                    .replace("{error}", &error.to_string()),
+                                            ),
                                         }
                                     },
                                     style: "padding:6px 12px;border-radius:8px;border:1px solid #4a5a8c;background:#2e3a56;color:#ffffff;font-size:var(--text-micro);cursor:pointer;",
-                                    "Reboot now"
+                                    {t("detail.eac_reboot_now")}
                                 }
                                 button {
                                     onclick: move |_| reboot_confirm.set(false),
                                     style: "padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#14141c;color:var(--text-muted);font-size:var(--text-micro);cursor:pointer;",
-                                    "Cancel"
+                                    {t("action.cancel")}
                                 }
                             }
                         } else {
                             button {
                                 onclick: move |_| reboot_confirm.set(true),
                                 style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #4a5a8c;background:#2e3a56;color:#ffffff;font-size:var(--text-micro);cursor:pointer;",
-                                "Reboot into the EAC entry and play"
+                                {t("detail.eac_reboot_play")}
                             }
                         }
                     } else if eac_needs_entry {
                         span {
                             style: "font-family:monospace;font-size:var(--text-micro);color:#a8b4d0;overflow-wrap:anywhere;",
-                            "run: {eac_command}"
+                            {t("detail.eac_run").replace("{command}", &eac_command)}
                         }
                     }
                     if !eac_report.is_empty() {
@@ -993,7 +994,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         style: "display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;",
                         h3 {
                             style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
-                            "In-game keys"
+                            {t("detail.in_game_keys")}
                         }
                         span {
                             style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
