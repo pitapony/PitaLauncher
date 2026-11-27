@@ -530,8 +530,9 @@ fn requested_backend(profile: &Profile, compat: Option<&CompatEntry>) -> Option<
 // ---------------------------------------------------------------------------
 
 /// A display resolution the cost table is keyed by.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Resolution {
+    #[default]
     #[serde(rename = "1080p")]
     P1080,
     #[serde(rename = "1440p")]

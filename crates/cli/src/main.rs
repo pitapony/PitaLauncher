@@ -10691,4 +10691,146 @@ verified = ["rdna4"]
         ])
         .unwrap();
     }
+
+    /// A fixture `vulkaninfo --summary` for an RX 9070 XT on Mesa 26.2.
+    const NR_VULKANINFO: &str = "\
+Devices:
+========
+GPU0:
+\tapiVersion         = 1.4.321
+\tvendorID           = 0x1002
+\tdeviceID           = 0x7550
+\tdriverID           = DRIVER_ID_MESA_RADV
+\tdriverName         = radv
+\tdriverInfo         = Mesa 26.2.0
+";
+
+    const NR_ASSET: &str = "DLSSNR-AMD-Vulkan-Linux-0.0.9-x86_64.tar.gz";
+
+    /// A one-file tar, the fixture release asset.
+    fn nr_tar() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(11);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "dlssnr-amd.asi", &b"the plugin\n"[..])
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    /// A fixture tree for `nr`: an RDNA 4 card on Mesa 26.2, a curated game, a
+    /// recent Proton, a GitLab release and a registry whose pin is `sha256`.
+    ///
+    /// Returns the temp dir (to keep it alive) and the argv, so a test only adds
+    /// the flags it exercises.
+    fn nr_fixture(sha256: &str) -> (tempfile::TempDir, Vec<String>) {
+        let temp = tempfile::tempdir().unwrap();
+
+        let sys = temp.path().join("sys");
+        let card = sys.join("class/drm/card0/device");
+        fs::create_dir_all(&card).unwrap();
+        fs::write(card.join("vendor"), "0x1002\n").unwrap();
+        fs::write(card.join("device"), "0x7550\n").unwrap();
+        let vulkaninfo = temp.path().join("vulkaninfo.txt");
+        fs::write(&vulkaninfo, NR_VULKANINFO).unwrap();
+
+        let shipped = temp.path().join("compat");
+        fs::create_dir_all(&shipped).unwrap();
+        fs::write(
+            shipped.join("steam-1091500.toml"),
+            "[game]\nstore = \"steam\"\nstore_id = \"1091500\"\ntitle = \"Cyberpunk 2077\"\nanticheat = \"none\"\n\n[upscaling]\nsupported = [\"dlss\"]\n\n[neural_rendering]\nbackend = \"auto\"\nroute = \"optiscaler\"\nmin_mesa = \"26.2\"\nrequires_64bit = true\n",
+        )
+        .unwrap();
+        let user = temp.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+
+        let proton = temp.path().join("GE-Proton10-1");
+        fs::create_dir_all(proton.join("files")).unwrap();
+        fs::write(proton.join("proton"), "#!/usr/bin/env python3\n").unwrap();
+        fs::write(proton.join("version"), "GE-Proton10-1").unwrap();
+
+        let release = temp.path().join("release");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(
+            release.join("release.json"),
+            serde_json::json!({
+                "tag_name": "v0.0.9",
+                "assets": {
+                    "links": [{ "name": NR_ASSET, "direct_asset_url": "https://gitlab.test/asset" }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(release.join(NR_ASSET), nr_tar()).unwrap();
+
+        let registry = temp.path().join("backends.toml");
+        fs::write(
+            &registry,
+            format!(
+                "[[backends]]\nbackend = \"rdna4_upstream\"\nsource = \"gitlab\"\nproject = \"mochizuki0323/DLSSNR-AMD\"\ntag = \"v0.0.9\"\nversion = \"0.0.9\"\nasset = \"{NR_ASSET}\"\nsha256 = \"{sha256}\"\n"
+            ),
+        )
+        .unwrap();
+
+        let args = vec![
+            "steam".to_string(),
+            "1091500".to_string(),
+            "--root".to_string(),
+            sys.display().to_string(),
+            "--vulkaninfo".to_string(),
+            vulkaninfo.display().to_string(),
+            "--shipped".to_string(),
+            shipped.display().to_string(),
+            "--user".to_string(),
+            user.display().to_string(),
+            "--proton".to_string(),
+            proton.display().to_string(),
+            "--registry".to_string(),
+            registry.display().to_string(),
+            "--fetch".to_string(),
+            release.display().to_string(),
+            "--dest".to_string(),
+            temp.path().join("unpacked").display().to_string(),
+            "--json".to_string(),
+        ];
+        (temp, args)
+    }
+
+    #[test]
+    fn nr_fetches_and_verifies_a_pinned_release_from_a_fixture() {
+        let digest = pitagames_mods::release::sha256_hex(&nr_tar());
+        let (temp, args) = nr_fixture(&digest);
+        nr(&args).unwrap();
+        assert!(
+            temp.path().join("unpacked/dlssnr-amd.asi").is_file(),
+            "the verified archive is unpacked into --dest"
+        );
+    }
+
+    #[test]
+    fn nr_refuses_a_pin_the_bytes_do_not_match() {
+        let (temp, args) = nr_fixture(&"0".repeat(64));
+        let error = nr(&args).unwrap_err().to_string();
+        assert!(error.contains("cannot fetch"), "{error}");
+        assert!(
+            !temp.path().join("unpacked/dlssnr-amd.asi").exists(),
+            "nothing is unpacked when the digest is refused"
+        );
+    }
+
+    #[test]
+    fn nr_hides_a_cross_offered_backend_by_name() {
+        let digest = pitagames_mods::release::sha256_hex(&nr_tar());
+        let (_temp, mut args) = nr_fixture(&digest);
+        // An RDNA 4 card asked for the RDNA 3 fork is refused by name.
+        args.extend(["--backend".to_string(), "rdna3-fork".to_string()]);
+        let error = nr(&args).unwrap_err().to_string();
+        assert!(
+            error.contains("the RDNA 3 fork is offered only on RDNA 3"),
+            "{error}"
+        );
+    }
 }
