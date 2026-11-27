@@ -359,7 +359,7 @@ mod tests {
         let row = hints_for(&map, &GAME_PAGE_HINTS);
         assert_eq!(
             row.iter().map(|hint| hint.action).collect::<Vec<_>>(),
-            [Action::Confirm, Action::Menu, Action::Back]
+            [Action::Confirm, Action::Context, Action::Menu, Action::Back]
         );
         // The default row names Search and the shell key; the game page does not.
         assert!(!row.iter().any(|hint| hint.action == Action::Search));

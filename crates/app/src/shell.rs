@@ -150,7 +150,13 @@ impl WindowConfig {
 /// The window config for a shell.
 pub fn window_config(shell: Shell, display: &DisplayConfig) -> WindowConfig {
     match shell {
-        Shell::Desktop => WindowConfig::desktop(),
+        // Both shells honour a configured monitor; a windowed desktop shell is
+        // centred on it in `place_at_startup`, the fullscreen console one goes
+        // there by handle.
+        Shell::Desktop => WindowConfig {
+            monitor: display.monitor.clone(),
+            ..WindowConfig::desktop()
+        },
         Shell::Console => WindowConfig::console(display),
     }
 }

@@ -21,9 +21,9 @@ use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::stream::{self, StreamExt};
+use pitagames_core::i18n::t;
 use pitagames_core::ui::Shell;
 use pitagames_core::{GameId, Store};
-use pitagames_core::i18n::t;
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_platform::power::{self, PowerAction};
@@ -221,7 +221,10 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
         Ok(lock) => Some(lock),
         Err(pitagames_core::LockError::AlreadyRunning { path, pid }) => {
             match pid {
-                Some(pid) => eprintln!("{}", t("app.already_running_pid").replace("{pid}", &pid.to_string())),
+                Some(pid) => eprintln!(
+                    "{}",
+                    t("app.already_running_pid").replace("{pid}", &pid.to_string())
+                ),
                 None => eprintln!("{}", t("app.already_running")),
             }
             eprintln!("Another instance holds {}.", path.display());
@@ -799,9 +802,8 @@ fn App() -> Element {
                 );
             }
             if let Some(total) = library.owned.total {
-                subtitle.push_str(
-                    &t("library.subtitle_owned").replace("{count}", &total.to_string()),
-                );
+                subtitle
+                    .push_str(&t("library.subtitle_owned").replace("{count}", &total.to_string()));
             }
             if library.metadata_pending {
                 subtitle.push_str(t("library.subtitle_fetching"));
@@ -1148,7 +1150,7 @@ fn App() -> Element {
                                 }
                                 span {
                                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                                    {t("downloads.steam_appid_state").replace("{id}", &app_id).replace("{state}", &state)}
+                                    {t("downloads.steam_appid_state").replace("{id}", &app_id).replace("{state}", state)}
                                 }
                                 button {
                                     onclick: move |_| {

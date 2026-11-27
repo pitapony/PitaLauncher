@@ -6,8 +6,8 @@
 
 use std::time::Duration;
 
-use pitagames_core::{Game, GameId, OwnedGame, Profile, Store};
 use pitagames_core::i18n::t;
+use pitagames_core::{Game, GameId, OwnedGame, Profile, Store};
 use pitagames_db::{
     Db, GameRepository, HistoryRepository, LaunchRecord, MetadataRepository, OwnedRepository,
     ProfileRepository, StoredLaunch, StoredMetadata, StoredProfile,
@@ -16,8 +16,8 @@ use time::OffsetDateTime;
 
 /// Open (or create) `<XDG_DATA_HOME>/pitagames/pitagames.db`.
 pub async fn open_default() -> Result<Db, String> {
-    let dir = pitagames_core::paths::data_dir()
-        .ok_or_else(|| t("runtime.no_data_dir").to_string())?;
+    let dir =
+        pitagames_core::paths::data_dir().ok_or_else(|| t("runtime.no_data_dir").to_string())?;
     let path = dir.join("pitagames.db");
 
     Db::open(&path)

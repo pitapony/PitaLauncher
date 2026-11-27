@@ -434,7 +434,10 @@ mod tests {
 
     #[test]
     fn the_power_rows_track_the_platform_menu() {
-        let actions: Vec<PowerAction> = power_rows().into_iter().map(|(action, _, _)| action).collect();
+        let actions: Vec<PowerAction> = power_rows()
+            .into_iter()
+            .map(|(action, _, _)| action)
+            .collect();
         assert_eq!(actions, PowerAction::MENU);
     }
 

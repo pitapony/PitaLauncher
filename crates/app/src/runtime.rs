@@ -129,10 +129,12 @@ impl WrapperDraft {
         for (index, step) in self.custom.iter().enumerate() {
             let program = step.program.trim();
             if program.is_empty() {
-                return Err(t("wrapper.custom_needs_program")
-                    .replace("{index}", &(index + 1).to_string()));
+                return Err(
+                    t("wrapper.custom_needs_program").replace("{index}", &(index + 1).to_string())
+                );
             }
-            let args_label = t("wrapper.custom_args_named").replace("{index}", &(index + 1).to_string());
+            let args_label =
+                t("wrapper.custom_args_named").replace("{index}", &(index + 1).to_string());
             custom.push(WrapperStep {
                 program: PathBuf::from(program),
                 args: parse_args(&step.args, &args_label)?,
@@ -391,8 +393,7 @@ fn parse_dimension(text: &str, label: &str) -> Result<Option<u32>, String> {
 }
 
 fn profiles_dir() -> Result<PathBuf, String> {
-    pitagames_core::paths::profiles_dir()
-        .ok_or_else(|| t("runtime.no_data_dir").to_string())
+    pitagames_core::paths::profiles_dir().ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 fn logs_dir() -> Option<PathBuf> {
@@ -400,8 +401,7 @@ fn logs_dir() -> Option<PathBuf> {
 }
 
 fn backup_dir() -> Result<PathBuf, String> {
-    pitagames_core::paths::steam_backup_dir()
-        .ok_or_else(|| t("runtime.no_data_dir").to_string())
+    pitagames_core::paths::steam_backup_dir().ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 /// Compile the runtime subset of a profile against the current discovery.
@@ -428,9 +428,16 @@ pub fn compile_with_graphics(
     report: &DiscoveryReport,
     graphics: GraphicsContext<'_>,
 ) -> Result<CompiledRuntime, String> {
-    let install = report
-        .resolve(&profile.proton)
-        .map_err(|error| error.to_string())?;
+    let install = match report.resolve(&profile.proton) {
+        Ok(install) => install,
+        // `Auto` means "the best build you can find"; finding none is not fatal
+        // at compile time. A native or store-client row runs without Proton, and
+        // a Windows row is refused later where it matters — the launch hand-off
+        // names the missing build. An explicitly pinned build that is missing is
+        // still an error.
+        Err(_) if profile.proton == ProtonRef::Auto => None,
+        Err(error) => return Err(error.to_string()),
+    };
     let log_dir = logs_dir();
     envc::compile(
         CompileRequest {

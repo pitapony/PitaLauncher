@@ -151,10 +151,12 @@ fn lookup<'a>(catalog: &'a Catalog, key: &'a str) -> &'a str {
 /// own test fails on the malformed source long before a user sees a key.
 pub fn en() -> &'static Catalog {
     static EN: OnceLock<Catalog> = OnceLock::new();
-    EN.get_or_init(|| Catalog::parse(Language::En).unwrap_or_else(|_| Catalog {
-        language: Language::En,
-        entries: BTreeMap::new(),
-    }))
+    EN.get_or_init(|| {
+        Catalog::parse(Language::En).unwrap_or_else(|_| Catalog {
+            language: Language::En,
+            entries: BTreeMap::new(),
+        })
+    })
 }
 
 /// The one lookup a screen calls: `t("library.title")`.
@@ -218,8 +220,7 @@ mod tests {
 
     #[test]
     fn lookup_falls_back_to_the_key_and_reads_the_catalog() {
-        let catalog =
-            Catalog::from_source(Language::En, "greeting = \"Hello\"\n").expect("parses");
+        let catalog = Catalog::from_source(Language::En, "greeting = \"Hello\"\n").expect("parses");
         assert_eq!(lookup(&catalog, "greeting"), "Hello");
         assert_eq!(
             lookup(&catalog, "missing.key"),
@@ -340,10 +341,7 @@ mod tests {
     fn every_catalog_entry_is_used_by_the_ui() {
         let catalog = Catalog::parse(Language::En).expect("the en catalog parses");
         let used = keys_used_by_the_ui();
-        let unused: Vec<&str> = catalog
-            .keys()
-            .filter(|key| !used.contains(*key))
-            .collect();
+        let unused: Vec<&str> = catalog.keys().filter(|key| !used.contains(*key)).collect();
         assert!(
             unused.is_empty(),
             "the en catalog has entries no screen uses:\n{}",

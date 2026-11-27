@@ -249,8 +249,8 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     }
                     Control::Restore => {
                         if let Some(dir) = entry.game.install_dir.clone() {
-                            let status = status;
-                            let manifest = manifest;
+                            let mut status = status;
+                            let mut manifest = manifest;
                             spawn(async move {
                                 match pitagames_mods::ModManifest::restore(&dir) {
                                     Ok(report) => {
@@ -564,12 +564,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "{action_button_style(focused == Some(Control::Reset), true, \"#1e1e28\", \"var(--text-secondary)\")}",
                     "Reset to safe defaults"
                 }
-                if let Some(revert) = manifest_snapshot.clone() {
+                if manifest_snapshot.is_some() {
                     button {
                         onclick: move |_| {
                             if let Some(dir) = entry.game.install_dir.clone() {
-                                let status = status;
-                                let manifest = manifest;
+                                let mut status = status;
+                                let mut manifest = manifest;
                                 spawn(async move {
                                     match pitagames_mods::ModManifest::restore(&dir) {
                                         Ok(report) => {
