@@ -203,7 +203,11 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             );
                             continue;
                         }
-                        match editor.write().as_mut().map(GraphicsEditor::apply) {
+                        // The write guard must be released before the arm reads
+                        // the editor back (a live guard makes the read panic), so
+                        // the outcome is computed in its own scope first.
+                        let applied = { editor.write().as_mut().map(GraphicsEditor::apply) };
+                        match applied {
                             Some(Ok(())) => {
                                 let profile = editor.read().as_ref().map(|e| e.applied().clone());
                                 if let (Some(profile), Some(report), Some(gpu)) =
