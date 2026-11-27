@@ -1,0 +1,11 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_USE_OPTISCALER=1
+  PROTON_FSR4_UPGRADE=1
+  PROTON_OPTISCALER_CONFIG=Upscalers.Dx12Upscaler=fsr4;FrameGen.Enabled=true;FrameGen.FGType=fsr3
+wrappers:
+ini:
+warnings:

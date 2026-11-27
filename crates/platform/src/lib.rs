@@ -44,7 +44,10 @@ pub use compat::{
     default_shipped_dirs, default_user_dirs,
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
-pub use envc::{CompileRequest, CompiledRuntime, EnvcError, compile_runtime, shim_proton};
+pub use envc::{
+    CompileRequest, CompiledRuntime, EnvcError, GraphicsContext, compile, compile_runtime,
+    shim_proton,
+};
 // `detect` stays namespaced (`gpu::detect`) so it cannot collide with
 // `anticheat::detect`.
 pub use gpu::{GpuArch, GpuProbe, GpuProfile, GpuVendor, HdrSupport, arch_for};
