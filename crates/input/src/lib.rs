@@ -60,7 +60,8 @@ pub use binding::{Axis, Binding, Button, Direction, Key, Stick};
 pub use focus::{FocusGraph, FocusId, FocusNode};
 pub use gamepad::{GilrsSource, SourceError};
 pub use hint::{
-    GAME_PAGE_HINTS, HINT_ACTIONS, Hint, ScreenHint, action_label, binding_label, hints, hints_for,
+    GAME_PAGE_HINTS, GRAPHICS_HINTS, HINT_ACTIONS, Hint, ScreenHint, action_label, binding_label,
+    hints, hints_for,
 };
 pub use map::{
     DEFAULT_DEADZONE, DEFAULT_REPEAT_DELAY_MS, DEFAULT_REPEAT_INTERVAL_MS, InputMap, InputMaps,

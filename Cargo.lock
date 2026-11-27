@@ -4329,6 +4329,7 @@ dependencies = [
  "pitagames-db",
  "pitagames-input",
  "pitagames-metadata",
+ "pitagames-mods",
  "pitagames-platform",
  "pitagames-secrets",
  "pitagames-stores",

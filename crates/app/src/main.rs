@@ -53,6 +53,8 @@ mod focus;
 mod format;
 mod game_page;
 mod gamepad;
+mod graphics;
+mod graphics_view;
 mod grid;
 mod handoff;
 mod history_view;
@@ -359,6 +361,7 @@ fn App() -> Element {
     let downloads_actions = use_hook(focus::ActionChannel::new);
     let stores_actions = use_hook(focus::ActionChannel::new);
     let detail_actions = use_hook(focus::ActionChannel::new);
+    let graphics_actions = use_hook(focus::ActionChannel::new);
     let controls_actions = use_hook(focus::ActionChannel::new);
     let downloads_focus = focus::use_focus();
 
@@ -456,6 +459,7 @@ fn App() -> Element {
             downloads_actions.clone(),
             stores_actions.clone(),
             detail_actions.clone(),
+            graphics_actions.clone(),
             controls_actions.clone(),
         ),
         shell_state.clone(),
@@ -572,6 +576,7 @@ fn App() -> Element {
             downloads_actions.clone(),
             stores_actions.clone(),
             detail_actions.clone(),
+            graphics_actions.clone(),
             controls_actions.clone(),
         ),
         shell_state.clone(),
@@ -819,8 +824,11 @@ fn App() -> Element {
     };
     let hint_row = if shell_state.shell().is_console() && current_view == View::Detail {
         // The console game page advertises only the actions it exposes, in its
-        // own words: Play (Confirm), Overlay (Menu), Back.
+        // own words: Play (Confirm), Graphics (Context), Overlay (Menu), Back.
         pitagames_input::hints_for(&hint_map, &pitagames_input::GAME_PAGE_HINTS)
+    } else if current_view == View::Graphics {
+        // The graphics screen's own row: Choose (Confirm) and Back.
+        pitagames_input::hints_for(&hint_map, &pitagames_input::GRAPHICS_HINTS)
     } else {
         pitagames_input::hints(&hint_map)
     };
@@ -1358,6 +1366,20 @@ fn App() -> Element {
                             proton: proton_report.clone(),
                             shell: shell_state.shell,
                             libraries: detail_libraries.clone(),
+                        }
+                    }
+                }
+            } else if current_view == View::Graphics {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    if let Some(entry) = detail_entry {
+                        graphics_view::Graphics {
+                            key: "graphics-{entry.store().as_str()}-{entry.app_id()}",
+                            entry,
+                            db: detail::DbHandle(db_handle.clone()),
+                            proton: proton_report.clone(),
+                            actions: graphics_actions,
+                            shell: shell_state.shell,
                         }
                     }
                 }
@@ -2310,6 +2332,7 @@ pub(crate) fn dispatch_action(
     downloads: &focus::ActionChannel,
     stores: &focus::ActionChannel,
     detail: &focus::ActionChannel,
+    graphics: &focus::ActionChannel,
     controls: &focus::ActionChannel,
 ) {
     // Read the current view first: the match scrutinee's guard would live for
@@ -2321,6 +2344,7 @@ pub(crate) fn dispatch_action(
         View::Downloads => downloads,
         View::Stores => stores,
         View::Detail => detail,
+        View::Graphics => graphics,
         View::Controls => controls,
         View::History | View::Account | View::Logs => {
             // These screens have no graph yet; Back still leaves them so the
