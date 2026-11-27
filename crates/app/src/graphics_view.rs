@@ -53,6 +53,9 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let entry = props.entry.clone();
     let db = props.db.0.clone();
     let report = props.proton.clone();
+    // The channel is cloned up front: two `use_future` closures both need it,
+    // and a `move` closure would otherwise move the one `props.actions` twice.
+    let actions = props.actions.clone();
     let mut session = crate::context::use_session();
     let screen_focus = focus::use_focus();
 
@@ -118,7 +121,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let drain_report = report.clone();
     let drain_db = db.clone();
     use_future(move || {
-        let channel = props.actions.clone();
+        let channel = actions.clone();
         let entry = drain_entry.clone();
         let report = drain_report.clone();
         let db = drain_db.clone();
