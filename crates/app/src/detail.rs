@@ -439,10 +439,9 @@ pub fn Detail(props: DetailProps) -> Element {
             runtime::handoff_preview(&entry.game, &preview, report).map(|handoff| {
                 handoff_note = Some(match &handoff.prefix {
                     Some(prefix) => t("detail.handoff_prefix")
-                        .replace("{mode}", &handoff.mode.to_string())
+                        .replace("{mode}", handoff.mode)
                         .replace("{prefix}", prefix),
-                    None => t("detail.handoff_no_prefix")
-                        .replace("{mode}", &handoff.mode.to_string()),
+                    None => t("detail.handoff_no_prefix").replace("{mode}", handoff.mode),
                 });
                 handoff.command
             })
@@ -850,7 +849,7 @@ pub fn Detail(props: DetailProps) -> Element {
                 {info_card(t("detail.version"), version)}
                 {info_card(t("detail.anticheat"), anticheat_label)}
                 if eac_show {
-                    {info_card(t("detail.eac_linux_v2"), eac_label)}
+                    {info_card(t("detail.eac_linux_v2"), eac_label.clone())}
                 }
             }
 
@@ -1413,7 +1412,7 @@ pub fn Detail(props: DetailProps) -> Element {
                     if let Some(status) = routing_status.clone().filter(|_| is_steam) {
                         div {
                             style: "display:flex;flex-direction:column;gap:2px;font-size:var(--text-micro);color:var(--text-muted);",
-                            span { {t("detail.steam_status").replace("{status}", status.steam.describe())} }
+                            span { {t("detail.steam_status").replace("{status}", &status.steam.describe())} }
                             if let Some(value) = status.launch_options.clone() {
                                 span { {t("detail.launch_options").replace("{value}", &value)} }
                             } else {

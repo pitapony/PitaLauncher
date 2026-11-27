@@ -157,7 +157,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                                         reload(Some(db), stored, error).await;
                                     }
                                     Err(message) => error.set(
-                                        t("history.clear_error").replace("{error}", &message),
+                                        t("history.clear_error").replace("{error}", &message.to_string()),
                                     ),
                                 }
                             });

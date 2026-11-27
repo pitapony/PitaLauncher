@@ -18,6 +18,12 @@ serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
 
+# `power` speaks logind over D-Bus. Only Linux has logind, so `zbus` is built
+# there alone; the trait seam and its fake keep the crate building and testing
+# everywhere else.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+
 [dev-dependencies]
 flate2.workspace = true
 insta.workspace = true

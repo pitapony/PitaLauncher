@@ -17,13 +17,16 @@
 //! - The rows are built from an [`OverlayContext`] each time the overlay opens,
 //!   so a row is never offered for a game that is not there: no running or open
 //!   game, no "Game details"; a non-Steam game, no "Store page".
-//! - The power rows are **shown but disabled**: power is the console session's
-//!   (v1.1, over logind), and a row that cannot work must say so rather than
-//!   disappear (a controller user would wonder where it went).
+//! - The power rows are enabled **only in the console session** (`v1.1`): the
+//!   session is where a couch user controls the machine, and the action goes to
+//!   logind through [`pitagames_platform::power`]. Off the session they stay
+//!   visible but disabled, so a desktop user sees the shape without a press that
+//!   cannot land.
 
 use pitagames_core::GameId;
 use pitagames_core::i18n::t;
 use pitagames_input::{Action, FocusGraph};
+use pitagames_platform::power::PowerAction;
 
 /// One thing the overlay can do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,8 @@ pub enum OverlayChoice {
     StorePage,
     /// Switch between the console and desktop shells.
     ToggleShell,
+    /// Ask logind to perform a power action (session mode only).
+    Power(PowerAction),
 }
 
 /// The game the overlay is about: the running one, else the last page opened.
@@ -52,6 +57,9 @@ pub struct OverlayGame {
 pub struct OverlayContext {
     /// Whether the console shell is showing, which names the shell switch.
     pub console: bool,
+    /// Whether this run is the console session (`PITAGAMES_SESSION=1`), which
+    /// enables the power rows.
+    pub session: bool,
     /// The game the overlay is about, if any.
     pub game: Option<OverlayGame>,
 }
@@ -135,14 +143,19 @@ impl Overlay {
             t("overlay.shell_detail"),
         ));
 
-        // Power is the console session's (v1.1, over logind). The rows are shown
-        // so the shape is honest and disabled so a press cannot half-do it.
-        for label in [
-            t("overlay.power_suspend"),
-            t("overlay.power_restart"),
-            t("overlay.power_shutdown"),
-        ] {
-            entries.push(OverlayEntry::disabled(label, t("overlay.power_detail")));
+        // Power is the console session's (v1.1, over logind). It is offered only
+        // where it can work; off the session the rows stay visible but disabled,
+        // so a desktop user sees the shape without a press that cannot land.
+        for (action, label, detail) in power_rows() {
+            if context.session {
+                entries.push(OverlayEntry::enabled(
+                    OverlayChoice::Power(action),
+                    label,
+                    detail,
+                ));
+            } else {
+                entries.push(OverlayEntry::disabled(label, t("overlay.power_disabled")));
+            }
         }
 
         let focus = (!entries.is_empty()).then_some(0);
@@ -189,6 +202,32 @@ impl Overlay {
         }
         false
     }
+}
+
+/// The console session's power rows, in menu order: `(action, label, detail)`.
+///
+/// The label and detail come from literal `t(..)` calls — not a key returned by a
+/// helper — because `crates/core`'s i18n source scan only sees a key when it sits
+/// directly inside a `t` call. A test ties the actions to [`PowerAction::MENU`] so
+/// this list and the platform's cannot drift.
+fn power_rows() -> [(PowerAction, &'static str, &'static str); 3] {
+    [
+        (
+            PowerAction::Suspend,
+            t("overlay.power_suspend"),
+            t("overlay.power_suspend_detail"),
+        ),
+        (
+            PowerAction::Restart,
+            t("overlay.power_restart"),
+            t("overlay.power_restart_detail"),
+        ),
+        (
+            PowerAction::Shutdown,
+            t("overlay.power_shutdown"),
+            t("overlay.power_shutdown_detail"),
+        ),
+    ]
 }
 
 /// The overlay's wall clock, as `HH:MM`.
@@ -240,6 +279,15 @@ mod tests {
     fn console() -> OverlayContext {
         OverlayContext {
             console: true,
+            session: false,
+            game: None,
+        }
+    }
+
+    fn session() -> OverlayContext {
+        OverlayContext {
+            console: true,
+            session: true,
             game: None,
         }
     }
@@ -256,6 +304,7 @@ mod tests {
     fn a_steam_game_adds_details_and_a_store_page() {
         let context = OverlayContext {
             console: true,
+            session: false,
             game: Some(game(Store::Steam)),
         };
         let overlay = Overlay::build(&context);
@@ -280,6 +329,7 @@ mod tests {
     fn a_non_steam_game_has_no_store_page() {
         let context = OverlayContext {
             console: true,
+            session: false,
             game: Some(game(Store::Epic)),
         };
         let overlay = Overlay::build(&context);
@@ -323,17 +373,72 @@ mod tests {
     }
 
     #[test]
-    fn power_rows_are_shown_but_disabled() {
+    fn the_power_rows_are_enabled_in_the_session() {
+        let overlay = Overlay::build(&session());
+        let power: Vec<Option<OverlayChoice>> = overlay
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.choice, Some(OverlayChoice::Power(_))))
+            .map(|entry| entry.choice)
+            .collect();
+        assert_eq!(
+            power,
+            PowerAction::MENU
+                .iter()
+                .map(|action| Some(OverlayChoice::Power(*action)))
+                .collect::<Vec<_>>(),
+            "the menu carries every power action, in order"
+        );
+        for (action, label, detail) in power_rows() {
+            let row = overlay
+                .entries()
+                .iter()
+                .find(|entry| entry.choice == Some(OverlayChoice::Power(action)))
+                .unwrap_or_else(|| panic!("{action} is missing"));
+            assert!(row.is_enabled(), "{action} must be live in the session");
+            assert_eq!(row.label, label);
+            assert_eq!(row.detail, detail);
+        }
+    }
+
+    #[test]
+    fn the_power_rows_are_disabled_off_the_session() {
         let overlay = Overlay::build(&console());
-        for label in ["Suspend", "Restart", "Shut down"] {
+        let disabled: Vec<(&str, &str)> = overlay
+            .entries()
+            .iter()
+            .filter(|entry| !entry.is_enabled())
+            .map(|entry| (entry.label.as_str(), entry.detail.as_str()))
+            .collect();
+        let expected: Vec<(&str, &str)> = power_rows()
+            .into_iter()
+            .map(|(_, label, _)| (label, t("overlay.power_disabled")))
+            .collect();
+        assert_eq!(
+            disabled, expected,
+            "off the session the three power rows are the only disabled rows"
+        );
+        for (_, label, _) in power_rows() {
             let row = overlay
                 .entries()
                 .iter()
                 .find(|entry| entry.label == label)
                 .unwrap_or_else(|| panic!("{label} is missing"));
-            assert!(!row.is_enabled(), "{label} must be a placeholder");
-            assert!(row.detail.contains("console session"));
+            assert!(row.choice.is_none(), "{label} must offer no choice");
+            assert!(
+                !row.detail.contains("arrives with the console session"),
+                "{label} still carries the old placeholder copy"
+            );
         }
+    }
+
+    #[test]
+    fn the_power_rows_track_the_platform_menu() {
+        let actions: Vec<PowerAction> = power_rows()
+            .into_iter()
+            .map(|(action, _, _)| action)
+            .collect();
+        assert_eq!(actions, PowerAction::MENU);
     }
 
     #[test]

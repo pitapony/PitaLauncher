@@ -4473,6 +4473,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "toml",
+ "zbus",
 ]
 
 [[package]]

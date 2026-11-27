@@ -197,11 +197,12 @@ The footer cheat-sheet on the game page names the page's own actions —
 `Menu` (`Start` / `M`) opens the **console overlay** from any screen: **Resume**,
 the running/open game's **Game details** and (Steam) **Store page**, **Exit
 console mode** / **Enter console mode**, and the power rows (**Suspend**,
-**Restart**, **Shut down**) shown but disabled until the console session ships
-(v1.1, over logind). It also carries the connected controller and its battery and
-the local clock. It is a modal: the pumps route every action into it while it is
-open, `Back`/`Menu`/`Guide` closes it, and the screen beneath keeps its focus and
-scroll. See `docs/m2.5-overlay.md`.
+**Restart**, **Shut down**) — enabled in the console session
+(`PITAGAMES_SESSION=1`, over logind) and disabled off it. It also carries the
+connected controller and its battery and the local clock. It is a modal: the pumps
+route every action into it while it is open, `Back`/`Menu`/`Guide` closes it, and
+the screen beneath keeps its focus and scroll. See `docs/m2.5-overlay.md` and
+`docs/v1.1-power.md`.
 
 ## The launch hand-off
 
@@ -299,7 +300,9 @@ launched game, including this console path — is [`docs/beta-testing.md`](beta-
 **Overlay, remap and recovery**
 
 - [ ] `Start` opens the overlay; `Resume` closes it; the controller and clock are
-      correct; the power rows read as not-yet-available.
+      correct; the power rows read as enabled in the console session and as
+      "available in the console session" off it. **Do not press a power row unless
+      you mean to suspend, restart or power off the machine.**
 - [ ] On Controls, rebind one action by pressing the new control; `Save` applies
       it live and the footer hint updates; `Discard` reverts.
 - [ ] Start once with `--safe-mode`: the window renders and the `Safe mode` chip

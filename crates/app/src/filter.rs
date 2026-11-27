@@ -15,8 +15,8 @@
 
 use std::collections::{HashMap, HashSet};
 
-use pitagames_core::{Game, GameId, Store};
 use pitagames_core::i18n::t;
+use pitagames_core::{Game, GameId, Store};
 use pitagames_input::{Band, FocusGraph, FocusId};
 use pitagames_stores::InstallPhase;
 use pitagames_stores::status::updates;

@@ -116,7 +116,7 @@ impl Choice {
     }
 
     /// The label the row wears.
-    pub const fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Upscaler(upscaler) => upscaler_label(upscaler),
             Self::FrameGen(frame_gen) => frame_gen_label(*frame_gen),
@@ -386,6 +386,9 @@ impl GraphicsEditor {
     }
 
     /// How many undo steps are stacked.
+    ///
+    /// Read by the editor tests; kept as part of the editor's surface.
+    #[allow(dead_code)]
     pub fn undo_depth(&self) -> usize {
         self.undo.len()
     }
@@ -445,6 +448,9 @@ impl GraphicsEditor {
     }
 
     /// Replace both the draft and the applied profile (an external write).
+    ///
+    /// Exercised by the editor tests; kept for the profile-reload path.
+    #[allow(dead_code)]
     pub fn reload(&mut self, profile: Profile) {
         self.applied = profile.clone();
         self.draft = profile;

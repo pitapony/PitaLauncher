@@ -16,7 +16,9 @@
 //! `Hidden(reason)` verdict and one reason string per field. M4 adds
 //! [`proton_update`]: opt-in, pinned GE-Proton builds fetched through
 //! `mods::release` into our own `proton/` directory, which [`proton`]
-//! discovery already scans.
+//! discovery already scans. v1.1 adds [`power`]: suspend, restart, shutdown
+//! and end-session over logind's D-Bus API, behind a trait so the real backend
+//! (Linux-only) and its fake share one seam.
 
 pub mod anticheat;
 pub mod capability;
@@ -28,6 +30,7 @@ pub mod gpu;
 pub mod launch;
 pub mod logs;
 pub mod nr;
+pub mod power;
 pub mod prefix;
 pub mod proton;
 pub mod proton_update;
@@ -65,6 +68,7 @@ pub use nr::{
     BackendPin, BackendRegistry, Cost, NrError, NrPlan, NrRequest, NrVerdict, Resolution,
     backend_for, default_scale, is_experimental, model_scale_preset, pe_is_64_bit,
 };
+pub use power::{PowerAction, PowerBackend, PowerError, request};
 pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{
     DiscoveryReport, ProtonError, ProtonInstall, ProtonKind, ProtonRoot, ProtonSource,

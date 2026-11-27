@@ -21,11 +21,12 @@ use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::stream::{self, StreamExt};
+use pitagames_core::i18n::t;
 use pitagames_core::ui::Shell;
 use pitagames_core::{GameId, Store};
-use pitagames_core::i18n::t;
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
+use pitagames_platform::power::{self, PowerAction};
 use pitagames_stores::queue::{InstallJob, JobState};
 use time::OffsetDateTime;
 
@@ -220,7 +221,10 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
         Ok(lock) => Some(lock),
         Err(pitagames_core::LockError::AlreadyRunning { path, pid }) => {
             match pid {
-                Some(pid) => eprintln!("{}", t("app.already_running_pid").replace("{pid}", &pid.to_string())),
+                Some(pid) => eprintln!(
+                    "{}",
+                    t("app.already_running_pid").replace("{pid}", &pid.to_string())
+                ),
                 None => eprintln!("{}", t("app.already_running")),
             }
             eprintln!("Another instance holds {}.", path.display());
@@ -798,9 +802,8 @@ fn App() -> Element {
                 );
             }
             if let Some(total) = library.owned.total {
-                subtitle.push_str(
-                    &t("library.subtitle_owned").replace("{count}", &total.to_string()),
-                );
+                subtitle
+                    .push_str(&t("library.subtitle_owned").replace("{count}", &total.to_string()));
             }
             if library.metadata_pending {
                 subtitle.push_str(t("library.subtitle_fetching"));
@@ -1147,7 +1150,7 @@ fn App() -> Element {
                                 }
                                 span {
                                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                                    {t("downloads.steam_appid_state").replace("{id}", &app_id).replace("{state}", &state)}
+                                    {t("downloads.steam_appid_state").replace("{id}", &app_id).replace("{state}", state)}
                                 }
                                 button {
                                     onclick: move |_| {
@@ -2259,6 +2262,7 @@ fn overlay_context(
     });
     OverlayContext {
         console: shell.is_console(),
+        session: crate::runtime::session_mode(),
         game,
     }
 }
@@ -2316,7 +2320,7 @@ pub(crate) fn apply_overlay(
         .as_ref()
         .and_then(|model| model.focused_choice());
     let Some(choice) = choice else {
-        // A disabled row (a power placeholder): keep the menu open.
+        // A disabled row (an off-session power row): keep the menu open.
         return;
     };
     apply_overlay_choice(choice, overlay, shell, session, notice, play);
@@ -2352,7 +2356,32 @@ fn apply_overlay_choice(
             }
         }
         OverlayChoice::ToggleShell => toggle_shell(shell, session),
+        OverlayChoice::Power(action) => spawn_power(action, notice),
     }
+}
+
+/// Run one power action off the UI thread.
+///
+/// `platform::power` speaks logind over D-Bus, and a polkit prompt can hold the
+/// call open, so it runs on the blocking pool rather than the event loop. A
+/// refusal lands in the notice line; a success usually means the machine is
+/// about to suspend or power off, so it says nothing.
+fn spawn_power(action: PowerAction, mut notice: Signal<String>) {
+    spawn(async move {
+        let result = tokio::task::spawn_blocking(move || power::request(action)).await;
+        let failure = match result {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(error.to_string()),
+            Err(error) => Some(error.to_string()),
+        };
+        if let Some(message) = failure {
+            notice.set(
+                t("app.power_failed")
+                    .replace("{action}", action.label())
+                    .replace("{message}", &message),
+            );
+        }
+    });
 }
 
 /// The overlay's controller line: the last pad's name and battery, or keyboard.
