@@ -209,6 +209,7 @@ pub fn key_from_tao(code: KeyCode) -> Option<InputKey> {
         KeyCode::KeyQ => Some(InputKey::Q),
         KeyCode::KeyE => Some(InputKey::E),
         KeyCode::KeyF => Some(InputKey::F),
+        KeyCode::KeyC => Some(InputKey::C),
         KeyCode::KeyM => Some(InputKey::M),
         KeyCode::F11 => Some(InputKey::F11),
         _ => None,
@@ -224,8 +225,9 @@ mod tests {
         assert_eq!(key_from_tao(KeyCode::ArrowUp), Some(InputKey::ArrowUp));
         assert_eq!(key_from_tao(KeyCode::NumpadEnter), Some(InputKey::Enter));
         assert_eq!(key_from_tao(KeyCode::KeyW), Some(InputKey::W));
-        // The shell menu and the shell toggle are the two shortcuts the layout
-        // adds on top of navigation.
+        // The context action, the shell menu and the shell toggle are the
+        // shortcuts the layout adds on top of navigation.
+        assert_eq!(key_from_tao(KeyCode::KeyC), Some(InputKey::C));
         assert_eq!(key_from_tao(KeyCode::KeyM), Some(InputKey::M));
         assert_eq!(key_from_tao(KeyCode::F11), Some(InputKey::F11));
         // A key the keyboard layout does not bind stays with the webview.

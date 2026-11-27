@@ -190,6 +190,7 @@ pub fn key_label(key: Key) -> &'static str {
         Key::Q => "Q",
         Key::E => "E",
         Key::F => "F",
+        Key::C => "C",
         Key::M => "M",
         Key::F11 => "F11",
     }
