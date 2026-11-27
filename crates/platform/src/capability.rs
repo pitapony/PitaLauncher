@@ -45,7 +45,10 @@ const NR_MESA_MIN: Version = Version {
 };
 
 /// `Proton-CachyOS` build that ships the OptiScaler / FFX upgrade hooks.
-const CACHYOS_HOOKS_MIN: &[u64] = &[11, 0, 20260506];
+///
+/// The number is owned by [`crate::tier_a`] — Tier A's own gate uses it — and
+/// reused here for the FFX hooks and the "recent CachyOS" check.
+const CACHYOS_HOOKS_MIN: &[u64] = crate::tier_a::CACHYOS_HOOKS_MIN;
 
 /// A recent enough GE-Proton / Valve Proton for DLSSNR and HelixSR.
 const RECENT_GE_MIN: &[u64] = &[10, 0];
@@ -87,6 +90,7 @@ pub mod reason {
 
     // The runtime is wrong or unreadable.
     pub const TIER_A_NEEDS_CACHYOS: &str = "Tier A needs Proton-CachyOS 11.0-20260506 or newer";
+    pub const TIER_A_VERSION_UNREADABLE: &str = "Tier A needs Proton-CachyOS 11.0-20260506 or newer, but the build version could not be read";
     pub const TIER_A_STEAM_DEFAULT: &str =
         "Steam's default Proton cannot deploy OptiScaler; choose Proton-CachyOS";
     pub const FFX_NEEDS_CACHYOS: &str =
@@ -131,6 +135,7 @@ pub const REASONS: &[&str] = &[
     reason::GAME_NO_HELIXSR_DROPIN,
     reason::GAME_NO_NR,
     reason::TIER_A_NEEDS_CACHYOS,
+    reason::TIER_A_VERSION_UNREADABLE,
     reason::TIER_A_STEAM_DEFAULT,
     reason::FFX_NEEDS_CACHYOS,
     reason::NR_NEEDS_RECENT_PROTON,
@@ -628,11 +633,7 @@ fn mesa_gate(gpu: &GpuProfile) -> Option<&'static str> {
 /// Whether the resolved runtime satisfies `field`'s Proton requirement.
 fn proton_gate(field: Field, proton: Option<&ProtonInstall>) -> Option<&'static str> {
     match field {
-        Field::TierAInjection => cachyos_hooks(
-            proton,
-            reason::TIER_A_STEAM_DEFAULT,
-            reason::TIER_A_NEEDS_CACHYOS,
-        ),
+        Field::TierAInjection => tier_a_gate(proton),
         Field::Ffx3Upgrade | Field::Ffx4Upgrade => {
             cachyos_hooks(proton, reason::FFX_NEEDS_CACHYOS, reason::FFX_NEEDS_CACHYOS)
         }
@@ -651,6 +652,24 @@ fn nr_proton(proton: Option<&ProtonInstall>) -> Option<&'static str> {
         None => Some(reason::NR_STEAM_DEFAULT_PROTON),
         Some(install) if proton_is_recent(install) => None,
         Some(_) => Some(reason::NR_NEEDS_RECENT_PROTON),
+    }
+}
+
+/// Tier A's own Proton gate, mapped to the reason the UI shows.
+///
+/// The verdict comes from [`crate::tier_a::gate`] — the one place that parses
+/// the resolved build's metadata — so the Graphics screen, this matrix and the
+/// compiler cannot disagree about whether Tier A is offered.
+fn tier_a_gate(proton: Option<&ProtonInstall>) -> Option<&'static str> {
+    match crate::tier_a::gate(proton) {
+        crate::tier_a::TierAGate::Supported => None,
+        crate::tier_a::TierAGate::SteamDefault => Some(reason::TIER_A_STEAM_DEFAULT),
+        crate::tier_a::TierAGate::Unreadable => Some(reason::TIER_A_VERSION_UNREADABLE),
+        // An older CachyOS build and a non-CachyOS build read the same way: the
+        // user needs the CachyOS build at the hook version.
+        crate::tier_a::TierAGate::TooOld | crate::tier_a::TierAGate::OtherBuild => {
+            Some(reason::TIER_A_NEEDS_CACHYOS)
+        }
     }
 }
 
@@ -1117,6 +1136,37 @@ title = "Portal 2"
             )
             .reason(),
             Some(reason::TIER_A_STEAM_DEFAULT)
+        );
+    }
+
+    #[test]
+    fn an_unreadable_tier_a_version_hides_tier_a_and_offers_tier_b() {
+        // A CachyOS build whose `version` file could not be read is never
+        // assumed to be new enough; Tier B is the fallback the UI offers.
+        let unreadable = ProtonInstall {
+            version: None,
+            ..cachyos("11.0-20260516")
+        };
+        assert_eq!(
+            availability(
+                Field::TierAInjection,
+                &profile(),
+                &gpu(GpuArch::Rdna4),
+                Some(&cyberpunk()),
+                Some(&unreadable),
+            )
+            .reason(),
+            Some(reason::TIER_A_VERSION_UNREADABLE)
+        );
+        assert!(
+            availability(
+                Field::TierBInjection,
+                &profile(),
+                &gpu(GpuArch::Rdna4),
+                Some(&cyberpunk()),
+                Some(&unreadable),
+            )
+            .is_available()
         );
     }
 
