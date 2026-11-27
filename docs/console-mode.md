@@ -257,7 +257,8 @@ console chrome over the same routes.
 ## TV checklist (not yet run)
 
 Hand this to a tester with a TV. Every line is unverified until it is checked
-here; record the result beside it.
+here; record the result beside it. The full beta walk — clean install to a
+launched game, including this console path — is [`docs/beta-testing.md`](beta-testing.md).
 
 **Setup**
 
