@@ -30,6 +30,7 @@ pub mod gpu;
 pub mod launch;
 pub mod logs;
 pub mod nr;
+pub mod nr_ini;
 pub mod nr_install;
 pub mod power;
 pub mod prefix;

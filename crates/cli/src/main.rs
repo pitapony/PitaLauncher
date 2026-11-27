@@ -2625,6 +2625,7 @@ fn mods(args: &[String]) -> Result<()> {
         Some("ini") => mods_ini(&args[1..]),
         Some("capture") => mods_capture(&args[1..]),
         Some("tierb") => mods_tierb(&args[1..]),
+        Some("explain") => mods_explain(&args[1..]),
         _ => mods_manifest(args),
     }
 }
@@ -2888,7 +2889,8 @@ fn mods_usage() -> String {
      pitagames-cli mods capture <file|-> [--json]\n    \
      pitagames-cli mods capture --run <program> [args...] [--json]\n    \
      pitagames-cli mods tierb <target> --fixture <dir> [--set Section.Key=Value]... [--json]\n    \
-     pitagames-cli mods tierb <target> --uninstall [--json]\n\n\
+     pitagames-cli mods tierb <target> --uninstall [--json]\n    \
+     pitagames-cli mods explain <store> <id> [--dir <path>] [--json]\n\n\
      ARGS:\n    \
      <dir>                  A game directory a mod was installed into\n\n\
      OPTIONS:\n    \
@@ -2901,7 +2903,158 @@ fn mods_usage() -> String {
      `--verify` and `--restore` exit non-zero when a file or backup does not match.\n\
      The `release`, `ini` and `capture` subcommands are the shared mod primitives; see\n\
      `pitagames-cli mods release --help`, `mods ini --help` and `mods capture --help`.\n\
-     `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`."
+     `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`.\n\
+     `mods explain` shows a game's merged launch environment; see `mods explain --help`."
+        .to_string()
+}
+
+// -- mods explain -----------------------------------------------------------
+
+/// Explain the merged environment a game's shim profile applies.
+///
+/// The diagnostic for the shim profile: it reads `profiles/<store>-<id>.json`
+/// (the file `pitagames-shim` reads at launch) and prints the Proton it resolved,
+/// the merged environment, the launch options a mod installer captured and, for
+/// a Steam row, the exact command. It is the CLI half of the shim's `--explain`;
+/// both render through `ShimProfile::explain_lines`, so a capture or a forced
+/// variable shows the same way in each.
+fn mods_explain(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_explain_args(args)?;
+    if parsed.help {
+        println!("{}", mods_explain_usage());
+        return Ok(());
+    }
+
+    let game = parsed
+        .game
+        .clone()
+        .with_context(|| format!("expected `<store> <id>`\n\n{}", mods_explain_usage()))?;
+    let dir = parsed
+        .dir
+        .clone()
+        .or_else(paths::profiles_dir)
+        .context("no profiles directory; pass --dir <path>")?;
+    let path = shim_profile_path(&dir, &game);
+    let profile = read_shim_profile(&path).with_context(|| {
+        format!(
+            "cannot read the profile for {} {} at {}",
+            game.store.as_str(),
+            game.store_id,
+            path.display()
+        )
+    })?;
+
+    let command = steam_command(&game, &profile);
+    if parsed.json {
+        let payload = serde_json::json!({
+            "path": path,
+            "game": { "store": game.store.as_str(), "id": game.store_id },
+            "profile": profile.profile,
+            "proton": profile.proton,
+            "env": profile.env,
+            "captured_env": profile.captured_env,
+            "wrappers": profile.wrappers,
+            "command": command,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "PitaGames profile for {} {} ({})",
+            game.store.as_str(),
+            game.store_id,
+            path.display()
+        );
+        for line in profile.explain_lines(&profile.env) {
+            println!("{line}");
+        }
+        println!();
+        match command {
+            Some(command) => {
+                println!("Command:");
+                println!("  {command}");
+            }
+            None => println!(
+                "Command:      the {} hand-off applies this environment",
+                game.store.as_str()
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// The shim line for a Steam row, or `None` for every other store.
+///
+/// The shim is only what Steam runs; a store row's launch goes through the
+/// umu/store-client hand-off, so the CLI names the environment and stops there.
+fn steam_command(game: &GameId, profile: &ShimProfile) -> Option<String> {
+    if game.store != Store::Steam {
+        return None;
+    }
+    let (program, args) = pitagames_core::flatten_wrappers(
+        &profile.wrappers,
+        pitagames_core::SHIM_PROGRAM,
+        &[game.store_id.clone(), "%command%".to_string()],
+    );
+    Some(pitagames_core::render_shell_command(
+        &profile.env,
+        &program,
+        &args,
+    ))
+}
+
+/// Parsed `mods explain` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsExplainArgs {
+    dir: Option<PathBuf>,
+    game: Option<GameId>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_explain_args(args: &[String]) -> Result<ModsExplainArgs> {
+    let mut parsed = ModsExplainArgs::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--dir" => parsed.dir = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if !other.starts_with('-') => positional.push(other.to_string()),
+            other => bail!(
+                "unexpected argument `{other}` for `mods explain`\n\n{}",
+                mods_explain_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    match positional.as_slice() {
+        [] => {}
+        [store, id] => {
+            parsed.game = Some(GameId::new(
+                Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+                id.clone(),
+            ));
+        }
+        _ => bail!("expected `<store> <id>`\n\n{}", mods_explain_usage()),
+    }
+    Ok(parsed)
+}
+
+fn mods_explain_usage() -> String {
+    "USAGE:\n    pitagames-cli mods explain <store> <id> [--dir <path>] [--json]\n\n\
+     ARGS:\n    \
+     <store> <id>           The game whose shim profile to explain, e.g. `steam 1091500`\n\n\
+     OPTIONS:\n    \
+     --dir <path>           The profiles directory (default the XDG data dir)\n    \
+     --json                 Print the profile as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Reads `profiles/<store>-<id>.json` and prints the Proton it resolved, the merged\n\
+     environment the launch applies, the launch options a mod installer captured\n\
+     (`captured_env`) and, for a Steam row, the shim command. The same body the shim's\n\
+     `--explain` shows."
         .to_string()
 }
 
@@ -9495,6 +9648,47 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("unexpected argument"), "{error}");
+    }
+
+    #[test]
+    fn mods_explain_reads_a_shim_profile_and_names_the_captured_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = GameId::new(Store::Steam, "1091500");
+        let mut profile = ShimProfile::new(game.clone(), "NR");
+        profile.env = vec![
+            ("PROTON_USE_OPTISCALER".to_string(), "0".to_string()),
+            ("WINEDLLOVERRIDES".to_string(), "dxgi=n,b".to_string()),
+        ];
+        profile.captured_env = std::collections::BTreeMap::from([(
+            "WINEDLLOVERRIDES".to_string(),
+            "dxgi=n,b".to_string(),
+        )]);
+        pitagames_core::save_shim_profile(temp.path(), &profile).unwrap();
+        let dir = temp.path().display().to_string();
+
+        let base = vec![
+            "steam".to_string(),
+            "1091500".to_string(),
+            "--dir".to_string(),
+            dir.clone(),
+        ];
+        mods_explain(&base).unwrap();
+        let mut json = base.clone();
+        json.push("--json".to_string());
+        mods_explain(&json).unwrap();
+
+        // A stored profile is required: an absent one is an error, not a blank.
+        let missing = vec![
+            "steam".to_string(),
+            "1".to_string(),
+            "--dir".to_string(),
+            dir.clone(),
+        ];
+        assert!(mods_explain(&missing).is_err());
+        assert!(mods_explain(&["--help".to_string()]).is_ok());
+
+        // The dispatcher routes the subcommand.
+        assert!(mods(&["explain".to_string(), "--help".to_string()]).is_ok());
     }
 
     #[test]

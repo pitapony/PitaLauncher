@@ -204,30 +204,24 @@ fn run(args: &[String]) -> Result<i32, ShimError> {
 fn explain_launch(app_id: u32, profile: Option<&ShimProfile>, spec: &LaunchSpec) {
     println!("PitaGames launch for appid {app_id}");
     match profile {
+        // One renderer with `pitagames-cli mods explain`: the profile, the
+        // merged environment it applies, the captured launch options and the
+        // wrapper chain all come from `ShimProfile::explain_lines`.
         Some(profile) => {
-            println!("Profile:      {}", profile.profile);
-            match &profile.proton {
-                Some(proton) => match &proton.install {
-                    Some(install) => println!(
-                        "Proton:       {} ({}) {}",
-                        install.name,
-                        install.source,
-                        install.path.display()
-                    ),
-                    None => println!("Proton:       Steam decides ({:?})", proton.reference),
-                },
-                None => println!("Proton:       Steam decides"),
+            for line in profile.explain_lines(&spec.env) {
+                println!("{line}");
             }
         }
-        None => println!("Profile:      none written (M0 defaults)"),
-    }
-
-    println!("Environment:");
-    if spec.env.is_empty() {
-        println!("  (none)");
-    }
-    for (key, value) in &spec.env {
-        println!("  {key}={value}");
+        None => {
+            println!("Profile:      none written (M0 defaults)");
+            println!("Environment:");
+            if spec.env.is_empty() {
+                println!("  (none)");
+            }
+            for (key, value) in &spec.env {
+                println!("  {key}={value}");
+            }
+        }
     }
 
     let wrappers = profile.map(|p| p.wrappers.as_slice()).unwrap_or(&[]);
@@ -346,6 +340,35 @@ mod tests {
         assert_eq!(spec.env_get(APPID_ENV), Some("620"));
         assert_eq!(spec.env_get("DXVK_HUD"), Some("fps"));
         assert_eq!(spec.env_get(PROFILE_ENV), None);
+    }
+
+    #[test]
+    fn a_captured_launch_option_is_applied_and_the_explanation_names_it() {
+        let mut profile = profile();
+        // The installer's printed options are folded into `env` by the compiler
+        // and recorded in `captured_env`; the shim applies them like any other.
+        profile
+            .env
+            .push(("WINEDLLOVERRIDES".into(), "dxgi=n,b".into()));
+        profile.captured_env = std::collections::BTreeMap::from([(
+            "WINEDLLOVERRIDES".to_string(),
+            "dxgi=n,b".to_string(),
+        )]);
+
+        let spec = build_launch(620, "game", Some(&profile)).unwrap();
+        assert_eq!(spec.env_get("WINEDLLOVERRIDES"), Some("dxgi=n,b"));
+
+        let lines = profile.explain_lines(&spec.env);
+        assert!(
+            lines.contains(&"Captured launch options:".to_string()),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  WINEDLLOVERRIDES=dxgi=n,b"),
+            "{lines:?}"
+        );
     }
 
     #[test]

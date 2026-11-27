@@ -14,7 +14,9 @@
 use std::path::{Path, PathBuf};
 
 use pitagames_core::i18n::t;
-use pitagames_core::profile::{Diagnostics, GamescopeOptions, WrapperChain, WrapperStep};
+use pitagames_core::profile::{
+    Diagnostics, GamescopeOptions, NeuralRendering, WrapperChain, WrapperStep,
+};
 use pitagames_core::{
     Game, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, Store, flatten_wrappers,
     render_shell_command, save_shim_profile, shell_quote, shim_launch_options, tokenize_command,
@@ -499,6 +501,13 @@ fn shim_from_compiled(profile: &Profile, compiled: &CompiledRuntime) -> ShimProf
     let mut shim = ShimProfile::new(profile.game.clone(), &profile.name);
     shim.proton = Some(envc::shim_proton(&profile.proton, compiled.proton.as_ref()));
     shim.env = compiled.env.clone();
+    // The captured launch options are already folded into `env`; recording them
+    // beside it lets the shim's `--explain` and `mods explain` name the mod's
+    // keys rather than leaving them anonymous.
+    shim.captured_env = match &profile.neural_rendering {
+        NeuralRendering::DlssNrAmd { captured_env, .. } => captured_env.clone(),
+        NeuralRendering::Off => Default::default(),
+    };
     shim.wrappers = compiled.wrappers.clone();
     shim.log_path = logs_dir().map(|dir| dir.join("shim.log"));
     shim

@@ -44,7 +44,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use pitagames_core::profile::{NeuralRendering, NrBackend, Profile};
+use pitagames_core::profile::{NeuralRendering, NrBackend, Profile, ProtonRef};
 use pitagames_mods::release::{
     FetchedRelease, Fetcher, PinnedRelease, ReleaseError, ReleaseSource,
 };
@@ -53,7 +53,7 @@ use serde::{Deserialize, Serialize};
 use crate::capability::{Availability, Field};
 use crate::compat::{Arch, CompatEntry, Version};
 use crate::gpu::{GpuArch, GpuProfile};
-use crate::proton::ProtonInstall;
+use crate::proton::{DiscoveryReport, ProtonInstall, ProtonKind};
 
 /// The shipped backend pin file, embedded at build time.
 ///
@@ -702,6 +702,50 @@ pub fn default_scale(
 }
 
 // ---------------------------------------------------------------------------
+// The Proton choice (GE/Valve defaulted, CachyOS warned about)
+// ---------------------------------------------------------------------------
+
+/// The Proton families neural rendering is tested with, most preferred first.
+///
+/// Upstream tests GE-Proton; Valve's own builds are the other safe choice.
+/// Proton-CachyOS is allowed only with its OptiScaler injection disabled, which
+/// [`crate::envc`] forces whenever NR is on, so it is never a *default* — the
+/// two OptiScaler copies can never meet (ADR-0023), but the tested pairing is
+/// still GE or Valve.
+pub const PROTON_PREFERENCE: [ProtonKind; 2] = [ProtonKind::Ge, ProtonKind::Valve];
+
+/// The note shown beside the Proton when NR would run on a build it is not
+/// tested with.
+pub const CACHYOS_NR_NOTE: &str = "neural rendering is tested with GE-Proton or \
+     Valve Proton; Proton-CachyOS runs with its OptiScaler injection disabled";
+
+/// The Proton an NR profile defaults to: GE-Proton, then Valve's Steam Proton,
+/// then [`ProtonRef::Auto`].
+///
+/// `Auto` may resolve to Proton-CachyOS, which NR runs only with its OptiScaler
+/// injection disabled — [`proton_note`] says so. An explicit profile choice
+/// always wins: this is the default a newly-enabled NR profile gets, not an
+/// override.
+pub fn default_proton(report: &DiscoveryReport) -> ProtonRef {
+    if report.of_kind(ProtonKind::Ge).is_some() {
+        return ProtonRef::GeProton;
+    }
+    if let Some(valve) = report.of_kind(ProtonKind::Valve) {
+        return ProtonRef::Path {
+            path: valve.path.clone(),
+        };
+    }
+    ProtonRef::Auto
+}
+
+/// The one-line note about the Proton NR would run on, when it needs one.
+pub fn proton_note(install: Option<&ProtonInstall>) -> Option<&'static str> {
+    install
+        .filter(|install| install.kind == ProtonKind::CachyOs)
+        .map(|_| CACHYOS_NR_NOTE)
+}
+
+// ---------------------------------------------------------------------------
 // The game's own bitness (the PE header check capability defers to the backends)
 // ---------------------------------------------------------------------------
 
@@ -1313,6 +1357,60 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
             None,
             "an unsupported card has no curated scale"
         );
+    }
+
+    // -- The Proton default ---------------------------------------------------
+
+    fn install_of(kind: ProtonKind, name: &str) -> ProtonInstall {
+        ProtonInstall {
+            path: PathBuf::from(format!("/steam/{name}")),
+            name: name.to_string(),
+            kind,
+            version: None,
+            source: crate::proton::ProtonSource::SteamCommon,
+        }
+    }
+
+    fn report(installs: Vec<ProtonInstall>) -> DiscoveryReport {
+        DiscoveryReport {
+            installs,
+            roots: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn nr_defaults_to_ge_then_valve_then_auto() {
+        let ge = install_of(ProtonKind::Ge, "GE-Proton10-1");
+        let valve = install_of(ProtonKind::Valve, "Proton 9.0");
+        let cachy = install_of(ProtonKind::CachyOs, "proton-cachyos");
+
+        // GE wins even when `Auto` would pick the higher-ranked CachyOS build.
+        assert_eq!(
+            default_proton(&report(vec![cachy.clone(), ge.clone(), valve.clone()])),
+            ProtonRef::GeProton
+        );
+        // With no GE, Valve's own build is the default.
+        assert_eq!(
+            default_proton(&report(vec![cachy.clone(), valve.clone()])),
+            ProtonRef::Path {
+                path: PathBuf::from("/steam/Proton 9.0")
+            }
+        );
+        // Only CachyOS: `Auto`, and the note says its injection is disabled.
+        assert_eq!(default_proton(&report(vec![cachy])), ProtonRef::Auto);
+        assert_eq!(default_proton(&report(Vec::new())), ProtonRef::Auto);
+    }
+
+    #[test]
+    fn the_cachyos_note_fires_only_for_cachyos() {
+        let cachy = install_of(ProtonKind::CachyOs, "proton-cachyos");
+        let ge = install_of(ProtonKind::Ge, "GE-Proton10-1");
+        assert_eq!(proton_note(Some(&cachy)), Some(CACHYOS_NR_NOTE));
+        assert_eq!(proton_note(Some(&ge)), None);
+        assert_eq!(proton_note(None), None);
+        assert!(CACHYOS_NR_NOTE.contains("GE-Proton"));
+        assert!(CACHYOS_NR_NOTE.contains("CachyOS"));
     }
 
     // -- The PE header check --------------------------------------------------
