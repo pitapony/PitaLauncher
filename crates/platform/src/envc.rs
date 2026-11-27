@@ -55,6 +55,7 @@ use crate::capability::{self, Availability, Field};
 use crate::compat::CompatEntry;
 use crate::gpu::GpuProfile;
 use crate::proton::{ProtonInstall, ProtonKind};
+use crate::tier_a;
 
 /// Everything the compiler needs that is not in the profile.
 #[derive(Debug, Clone, Copy)]
@@ -472,7 +473,16 @@ impl Draft<'_> {
         match self.profile.injection {
             // Tier A is Proton's own hook, emitted by the upscaler/frame-gen
             // rows (or nothing at all for an env-only injection).
-            Injection::Auto | Injection::Off | Injection::EnvOnly | Injection::HelixSr => {}
+            Injection::Auto | Injection::Off | Injection::HelixSr => {}
+            // Tier A: Proton deploys and validates the DLLs, we inject env only
+            // (ADR-0023). The gate already ran — `require(Field::TierAInjection)`
+            // refused an older or unreadable build with the matrix's own reason —
+            // so this is the emission, and it writes nothing to disk.
+            Injection::EnvOnly => {
+                for (key, value) in tier_a::env(self.graphics.compat) {
+                    self.set(&key, &value);
+                }
+            }
             Injection::Manual => {
                 // Tier B deploys the files (in `mods::tierb`); the compiler only
                 // contributes the override that makes Wine load them.
@@ -1017,6 +1027,137 @@ mod tests {
         let error = compile_runtime(request(&profile, None)).unwrap_err();
         assert!(
             matches!(error, EnvcError::SlotConflict { resolve, .. } if resolve == RESOLVE_SLOT),
+            "{error}"
+        );
+    }
+
+    // -- Tier A (env-only injection) ----------------------------------------
+
+    fn cachyos(version: &str) -> ProtonInstall {
+        ProtonInstall {
+            path: PathBuf::from("/usr/share/steam/compatibilitytools.d/proton-cachyos"),
+            name: "proton-cachyos".to_string(),
+            kind: crate::proton::ProtonKind::CachyOs,
+            version: Some(format!("proton-cachyos {version}")),
+            source: crate::proton::ProtonSource::SystemCompatibilityTools,
+        }
+    }
+
+    fn unreadable_cachyos() -> ProtonInstall {
+        ProtonInstall {
+            version: None,
+            ..cachyos("11.0-20260516")
+        }
+    }
+
+    fn compat_with_dll(dll: &str) -> CompatEntry {
+        CompatEntry::from_toml(&format!(
+            "[game]\nstore = \"steam\"\nstore_id = \"620\"\ntitle = \"x\"\n\n\
+             [upscaling]\npreferred_dll = \"{dll}\"\n"
+        ))
+        .unwrap()
+    }
+
+    fn rdna4() -> GpuProfile {
+        GpuProfile {
+            vendor: crate::gpu::GpuArch::Rdna4.vendor(),
+            arch: crate::gpu::GpuArch::Rdna4,
+            device_id: None,
+            name: None,
+            mesa: None,
+            vram_bytes: None,
+            ntsync: false,
+            hdr: crate::gpu::HdrSupport::Unknown,
+            warnings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tier_a_env_only_emits_the_hook_and_the_compat_dll() {
+        let mut profile = Profile::new(game(), "Tier A");
+        profile.injection = Injection::EnvOnly;
+        let entry = compat_with_dll("dbghelp.dll");
+        let install = cachyos("11.0-20260516");
+        let gpu = rdna4();
+
+        let compiled = compile(
+            request(&profile, Some(&install)),
+            GraphicsContext::new(&gpu, Some(&entry)),
+        )
+        .unwrap();
+        assert_eq!(
+            compiled.env,
+            vec![
+                ("PROTON_USE_OPTISCALER".to_string(), "1".to_string()),
+                (
+                    "PROTON_OPTISCALER_NAME".to_string(),
+                    "dbghelp.dll".to_string()
+                ),
+            ]
+        );
+        // Env only: nothing is installed, so there is no ini and no override.
+        assert!(compiled.ini.is_empty());
+    }
+
+    #[test]
+    fn tier_a_env_only_falls_back_to_dxgi_without_a_compat_preference() {
+        let mut profile = Profile::new(game(), "Tier A");
+        profile.injection = Injection::EnvOnly;
+        let install = cachyos("11.0-20260516");
+
+        let compiled = compile(
+            request(&profile, Some(&install)),
+            GraphicsContext::new(&rdna4(), None),
+        )
+        .unwrap();
+        assert_eq!(
+            compiled.env,
+            vec![
+                ("PROTON_USE_OPTISCALER".to_string(), "1".to_string()),
+                ("PROTON_OPTISCALER_NAME".to_string(), "dxgi.dll".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn tier_a_env_only_is_refused_for_an_old_or_unreadable_build() {
+        let mut profile = Profile::new(game(), "Tier A");
+        profile.injection = Injection::EnvOnly;
+        let gpu = rdna4();
+
+        for (install, expected) in [
+            (
+                cachyos("10.0-20251101"),
+                capability::reason::TIER_A_NEEDS_CACHYOS,
+            ),
+            (
+                unreadable_cachyos(),
+                capability::reason::TIER_A_VERSION_UNREADABLE,
+            ),
+        ] {
+            let error = compile(
+                request(&profile, Some(&install)),
+                GraphicsContext::new(&gpu, None),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    EnvcError::Unavailable { field: Field::TierAInjection, ref reason }
+                        if reason == expected
+                ),
+                "{error}"
+            );
+        }
+
+        // Steam decides the runtime: there is no build to gate.
+        let error = compile(request(&profile, None), GraphicsContext::new(&gpu, None)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                EnvcError::Unavailable { field: Field::TierAInjection, ref reason }
+                    if reason == capability::reason::TIER_A_STEAM_DEFAULT
+            ),
             "{error}"
         );
     }
