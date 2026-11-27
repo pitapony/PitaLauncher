@@ -992,7 +992,9 @@ mod tests {
 
             // Wait for the fake CLI to be alive before cancelling: the signal
             // has to reach a running process, not a flag set before the spawn.
-            for _ in 0..500 {
+            // The budget is generous (30 s) because a heavily loaded machine can
+            // take seconds to fork/exec a shell; a short wait makes this a flake.
+            for _ in 0..3000 {
                 if marker.exists() {
                     break;
                 }
