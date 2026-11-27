@@ -263,12 +263,20 @@ Hand this to a tester with a TV. Every line is unverified until it is checked
 here; record the result beside it. The full beta walk — clean install to a
 launched game, including this console path — is [`docs/beta-testing.md`](beta-testing.md).
 
-**Setup**
+The checklist has two halves. The first is **in-app console mode**
+(`pitagames --console`, or `F11`/`Guide`): the couch shell on an ordinary
+desktop session. The second is the **console session** — `PitaGames (console)`
+picked at the login screen, `gamescope` owning the output (`docs/v1.1-session.md`).
+The session is the TV path proper; run both, then the **EAC entry** block if a
+protected game is installed.
+
+**Setup — in-app console mode**
 
 - [ ] `pitagames --console` on the target machine, a pad connected by USB or
       Bluetooth, no mouse or keyboard attached.
 - [ ] The window is fullscreen and undecorated; nothing is cut off at the edges
-      (overscan). If it is, raise `[ui] safe_area_pct` in `config.toml`.
+      (overscan). If it is, raise `[ui.display] safe_area_pct` in
+      `~/.config/pitagames/config.toml`.
 
 **Reading at couch distance (≈ 2–3 m)**
 
@@ -309,6 +317,83 @@ launched game, including this console path — is [`docs/beta-testing.md`](beta-
       it live and the footer hint updates; `Discard` reverts.
 - [ ] Start once with `--safe-mode`: the window renders and the `Safe mode` chip
       shows.
+
+**The console session (the login-screen path, `docs/v1.1-session.md`)**
+
+- [ ] Pick **PitaGames (console)** in the display manager's session list. One
+      `gamescope` takes the output fullscreen and starts the launcher's systemd
+      unit (`pitagames --console --session`); a launched game renders in that one
+      compositor — **no nested gamescope**.
+- [ ] `pitagames-cli session` reports both generated files present and current;
+      `pitagames-cli session --print` shows the exact `gamescope` argv the entry
+      will run, built from `[ui.display.session]` in `config.toml`.
+- [ ] **If the session comes up black or does not start**, these are the first
+      checks:
+  - [ ] `journalctl --user -u pitagames-session` — the unit's own log. It restarts
+        on failure (`Restart=on-failure`), so an early crash shows here.
+  - [ ] The unit must see gamescope's **`WAYLAND_DISPLAY`**. The entry starts the
+        unit with `systemctl --user` *inside* gamescope, so the socket should be
+        inherited; if the launcher cannot open a Wayland connection, confirm
+        `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` reached the unit
+        (`systemctl --user show-environment`).
+  - [ ] If the unit was written this boot and the display manager did not list it,
+        run `systemctl --user daemon-reload` (newer systemd watches
+        `~/.config/systemd/user`; older versions need the reload).
+- [ ] **Resolution switching.** With `[ui.display.session]` unset (the default),
+      gamescope uses the TV's **preferred mode** and nothing is pinned: change
+      the TV's resolution or refresh and the session follows on the next login.
+      Set `resolution = { width, height, refresh_hz }` to pin a mode and confirm
+      the TV reports it; remove it to return to the preferred mode. A zero
+      width/height is dropped with a warning rather than asked of gamescope.
+- [ ] **HDR.** `[ui.display.session] hdr = true` adds `--hdr-enabled`. The TV's
+      own HDR indicator should light and highlights should not look washed out;
+      toggle it off to compare. A TV or cable mode without HDR shows none — that
+      is not an error.
+- [ ] **VRR / adaptive-sync.** `[ui.display.session] vrr = true` adds
+      `--adaptive-sync`. With a VRR-capable TV and connection the TV's VRR
+      indicator lights and panning shows no tearing; compare with it off. Without
+      VRR hardware nothing changes — that is not an error.
+- [ ] **Overscan and safe area.** The session's fullscreen has no desktop title
+      bars; confirm nothing is cut off at the edges and that the launcher's own
+      `[ui.display] safe_area_pct` margin is right. Raise `safe_area_pct` if the
+      TV overscans.
+- [ ] **Focus return in the session.** Launch a supervised game and exit it: the
+      launcher returns **focused inside the same gamescope instance**, with no
+      compositor restart and no second gamescope. The "game ended — press Guide"
+      badge covers a compositor that refuses focus.
+- [ ] **Monitor pick.** With two displays, `[ui.display] monitor = "HDMI-A-1"`
+      (the connector name) makes the session prefer that output
+      (`--prefer-output`).
+- [ ] **Exit to desktop.** The overlay's *Exit to desktop* row ends the session
+      (`loginctl terminate-session`); the next login returns to it.
+
+**The EAC entry and the session**
+
+Some games are protected by **Easy Anti-Cheat Linux v2**, which runs only from
+the CachyOS **EAC entry** (the `linux-cachyos-eac` kernel plus the CachyOS-signed
+systemd-boot) — see [`docs/eac-v2.md`](eac-v2.md) and ADR-0031.
+
+- [ ] The console session boots into a **normal** entry by default, so an EAC v2
+      game started from the session still needs the EAC entry: its game page shows
+      the same "reboot into the EAC entry and play" guidance as the desktop shell.
+      Rebooting ends the session (and the next login returns to it); relaunch the
+      game once you are in the EAC entry.
+- [ ] **PitaGames's own processes are user-space** — the launcher, WebKitGTK/GTK,
+      Mesa and gamescope — so the launcher and the session run on the EAC entry;
+      nothing in the session needs a kernel module, and `PITAGAMES_SESSION=1`
+      still suppresses a per-game gamescope wrapper, so there is **no nested
+      gamescope** there either.
+- [ ] **DKMS modules do not load in the EAC entry.** The EAC kernel loads only
+      modules signed when it was built, so NVIDIA, ZFS and r8125 must come from
+      `linux-cachyos-eac-*` packages, and other DKMS modules (for example
+      `virtualbox-host-dkms`) will not load there. The two validated in-house
+      paths are AMD/Mesa and need no DKMS module; a machine that depends on a
+      DKMS GPU driver (NVIDIA) may have no working display in the EAC entry.
+- [ ] **Overlays.** The user-space overlays — gamescope itself and MangoHud —
+      still work in the EAC entry; kernel-level overlays and mods do not.
+- [ ] Run `pitagames-cli eac`: off the entry a protected game reads *EAC v2 &
+      needs the EAC entry*; on the entry it reads *EAC v2 & ready*. Reproduce the
+      game page's guidance from inside the session.
 
 Report the results (pass/fail and any photo) back to the project so this document
 can lose its "not tested on a TV" marker.

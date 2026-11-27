@@ -147,7 +147,7 @@ pitagames --console       # or press F11 / the pad's Guide from the desktop shel
 ```
 
 - [ ] The window is **fullscreen and undecorated**, and nothing is cut off at the
-      edges. If it is, raise `[ui] safe_area_pct` in
+      edges. If it is, raise `[ui.display] safe_area_pct` in
       `~/.config/pitagames/config.toml` and retry.
 - [ ] With **no mouse or keyboard attached**, on the Home: `Down` enters the
       shelves; `Left`/`Right` walk a shelf and it scrolls; `Confirm` opens a game.
@@ -178,7 +178,11 @@ pitagames --console       # or press F11 / the pad's Guide from the desktop shel
 A TV is the one thing neither in-house machine has, so a tester with a TV is the
 only way a TV claim can be checked. The canonical checklist lives at the end of
 [`docs/console-mode.md`](console-mode.md#tv-checklist-not-yet-run); run every
-line there and record the result beside it.
+line there and record the result beside it. That checklist also carries the
+**console session** (pick `PitaGames (console)` at the login screen) with its
+resolution/HDR/VRR/overscan/focus-return lines, and the **EAC-entry** block (our
+processes are user-space and run on the entry, DKMS modules do not —
+`docs/eac-v2.md`).
 
 - [ ] Overscan: nothing is cut off; the safe-area margin is right.
 - [ ] Legibility at ≈ 2–3 m: titles, captions and badges read without leaning in.
@@ -186,6 +190,9 @@ line there and record the result beside it.
 - [ ] Contrast holds in a bright room and a dark room.
 - [ ] A protected game's anti-cheat badge is noticed before anyone enables
       injection.
+- [ ] **The console session** at the login screen: resolution switching, HDR,
+      VRR/adaptive-sync, overscan and focus return all behave as the session
+      checklist describes.
 - [ ] **Attach a photo of the screen** — that is the evidence for every line above.
 
 ## 8. Recovery: safe mode

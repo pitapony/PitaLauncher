@@ -554,6 +554,52 @@ mod tests {
         assert!(!path.exists());
     }
 
+    /// The TV checklist is the human gate for the session and the EAC entry.
+    ///
+    /// The docs counterpart of the capability/nr docs-agreement tests: the
+    /// checklist must keep covering every acceptance topic of the console
+    /// session (resolution, HDR, VRR, overscan, focus return) and the EAC-entry
+    /// interaction, and it must keep the "not tested on a TV" marker until a
+    /// community tester passes it (ADR-0004).
+    #[test]
+    fn the_tv_checklist_covers_the_session_and_the_eac_entry() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs/console-mode.md");
+        let doc = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("{} is unreadable: {error}", path.display()));
+
+        // The marker stays until a community tester runs the checklist (ADR-0004).
+        assert!(
+            doc.contains("not tested on a TV"),
+            "docs/console-mode.md must keep the \"not tested on a TV\" marker"
+        );
+
+        // The checklist is everything from its heading to the end of the file.
+        let checklist = doc
+            .split_once("## TV checklist")
+            .expect("docs/console-mode.md must carry a `## TV checklist` section")
+            .1
+            .to_ascii_lowercase();
+
+        for (topic, needle) in [
+            ("resolution switching", "resolution"),
+            ("HDR", "hdr"),
+            ("VRR / adaptive-sync", "vrr"),
+            ("overscan / safe area", "overscan"),
+            ("focus return", "focus"),
+            ("the v1.1 login-screen session", "console session"),
+            ("the EAC-entry interaction", "eac entry"),
+            ("the DKMS caveat", "dkms"),
+        ] {
+            assert!(
+                checklist.contains(needle),
+                "the TV checklist must cover {topic} (`{needle}`)"
+            );
+        }
+    }
+
     #[test]
     fn a_packaged_session_file_is_found_in_any_directory() {
         let dir = tempfile::tempdir().unwrap();
