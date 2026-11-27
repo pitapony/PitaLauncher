@@ -1,0 +1,10 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_USE_OPTISCALER=1
+  PROTON_OPTISCALER_NAME=dbghelp.dll
+wrappers:
+ini:
+warnings:
