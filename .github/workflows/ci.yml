@@ -34,13 +34,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
 
       - name: Formatting
-        run: cargo fmt --check -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-mods -p pitagames-stores -p pitagames-secrets -p pitagames-input -p pitagames-shim -p pitagames-cli
+        run: cargo fmt --check -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-mods -p pitagames-repair -p pitagames-stores -p pitagames-secrets -p pitagames-input -p pitagames-shim -p pitagames-cli
 
       - name: Clippy
-        run: cargo clippy -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-mods -p pitagames-stores -p pitagames-secrets -p pitagames-input -p pitagames-shim -p pitagames-cli --all-targets -- -D warnings
+        run: cargo clippy -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-mods -p pitagames-repair -p pitagames-stores -p pitagames-secrets -p pitagames-input -p pitagames-shim -p pitagames-cli --all-targets -- -D warnings
 
       - name: Tests
-        run: cargo test -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-mods -p pitagames-stores -p pitagames-secrets -p pitagames-input -p pitagames-shim -p pitagames-cli
+        run: cargo test -p pitagames-core -p pitagames-db -p pitagames-art -p pitagames-metadata -p pitagames-platform -p pitagames-mods -p pitagames-repair -p pitagames-stores -p pitagames-secrets -p pitagames-input -p pitagames-shim -p pitagames-cli
 
   gui:
     name: gui build (archlinux container)
