@@ -84,6 +84,15 @@ pub const GRAPHICS_HINTS: [ScreenHint; 2] = [
     ScreenHint::new(Action::Back, "Back"),
 ];
 
+/// The Settings screen's cheat-sheet: Change, Back.
+///
+/// The screen's `Confirm` flips the focused toggle or steps the focused number;
+/// `Menu`/`Guide` are the shell's, so they are not repeated.
+pub const SETTINGS_HINTS: [ScreenHint; 2] = [
+    ScreenHint::new(Action::Confirm, "Change"),
+    ScreenHint::new(Action::Back, "Back"),
+];
+
 /// The default hint row for a map: each action's first binding, labelled.
 ///
 /// An action the map leaves unbound is skipped, so a row never claims a key a
@@ -346,6 +355,27 @@ mod tests {
         let keyboard = InputMap::keyboard();
         assert_eq!(
             hints_for(&keyboard, &GRAPHICS_HINTS)
+                .iter()
+                .map(|hint| hint.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Enter", "Esc"]
+        );
+    }
+
+    #[test]
+    fn the_settings_row_names_change_and_back() {
+        let map = InputMap::gamepad("pad");
+        let pad_row = hints_for(&map, &SETTINGS_HINTS);
+        let named: Vec<(&str, &str)> = pad_row
+            .iter()
+            .map(|hint| (hint.label.as_str(), hint.name.as_str()))
+            .collect();
+        assert_eq!(named, [("A", "Change"), ("B", "Back")]);
+
+        let keyboard = InputMap::keyboard();
+        let keyboard_row = hints_for(&keyboard, &SETTINGS_HINTS);
+        assert_eq!(
+            keyboard_row
                 .iter()
                 .map(|hint| hint.label.as_str())
                 .collect::<Vec<_>>(),

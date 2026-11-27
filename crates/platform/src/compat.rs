@@ -32,7 +32,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -721,6 +721,140 @@ pub fn default_shipped_dirs() -> Vec<PathBuf> {
 /// The default user-override directory: `$XDG_CONFIG_HOME/pitagames/compat`.
 pub fn default_user_dirs() -> Vec<PathBuf> {
     pitagames_core::paths::compat_dir().into_iter().collect()
+}
+
+/// What one [`sync_shipped`] run did.
+///
+/// The Settings screen shows [`synced`](Self::synced) as one line; the warnings
+/// name a source that could not be read, while a missing source directory is the
+/// normal case and is not a warning.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SyncReport {
+    /// The directory the files were copied into.
+    pub target: PathBuf,
+    /// The files written or updated, in source order.
+    pub copied: Vec<PathBuf>,
+    /// The files whose target copy already held identical bytes.
+    pub unchanged: usize,
+    /// Sources that could not be read (a missing directory is not one).
+    pub warnings: Vec<String>,
+}
+
+impl SyncReport {
+    /// How many files the run wrote (or updated).
+    pub fn synced(&self) -> usize {
+        self.copied.len()
+    }
+
+    /// Whether anything went wrong.
+    pub fn is_ok(&self) -> bool {
+        self.warnings.is_empty()
+    }
+
+    /// One line fit for a status area.
+    pub fn summary(&self) -> String {
+        if let Some(warning) = self.warnings.first() {
+            return warning.clone();
+        }
+        format!("synced {} file(s)", self.copied.len())
+    }
+}
+
+/// The directories a [`sync_shipped`] copies *from*.
+///
+/// The shipped database's locations minus the data-directory copy the sync
+/// writes to: a copy must never be its own source, or a stale copy would win the
+/// loader's later-source merge over a freshly packaged database, and a sync
+/// could never pick up a package update.
+pub fn sync_sources(target: &Path) -> Vec<PathBuf> {
+    default_shipped_dirs()
+        .into_iter()
+        .filter(|directory| directory != target)
+        .collect()
+}
+
+/// Copy the shipped `*.toml` entries into `target`.
+///
+/// The documented offline compat-DB sync: the package database is the source and
+/// the data directory is the copy [`default_shipped_dirs`] reads beside it. The
+/// copy is idempotent — a file whose target already holds identical bytes is not
+/// rewritten — a non-`.toml` sibling is ignored, and a source directory that does
+/// not exist is skipped rather than reported (a checkout with no package is the
+/// normal case). The target directory is created if it is missing.
+pub fn sync_shipped(sources: &[PathBuf], target: &Path) -> SyncReport {
+    let mut report = SyncReport {
+        target: target.to_path_buf(),
+        ..SyncReport::default()
+    };
+
+    if let Err(error) = std::fs::create_dir_all(target) {
+        report
+            .warnings
+            .push(format!("could not create {}: {error}", target.display()));
+        return report;
+    }
+
+    // Later source directories win, matching the loader's merge order: a file
+    // with the same name in a later directory overwrites the earlier copy.
+    let mut files: BTreeMap<String, (PathBuf, Vec<u8>)> = BTreeMap::new();
+    for dir in sources {
+        if !dir.is_dir() {
+            if dir.exists() {
+                report
+                    .warnings
+                    .push(format!("{} is not a directory; skipped", dir.display()));
+            }
+            continue;
+        }
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                report
+                    .warnings
+                    .push(format!("could not read {}: {error}", dir.display()));
+                continue;
+            }
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "toml"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    let name = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    files.insert(name, (path, bytes));
+                }
+                Err(error) => report
+                    .warnings
+                    .push(format!("could not read {}: {error}", path.display())),
+            }
+        }
+    }
+
+    for (name, (source, bytes)) in files {
+        let destination = target.join(&name);
+        // An unchanged copy is left alone, so a sync never rewrites the tree
+        // and never bumps an mtime the loader would care about.
+        if std::fs::read(&destination).is_ok_and(|existing| existing == bytes) {
+            report.unchanged += 1;
+            continue;
+        }
+        match std::fs::write(&destination, &bytes) {
+            Ok(()) => report.copied.push(source),
+            Err(error) => report.warnings.push(format!(
+                "could not write {}: {error}",
+                destination.display()
+            )),
+        }
+    }
+
+    report
 }
 
 fn env_path(name: &str) -> Option<PathBuf> {
@@ -1726,5 +1860,115 @@ store_id = "2"
         drop(guard);
 
         assert_eq!(dirs.first(), Some(&PathBuf::from(SYSTEM_COMPAT_DIR)));
+    }
+
+    #[test]
+    fn the_sync_sources_never_include_the_target_copy() {
+        let guard = ENV_LOCK.lock().unwrap();
+        unsafe { std::env::remove_var(COMPAT_DIR_ENV) };
+        let dirs = default_shipped_dirs();
+        drop(guard);
+
+        // The target is the data-directory copy, the last shipped location; a
+        // checkout/host with no data directory has none to exclude.
+        if dirs.len() < 2 {
+            return;
+        }
+        let target = dirs
+            .last()
+            .cloned()
+            .expect("there is a data-directory copy");
+        let sources = sync_sources(&target);
+        assert!(
+            !sources.is_empty(),
+            "the packaged database is still a source"
+        );
+        assert!(
+            !sources.contains(&target),
+            "a copy must never be its own source: {sources:?}"
+        );
+        assert!(sources.contains(&PathBuf::from(SYSTEM_COMPAT_DIR)));
+    }
+
+    // -- The offline sync (`platform::compat::sync_shipped`) ---------------
+
+    #[test]
+    fn a_sync_copies_the_toml_files_into_the_target() {
+        let source = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("compat");
+        write(source.path(), "cyberpunk.toml", CYBERPUNK);
+        // A non-toml sibling is ignored; the sync only owns the database.
+        std::fs::write(source.path().join("README.md"), "notes").unwrap();
+
+        let report = sync_shipped(&[source.path().to_path_buf()], &target);
+        assert!(report.is_ok(), "{:?}", report.warnings);
+        assert_eq!(report.synced(), 1);
+        assert_eq!(report.unchanged, 0);
+        assert_eq!(report.target, target);
+        assert!(target.join("cyberpunk.toml").is_file());
+        assert!(!target.join("README.md").exists());
+
+        // The copy is a real entry: the loader reads it as the shipped layer.
+        let db = CompatDb::load_from(std::slice::from_ref(&target), &[]);
+        assert!(db.contains(&GameId::new(Store::Steam, "1091500")));
+    }
+
+    #[test]
+    fn a_second_sync_leaves_an_unchanged_copy_alone() {
+        let source = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("compat");
+        write(source.path(), "cyberpunk.toml", CYBERPUNK);
+
+        let first = sync_shipped(&[source.path().to_path_buf()], &target);
+        assert_eq!(first.synced(), 1);
+
+        // Idempotent: identical bytes are counted, never rewritten.
+        let second = sync_shipped(&[source.path().to_path_buf()], &target);
+        assert_eq!(second.synced(), 0);
+        assert_eq!(second.unchanged, 1);
+
+        // A changed source overwrites the stale copy.
+        write(source.path(), "cyberpunk.toml", &format!("{CYBERPUNK}\n"));
+        let third = sync_shipped(&[source.path().to_path_buf()], &target);
+        assert_eq!(third.synced(), 1);
+        assert_eq!(
+            std::fs::read_to_string(target.join("cyberpunk.toml")).unwrap(),
+            format!("{CYBERPUNK}\n")
+        );
+    }
+
+    #[test]
+    fn a_sync_skips_a_missing_source_and_creates_the_target() {
+        let base = tempfile::tempdir().unwrap();
+        let missing = base.path().join("no-such-dir");
+        let target = base.path().join("created");
+
+        let report = sync_shipped(std::slice::from_ref(&missing), &target);
+        // A checkout with no package is normal: skipped, not a warning.
+        assert!(report.is_ok(), "{:?}", report.warnings);
+        assert_eq!(report.synced(), 0);
+        assert!(target.is_dir(), "the target is created for a later sync");
+    }
+
+    #[test]
+    fn a_later_source_override_wins_the_sync() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let target = base.path().join("compat");
+        write(first.path(), "cyberpunk.toml", "old");
+        write(second.path(), "cyberpunk.toml", "new");
+
+        let report = sync_shipped(
+            &[first.path().to_path_buf(), second.path().to_path_buf()],
+            &target,
+        );
+        assert_eq!(report.synced(), 1);
+        assert_eq!(
+            std::fs::read_to_string(target.join("cyberpunk.toml")).unwrap(),
+            "new"
+        );
     }
 }

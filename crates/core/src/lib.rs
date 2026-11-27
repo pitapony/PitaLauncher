@@ -58,6 +58,6 @@ pub use session::{
 };
 pub use store::{AntiCheat, Game, GameId, OwnedGame, Store, UnknownAntiCheat, UnknownStore};
 pub use ui::{
-    AppConfig, ConfigError, DisplayConfig, SessionDisplay, SessionResolution, Shell, StartMode,
-    UiConfig, UnknownShell, UnknownStartMode,
+    AppConfig, CompatConfig, ConfigError, DisplayConfig, SessionDisplay, SessionResolution, Shell,
+    StartMode, UiConfig, UnknownShell, UnknownStartMode,
 };

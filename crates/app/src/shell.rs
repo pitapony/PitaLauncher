@@ -393,15 +393,20 @@ impl ShellState {
         (self.shell)()
     }
 
-    /// Switch to the other shell and remember it.
+    /// Switch to a specific shell and remember it.
     ///
     /// The window is reconfigured first so a failed window call cannot leave the
     /// CSS claiming a shell the window is not in.
+    pub fn set(&mut self, shell: Shell) {
+        apply_to_window(&window_config(shell, &self.display));
+        self.shell.set(shell);
+        self.persist(shell);
+    }
+
+    /// Switch to the other shell and remember it.
     pub fn toggle(&mut self) {
         let next = self.shell().toggled();
-        apply_to_window(&window_config(next, &self.display));
-        self.shell.set(next);
-        self.persist(next);
+        self.set(next);
     }
 
     /// Write the shell the player chose, so `Remember` opens there next time.
