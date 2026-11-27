@@ -9,6 +9,9 @@ description = "Store backends and metadata parsers for PitaGames"
 [dependencies]
 libc.workspace = true
 pitagames-core.workspace = true
+# `mod_install` reuses the shared `%command%` capture parser rather than
+# writing a second one for the NR/HelixSR installers.
+pitagames-mods.workspace = true
 notify.workspace = true
 portable-pty.workspace = true
 regex.workspace = true
