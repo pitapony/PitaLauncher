@@ -110,9 +110,11 @@ impl InputMap {
     }
 
     /// The built-in keyboard layout: arrows *and* WASD move focus, `Enter`/`Space`
-    /// confirm, `Esc` goes back, `Tab`/`E` and `Q` switch tabs, `M` opens the
-    /// shell menu (the pad's `Start`), `F11` switches shells (the pad's `Guide`)
-    /// and `F` opens the on-screen keyboard (the pad's `Search`).
+    /// confirm, `Esc` goes back, `C` opens the focused item's context action
+    /// (the pad's `West` — the game page's Graphics screen), `Tab`/`E` and `Q`
+    /// switch tabs, `M` opens the shell menu (the pad's `Start`), `F11` switches
+    /// shells (the pad's `Guide`) and `F` opens the on-screen keyboard (the pad's
+    /// `Search`).
     pub fn keyboard() -> Self {
         let mut map = Self::new(KEYBOARD_DEVICE);
         map.bind(Action::NavigateUp, Binding::key(Key::ArrowUp));
@@ -126,6 +128,10 @@ impl InputMap {
         map.bind(Action::Confirm, Binding::key(Key::Enter));
         map.add_binding(Action::Confirm, Binding::key(Key::Space));
         map.bind(Action::Back, Binding::key(Key::Escape));
+        // `C` is the keyboard's context action (the pad's `West`): the game
+        // page's Graphics screen. While a text field has focus the app's pump
+        // yields typing to the field, so a `c` still types there.
+        map.bind(Action::Context, Binding::key(Key::C));
         // `F` is "find": the keyboard's text-entry button. While a text field
         // has focus the app's pump yields typing to the field, so an `f` still
         // types an `f` there.
@@ -474,6 +480,8 @@ mod tests {
             &[Binding::key(Key::Enter), Binding::key(Key::Space)]
         );
         assert_eq!(map.binding(Action::Back), &[Binding::key(Key::Escape)]);
+        // `C` is the keyboard's context action (the pad's `West`).
+        assert_eq!(map.binding(Action::Context), &[Binding::key(Key::C)]);
         // `M` opens the shell menu and `F11` is the shell toggle: the keyboard's
         // answers to the pad's `Start` and `Guide`.
         assert_eq!(map.binding(Action::Menu), &[Binding::key(Key::M)]);
