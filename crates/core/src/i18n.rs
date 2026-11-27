@@ -19,7 +19,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// The `en` catalog, embedded so the shipped binary carries its own strings.
@@ -171,6 +170,7 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
     use std::fs;
+    use std::path::{Path, PathBuf};
 
     #[test]
     fn the_en_catalog_parses_and_has_no_empty_values() {
