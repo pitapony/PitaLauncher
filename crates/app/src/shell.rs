@@ -218,19 +218,23 @@ pub fn place_at_startup(window: &Window, config: &WindowConfig) {
         .collect();
     let infos: Vec<MonitorInfo> = attached.iter().map(|(_, info)| info.clone()).collect();
 
-    let Some(index) = pitagames_core::ui::select_monitor(config.monitor.as_deref(), &infos) else {
-        return;
-    };
-
     // A fullscreen window is put on a monitor by handle, not by position.
     if config.fullscreen {
+        let Some(index) = pitagames_core::ui::select_monitor(config.monitor.as_deref(), &infos)
+        else {
+            return;
+        };
         let handle = attached[index].0.clone();
         window.set_fullscreen(Some(Fullscreen::Borderless(Some(handle))));
         return;
     }
 
-    let (x, y) = attached[index].1.center(config.width, config.height);
-    window.set_outer_position(PhysicalPosition::new(x, y));
+    // The windowed placement is the pure model, so the startup seam and its
+    // tests share one answer. `Placement::Default` leaves the window where the
+    // window manager put it (the primary).
+    if let Placement::Center { x, y } = config.startup_placement(&infos) {
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
 }
 
 /// Reconfigure the live window for a config.

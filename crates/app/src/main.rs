@@ -162,9 +162,7 @@ fn run_gui(args: &shell::ShellArgs) {
     let window_config = shell::window_config(shell, &display);
     let window = shell::window_builder(&window_config);
 
-    // Dioxus installs a default Window/Edit/Help menu bar on a decorated
-    // window. The launcher has no use for it (navigation lives in the left
-    // rail), so pass an empty menu.
+    // The built window's config is kept for the startup placement below.
     let startup_config = window_config.clone();
     let mut config = dioxus::desktop::Config::new()
         .with_window(window)
@@ -174,6 +172,9 @@ fn run_gui(args: &shell::ShellArgs) {
         .with_on_window(move |window, _dom| {
             shell::place_at_startup(&window, &startup_config);
         })
+        // Dioxus installs a default Window/Edit/Help menu bar. The launcher has
+        // no use for it (navigation lives in the left rail), so pass an empty
+        // menu.
         .with_menu(None);
     // The window icon is painted in code (`icon::rgba`); without one the
     // window falls back to the toolkit's default placeholder.
