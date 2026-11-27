@@ -8,6 +8,7 @@ members = [
     "crates/metadata",
     "crates/platform",
     "crates/mods",
+    "crates/repair",
     "crates/secrets",
     "crates/input",
     "crates/shim",
@@ -31,6 +32,7 @@ pitagames-stores = { path = "crates/stores" }
 pitagames-metadata = { path = "crates/metadata" }
 pitagames-platform = { path = "crates/platform" }
 pitagames-mods = { path = "crates/mods" }
+pitagames-repair = { path = "crates/repair" }
 pitagames-secrets = { path = "crates/secrets" }
 pitagames-input = { path = "crates/input" }
 

@@ -70,6 +70,19 @@ pub enum Arch {
 }
 
 impl Arch {
+    /// Every architecture, in capability order.
+    ///
+    /// `docs/compat-contribution.md` lists each one; a test asserts the doc
+    /// names every member so the contribution guide cannot go stale.
+    pub const ALL: [Self; 6] = [
+        Self::Rdna4,
+        Self::Rdna3,
+        Self::Rdna2,
+        Self::Rdna1,
+        Self::Rtx,
+        Self::Arc,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Rdna4 => "rdna4",
@@ -177,6 +190,16 @@ pub enum GameApi {
 }
 
 impl GameApi {
+    /// Every upscaler API a game's own settings can select.
+    pub const ALL: [Self; 6] = [
+        Self::Dlss,
+        Self::Fsr2,
+        Self::Fsr3,
+        Self::Fsr31,
+        Self::Fsr4,
+        Self::Xess,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Dlss => "dlss",
@@ -225,6 +248,24 @@ pub enum UpscalerId {
 }
 
 impl UpscalerId {
+    /// Every recommended-upscaler id, in `as_str` order.
+    pub const ALL: [Self; 14] = [
+        Self::Native,
+        Self::DlssNative,
+        Self::Fsr4Upgrade,
+        Self::Fsr4Rdna3,
+        Self::DlssToFsr4,
+        Self::DlssToFsr31,
+        Self::DlssToXess,
+        Self::XessUpgrade,
+        Self::Ffx3Upgrade,
+        Self::Ffx4Upgrade,
+        Self::HlxDlss,
+        Self::HlxFsr4,
+        Self::HlxFsr4DropIn,
+        Self::SystemFsr,
+    ];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Native => "native",
@@ -282,6 +323,15 @@ pub enum PreferredDll {
 }
 
 impl PreferredDll {
+    /// Every injectable DLL a game can prefer for a manual OptiScaler deploy.
+    pub const ALL: [Self; 5] = [
+        Self::Dxgi,
+        Self::D3d12,
+        Self::Dbghelp,
+        Self::Winmm,
+        Self::Version,
+    ];
+
     pub const fn file_name(self) -> &'static str {
         match self {
             Self::Dxgi => "dxgi.dll",
@@ -314,6 +364,9 @@ pub enum HelixsrMode {
 }
 
 impl HelixsrMode {
+    /// Both HelixSR products.
+    pub const ALL: [Self; 2] = [Self::Scaler, Self::Fsr31Dropin];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Scaler => "scaler",
@@ -339,6 +392,9 @@ pub enum WrapperId {
 }
 
 impl WrapperId {
+    /// Every runtime wrapper the database can suggest.
+    pub const ALL: [Self; 3] = [Self::Gamemoderun, Self::Mangohud, Self::Gamescope];
+
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Gamemoderun => "gamemoderun",
@@ -365,6 +421,19 @@ pub enum NrBackendChoice {
 }
 
 impl NrBackendChoice {
+    /// Every backend choice the `[neural_rendering] backend` key accepts.
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Rdna4Upstream, Self::Rdna3Fork];
+
+    /// The TOML value, matching the `serde` names (the hyphenated aliases are
+    /// also accepted; this is the canonical spelling the guide lists).
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Rdna4Upstream => "rdna4_upstream",
+            Self::Rdna3Fork => "rdna3_fork",
+        }
+    }
+
     /// Resolve the choice to a backend, or `None` for `Auto`.
     pub const fn backend(self) -> Option<NrBackend> {
         match self {
@@ -1970,5 +2039,83 @@ store_id = "2"
             std::fs::read_to_string(target.join("cyberpunk.toml")).unwrap(),
             "new"
         );
+    }
+
+    #[test]
+    fn the_contribution_guide_lists_every_schema_value() {
+        // `docs/compat-contribution.md` is the copy-paste guide for adding an
+        // entry. Every closed enum the schema accepts has to appear verbatim, so
+        // a new variant (or a renamed one) cannot be shipped without updating
+        // the guide a contributor copies from.
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs/compat-contribution.md");
+        let doc = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        for value in Arch::ALL {
+            assert!(
+                doc.contains(&format!("`{}`", value.as_str())),
+                "docs/compat-contribution.md is missing the arch `{}`",
+                value.as_str()
+            );
+        }
+        for value in GameApi::ALL {
+            assert!(
+                doc.contains(&format!("`{}`", value.as_str())),
+                "docs/compat-contribution.md is missing the game API `{}`",
+                value.as_str()
+            );
+        }
+        for value in UpscalerId::ALL {
+            assert!(
+                doc.contains(&format!("`{}`", value.as_str())),
+                "docs/compat-contribution.md is missing the upscaler `{}`",
+                value.as_str()
+            );
+        }
+        for value in PreferredDll::ALL {
+            assert!(
+                doc.contains(value.file_name()),
+                "docs/compat-contribution.md is missing the DLL `{}`",
+                value.file_name()
+            );
+        }
+        for value in HelixsrMode::ALL {
+            assert!(
+                doc.contains(&format!("`{}`", value.as_str())),
+                "docs/compat-contribution.md is missing the HelixSR mode `{}`",
+                value.as_str()
+            );
+        }
+        for value in WrapperId::ALL {
+            assert!(
+                doc.contains(&format!("`{}`", value.as_str())),
+                "docs/compat-contribution.md is missing the wrapper `{}`",
+                value.as_str()
+            );
+        }
+        for value in NrBackendChoice::ALL {
+            assert!(
+                doc.contains(&format!("`{}`", value.as_str())),
+                "docs/compat-contribution.md is missing the NR backend `{}`",
+                value.as_str()
+            );
+        }
+
+        // The four tables a file is made of, plus the three required keys.
+        for section in ["[game]", "[upscaling]", "[runtime]", "[neural_rendering]"] {
+            assert!(
+                doc.contains(section),
+                "docs/compat-contribution.md is missing the `{section}` table"
+            );
+        }
+        for key in ["store", "store_id", "title"] {
+            assert!(
+                doc.contains(&format!("`{key}`")),
+                "docs/compat-contribution.md is missing the required `{key}` key"
+            );
+        }
     }
 }

@@ -1,0 +1,21 @@
+[package]
+name = "pitagames-repair"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Repair and the local settings export for PitaGames"
+
+[dependencies]
+pitagames-core.workspace = true
+pitagames-db.workspace = true
+pitagames-mods.workspace = true
+pitagames-platform.workspace = true
+pitagames-stores.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+walkdir.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true

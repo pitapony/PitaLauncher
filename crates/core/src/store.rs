@@ -122,6 +122,12 @@ impl AntiCheat {
     }
 }
 
+impl std::fmt::Display for AntiCheat {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.label())
+    }
+}
+
 impl FromStr for AntiCheat {
     type Err = UnknownAntiCheat;
 

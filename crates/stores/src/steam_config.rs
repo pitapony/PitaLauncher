@@ -852,6 +852,138 @@ pub enum Error {
     Json(#[from] serde_json::Error),
 }
 
+// ---------------------------------------------------------------------------
+// Repair: every pending restore in a backup directory
+// ---------------------------------------------------------------------------
+
+/// Which config file a restore point belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreKind {
+    /// A game's launch options in `localconfig.vdf`.
+    LaunchOptions,
+    /// A game's compatibility-tool mapping in `config.vdf`.
+    CompatTool,
+}
+
+impl RestoreKind {
+    /// The noun a report uses.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LaunchOptions => "launch options",
+            Self::CompatTool => "compatibility tool",
+        }
+    }
+}
+
+/// A restore point found on disk, before it is applied.
+///
+/// A `pitagames-cli repair` / Settings "restore Steam config" walks these: each
+/// one is a journal this launcher wrote, and applying it puts that file back.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingRestore {
+    /// The journal file itself.
+    pub journal: PathBuf,
+    /// The appid (or app name) the record was written for.
+    pub app_id: String,
+    /// The journal's scope: a user id, or `global` for `config.vdf`.
+    pub scope: String,
+    /// The Steam config file the record restores.
+    pub config: PathBuf,
+    /// Which writer owns it.
+    pub kind: RestoreKind,
+}
+
+/// What one [`restore_pending`] did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RestoreOutcome {
+    /// The journal that was applied.
+    pub journal: PathBuf,
+    pub app_id: String,
+    pub config: PathBuf,
+    pub kind: RestoreKind,
+    /// `true` when the whole file came back byte-for-byte.
+    pub exact: bool,
+    /// The original backup the restore used.
+    pub backup: PathBuf,
+}
+
+/// Every restore point in a backup directory, in filename order.
+///
+/// A missing directory is an empty list, not an error: a machine that has never
+/// written a Steam config has nothing to restore. A journal that cannot be read
+/// is skipped rather than failing the whole repair.
+pub fn pending_restores(backup_dir: &Path) -> Result<Vec<PendingRestore>, Error> {
+    let Ok(entries) = fs::read_dir(backup_dir) else {
+        return Ok(Vec::new());
+    };
+
+    let mut pending = Vec::new();
+    for entry in entries.flatten() {
+        let journal = entry.path();
+        if journal.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(bytes) = fs::read(&journal) else {
+            continue;
+        };
+        let Ok(record) = serde_json::from_slice::<Journal>(&bytes) else {
+            continue;
+        };
+        let kind = if record
+            .config
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name == "config.vdf")
+        {
+            RestoreKind::CompatTool
+        } else {
+            RestoreKind::LaunchOptions
+        };
+        pending.push(PendingRestore {
+            journal,
+            app_id: record.app_id,
+            scope: record.scope,
+            config: record.config,
+            kind,
+        });
+    }
+
+    pending.sort_by(|a, b| a.journal.cmp(&b.journal));
+    Ok(pending)
+}
+
+/// Apply one restore point, through the same guarded restore the CLI's
+/// `--restore` uses.
+///
+/// The journal is looked up again from `backup_dir`/scope/appid, so a record
+/// whose file moved since it was scanned is refused rather than guessed.
+pub fn restore_pending(
+    record: &PendingRestore,
+    steam: SteamProcessState,
+    options: &WriteOptions,
+) -> Result<RestoreOutcome, Error> {
+    let (exact, backup) = match record.kind {
+        RestoreKind::LaunchOptions => {
+            let report = restore_launch_options(&record.config, &record.app_id, steam, options)?;
+            (report.exact, report.backup)
+        }
+        RestoreKind::CompatTool => {
+            let report = restore_compat_tool(&record.config, &record.app_id, steam, options)?;
+            (report.exact, report.backup)
+        }
+    };
+
+    Ok(RestoreOutcome {
+        journal: record.journal.clone(),
+        app_id: record.app_id.clone(),
+        config: record.config.clone(),
+        kind: record.kind,
+        exact,
+        backup,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1656,5 +1788,124 @@ mod tests {
             read_launch_options(&localconfig, "620").unwrap().as_deref(),
             Some("pillow %command%")
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Repair: pending restore points
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pending_restores_lists_every_written_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let localconfig = fixture(dir.path(), WITH_OPTIONS);
+        let config = config_fixture(dir.path(), CONFIG_WITH_MAPPING);
+        let options = options(dir.path());
+
+        apply_launch_options(
+            &localconfig,
+            "620",
+            Some("shim 620 %command%"),
+            SteamProcessState::Stopped,
+            &options,
+        )
+        .unwrap();
+        apply_compat_tool(
+            &config,
+            "620",
+            Some(&CompatTool::new("proton-cachyos")),
+            SteamProcessState::Stopped,
+            &options,
+        )
+        .unwrap();
+
+        let pending = pending_restores(&options.backup_dir).unwrap();
+        assert_eq!(pending.len(), 2, "{pending:?}");
+        assert_eq!(pending[0].kind, RestoreKind::CompatTool);
+        assert_eq!(pending[1].kind, RestoreKind::LaunchOptions);
+        assert!(pending.iter().all(|record| record.app_id == "620"));
+        assert_eq!(pending[0].config, config);
+        assert_eq!(pending[1].config, localconfig);
+        assert!(pending.iter().all(|record| record.journal.is_file()));
+    }
+
+    #[test]
+    fn pending_restores_is_empty_without_a_backup_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let pending = pending_restores(&dir.path().join("nothing-here")).unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    #[test]
+    fn pending_restores_skips_a_corrupt_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let options = options(dir.path());
+        fs::create_dir_all(&options.backup_dir).unwrap();
+        fs::write(
+            options.backup_dir.join("localconfig-123-620.json"),
+            "not json",
+        )
+        .unwrap();
+
+        let pending = pending_restores(&options.backup_dir).unwrap();
+        assert!(pending.is_empty(), "{pending:?}");
+    }
+
+    #[test]
+    fn restore_pending_puts_a_clean_record_back_byte_for_byte() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(dir.path(), WITH_OPTIONS);
+        let original = fs::read(&path).unwrap();
+        let options = options(dir.path());
+
+        apply_launch_options(
+            &path,
+            "620",
+            Some("shim 620 %command%"),
+            SteamProcessState::Stopped,
+            &options,
+        )
+        .unwrap();
+
+        let record = pending_restores(&options.backup_dir)
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == RestoreKind::LaunchOptions)
+            .unwrap();
+        let outcome = restore_pending(&record, SteamProcessState::Stopped, &options).unwrap();
+
+        assert!(outcome.exact, "{outcome:?}");
+        assert_eq!(fs::read(&path).unwrap(), original);
+        assert!(!record.journal.exists());
+    }
+
+    #[test]
+    fn restore_pending_repairs_a_file_steam_touched() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture(dir.path(), WITH_OPTIONS);
+        let options = options(dir.path());
+
+        apply_launch_options(
+            &path,
+            "620",
+            Some("shim 620 %command%"),
+            SteamProcessState::Stopped,
+            &options,
+        )
+        .unwrap();
+        // Steam changed an unrelated key after our write.
+        let changed = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"Playtime\"\t\t\"9000\"", "\"Playtime\"\t\t\"9999\"");
+        fs::write(&path, &changed).unwrap();
+
+        let record = pending_restores(&options.backup_dir).unwrap().remove(0);
+        let outcome = restore_pending(&record, SteamProcessState::Stopped, &options).unwrap();
+
+        assert!(!outcome.exact, "a merge, not a byte copy");
+        assert_eq!(
+            read_launch_options(&path, "620").unwrap().as_deref(),
+            Some("-novid %command%")
+        );
+        assert!(fs::read_to_string(&path).unwrap().contains("9999"));
     }
 }
