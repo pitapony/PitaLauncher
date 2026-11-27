@@ -19,6 +19,7 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::Store;
+use pitagames_core::i18n::t;
 use pitagames_stores::cli::CliOptions;
 use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport};
 use pitagames_stores::sync::{Backends, StoreLibrary};
@@ -191,8 +192,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
             while let Some(fetched) = drain.next().await {
                 let Some(db) = (*db_state.read()).clone() else {
                     syncing.set(false);
-                    sync_message
-                        .set("The library cannot be saved until the database opens.".to_string());
+                    sync_message.set(t("stores.needs_db").to_string());
                     continue;
                 };
 
@@ -213,12 +213,14 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                     }
                 }
 
-                let mut message = format!(
-                    "{total_rows} game(s) from {applied} of {} store(s).",
-                    status::CLI_STORES.len()
-                );
+                let mut message = t("stores.sync_summary")
+                    .replace("{total}", &total_rows.to_string())
+                    .replace("{applied}", &applied.to_string())
+                    .replace("{stores}", &status::CLI_STORES.len().to_string());
                 if !problems.is_empty() {
-                    message.push_str(&format!(" {} warning(s).", problems.len()));
+                    message.push_str(
+                        &t("stores.sync_warnings").replace("{count}", &problems.len().to_string()),
+                    );
                 }
                 sync_message.set(message);
                 sync_problems.set(problems);
@@ -276,9 +278,9 @@ pub fn StoresView(props: StoresViewProps) -> Element {
         .as_ref()
         .is_some_and(|state| state.prompt().is_some());
     let placeholder = if awaiting_input {
-        "Paste here and press Enter"
+        t("stores.paste_placeholder")
     } else {
-        "Waiting for the browser…"
+        t("stores.waiting_browser")
     };
 
     // The Stores screen's action drain. The app's one pump posts here; this
@@ -383,11 +385,11 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:6px;",
                 span {
                     style: "font-size:var(--text-heading);font-weight:600;color:#ffffff;",
-                    "Stores"
+                    {t("stores.title")}
                 }
                 span {
                     style: "font-size:var(--text-caption);color:var(--text-muted);line-height:1.5;",
-                    "PitaGames drives the Epic, Amazon and GOG stores through their command-line clients. A store whose client is missing or signed out is listed here with what it needs; the launcher keeps working for the stores that are ready."
+                    {t("stores.description")}
                 }
             }
 
@@ -400,7 +402,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         start_probe(refresh_probes.sender.clone(), show_counts);
                     },
                     style: "{action_style(!is_pending)}{refresh_ring}",
-                    "Refresh"
+                    {t("action.refresh")}
                 }
                 button {
                     disabled: is_pending,
@@ -410,7 +412,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         start_probe(counts_probes.sender.clone(), next);
                     },
                     style: "{action_style(!is_pending)}{counts_ring}",
-                    if show_counts { "Hide game counts" } else { "Show game counts" }
+                    if show_counts { t("stores.hide_counts") } else { t("stores.show_counts") }
                 }
                 button {
                     disabled: is_syncing,
@@ -421,18 +423,18 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         start_sync(sync_starter.sender.clone());
                     },
                     style: "{action_style(!is_syncing)}{sync_ring}",
-                    "Sync libraries"
+                    {t("stores.sync")}
                 }
                 if is_pending {
                     span {
                         style: "font-size:var(--text-micro);color:var(--accent);",
-                        "checking…"
+                        {t("stores.checking")}
                     }
                 }
                 if is_syncing {
                     span {
                         style: "font-size:var(--text-micro);color:var(--accent);",
-                        "syncing…"
+                        {t("stores.syncing")}
                     }
                 }
             }
@@ -467,12 +469,12 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                 }
                 span {
                     style: "font-size:var(--text-micro);color:var(--text-muted);line-height:1.5;",
-                    "Signing in runs the store's own client: the page opens in your browser and PitaGames only passes on the one line it asks for. Nothing on this screen writes to a game or a store account. See docs/m2-auth-terminal.md."
+                    {t("stores.auth_hint")}
                 }
             } else {
                 div {
                     style: "padding:40px 0;color:var(--text-muted);font-size:var(--text-body);",
-                    "Checking each store's command-line client…"
+                    {t("stores.checking_clients")}
                 }
             }
 
@@ -487,7 +489,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                             style: "display:flex;align-items:center;gap:10px;",
                             span {
                                 style: "font-size:var(--text-heading);font-weight:600;color:#ffffff;",
-                                "Sign in to {terminal.title()}"
+                                {t("stores.sign_in_title").replace("{store}", &terminal.title())}
                             }
                             span {
                                 style: "padding:2px 8px;border-radius:999px;font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;background:{status_background(terminal.status())};color:var(--text);",
@@ -510,7 +512,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                     }
                                 },
                                 style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{cancel_ring}",
-                                if terminal.running() { "Cancel" } else { "Close" }
+                                if terminal.running() { t("action.cancel") } else { t("action.close") }
                             }
                         }
 
@@ -554,7 +556,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                 button {
                                     onclick: move |_| submit_auth_line(auth_inputs, auth_text),
                                     style: "{action_style(true)}{send_ring}",
-                                    "Send"
+                                    {t("stores.send")}
                                 }
                             }
                         }
@@ -562,11 +564,11 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         div {
                             style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;font-size:var(--text-micro);color:var(--text-muted);",
                             if let Some(log) = terminal.log() {
-                                span { "transcript: {log.display()}" }
+                                span { {t("stores.transcript").replace("{path}", &log.display().to_string())} }
                             }
                             span {
                                 style: "margin-left:auto;",
-                                "The client stores the session itself."
+                                {t("stores.client_stores_session")}
                             }
                         }
                     }
@@ -642,10 +644,10 @@ fn start_sign_in(
 
 fn status_label(status: &TerminalStatus) -> &'static str {
     match status {
-        TerminalStatus::Running => "running",
-        TerminalStatus::Succeeded => "signed in",
-        TerminalStatus::Failed(_) => "failed",
-        TerminalStatus::Cancelled => "cancelled",
+        TerminalStatus::Running => t("stores.running"),
+        TerminalStatus::Succeeded => t("stores.signed_in"),
+        TerminalStatus::Failed(_) => t("stores.failed"),
+        TerminalStatus::Cancelled => t("stores.cancelled"),
     }
 }
 
@@ -660,11 +662,11 @@ fn status_background(status: &TerminalStatus) -> &'static str {
 
 fn store_label(store: Store) -> &'static str {
     match store {
-        Store::Epic => "Epic",
-        Store::Amazon => "Amazon",
-        Store::Gog => "GOG",
-        Store::Steam => "Steam",
-        Store::Local => "Local",
+        Store::Epic => t("store.epic"),
+        Store::Amazon => t("store.amazon"),
+        Store::Gog => t("store.gog"),
+        Store::Steam => t("store.steam"),
+        Store::Local => t("store.local"),
     }
 }
 
@@ -701,10 +703,10 @@ fn StoreRow(props: StoreRowProps) -> Element {
     let ring = focus::ring_style(focused);
     let state = report.state();
     let (badge, badge_background) = match state {
-        RowState::Ready => ("ready", "#2e4a34"),
-        RowState::CliMissing => ("not installed", "#3a2a1e"),
-        RowState::SignedOut => ("sign in required", "#3a2a1e"),
-        RowState::Unverified => ("status unknown", "#2c2c38"),
+        RowState::Ready => (t("stores.ready"), "#2e4a34"),
+        RowState::CliMissing => (t("stores.not_installed"), "#3a2a1e"),
+        RowState::SignedOut => (t("stores.sign_in_required"), "#3a2a1e"),
+        RowState::Unverified => (t("stores.status_unknown"), "#2c2c38"),
     };
 
     let tool_lines: Vec<(String, bool)> = report
@@ -722,21 +724,36 @@ fn StoreRow(props: StoreRowProps) -> Element {
                     true,
                 )
             }
-            None => (format!("{} — not found in PATH", tool.program), false),
+            None => (
+                t("stores.not_in_path").replace("{program}", &tool.program),
+                false,
+            ),
         })
         .collect();
 
     let session_line = match &report.session {
-        SessionState::SignedIn { account } if account.trim().is_empty() => "signed in".to_string(),
-        SessionState::SignedIn { account } => format!("signed in as {account}"),
-        SessionState::SignedOut => "not signed in".to_string(),
-        SessionState::Unknown => "session not checked".to_string(),
+        SessionState::SignedIn { account } if account.trim().is_empty() => {
+            t("stores.signed_in").to_string()
+        }
+        SessionState::SignedIn { account } => {
+            t("stores.signed_in_as").replace("{account}", account)
+        }
+        SessionState::SignedOut => t("stores.not_signed_in").to_string(),
+        SessionState::Unknown => t("stores.session_not_checked").to_string(),
     };
 
     let counts_line = match (report.owned, report.installed) {
-        (Some(owned), Some(installed)) => Some(format!("{owned} owned · {installed} installed")),
-        (Some(owned), None) => Some(format!("{owned} owned")),
-        (None, Some(installed)) => Some(format!("{installed} installed")),
+        (Some(owned), Some(installed)) => Some(
+            t("stores.counts_owned_installed")
+                .replace("{owned}", &owned.to_string())
+                .replace("{installed}", &installed.to_string()),
+        ),
+        (Some(owned), None) => {
+            Some(t("stores.counts_owned").replace("{owned}", &owned.to_string()))
+        }
+        (None, Some(installed)) => Some(
+            t("stores.counts_installed").replace("{installed}", &installed.to_string()),
+        ),
         (None, None) => None,
     };
 
@@ -782,7 +799,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
                             focus.set(Some(0));
                         },
                         style: action_style(!signing_in),
-                        if signing_in { "signing in…" } else { "Sign in" }
+                        if signing_in { t("stores.signing_in") } else { t("stores.sign_in") }
                     }
                 }
             }
@@ -841,16 +858,10 @@ fn StoreRow(props: StoreRowProps) -> Element {
 /// What to install for a store whose client is missing.
 fn install_hint(store: Store) -> String {
     match store {
-        Store::Epic => {
-            "Install legendary to enable Epic installs (pipx install legendary-gl, or the AUR package)."
-                .to_string()
-        }
-        Store::Amazon => "Install nile to enable Amazon installs.".to_string(),
-        Store::Gog => {
-            "Install lgogdownloader (library and login) and gogdl (installs and play) to enable GOG."
-                .to_string()
-        }
-        other => format!("Install the {other} command-line client to enable this store."),
+        Store::Epic => t("stores.epic_hint").to_string(),
+        Store::Amazon => t("stores.amazon_hint").to_string(),
+        Store::Gog => t("stores.gog_hint").to_string(),
+        other => t("stores.generic_hint").replace("{store}", other.as_str()),
     }
 }
 

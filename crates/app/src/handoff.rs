@@ -23,6 +23,7 @@
 //! never sees a start or an exit to hand off around.
 
 use pitagames_core::GameId;
+use pitagames_core::i18n::t;
 
 /// How long the window waits for focus after a game ends before it shows the
 /// "press Guide" fallback badge.
@@ -153,9 +154,11 @@ impl Handoff {
 pub fn badge_text(title: &str, summary: &str) -> String {
     let summary = summary.trim();
     if summary.is_empty() {
-        format!("{title} ended — press Guide to return.")
+        t("handoff.ended").replace("{title}", title)
     } else {
-        format!("{title} {summary} — press Guide to return.")
+        t("handoff.ended_summary")
+            .replace("{title}", title)
+            .replace("{summary}", summary)
     }
 }
 

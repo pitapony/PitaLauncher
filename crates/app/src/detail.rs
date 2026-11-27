@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 
+use pitagames_core::i18n::t;
 use pitagames_core::ui::Shell;
 use pitagames_core::{AntiCheat, GameId, Profile, ProtonRef};
 use pitagames_db::{Db, HistoryRepository, StoredLaunch, StoredProfile};
@@ -184,22 +185,22 @@ pub fn Detail(props: DetailProps) -> Element {
         .game
         .last_played
         .map(|at| format::last_played(at, now))
-        .unwrap_or_else(|| "never".to_string());
+        .unwrap_or_else(|| t("detail.never").to_string());
     let size = entry
         .size_bytes()
         .map(format::human_bytes)
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| t("detail.unknown").to_string());
     let install_path = entry
         .game
         .install_dir
         .as_ref()
         .map(|path| path.display().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| t("detail.unknown").to_string());
     let version = entry
         .game
         .version
         .clone()
-        .unwrap_or_else(|| "unknown".to_string());
+        .unwrap_or_else(|| t("detail.unknown").to_string());
 
     let anticheat_view = anticheat();
     let anticheat_label = anticheat_view.label.clone();
@@ -223,25 +224,28 @@ pub fn Detail(props: DetailProps) -> Element {
             let genres = metadata.genres.clone();
             let mut facts: Vec<(&'static str, String)> = Vec::new();
             if !metadata.developers.is_empty() {
-                facts.push(("Developers", metadata.developers.join(", ")));
+                facts.push((t("detail.developers"), metadata.developers.join(", ")));
             }
             if !metadata.publishers.is_empty() {
-                facts.push(("Publishers", metadata.publishers.join(", ")));
+                facts.push((t("detail.publishers"), metadata.publishers.join(", ")));
             }
             if let Some(date) = &metadata.release_date {
                 let value = if metadata.coming_soon {
-                    format!("coming soon · {date}")
+                    t("detail.coming_soon").replace("{date}", date)
                 } else {
                     date.clone()
                 };
-                facts.push(("Released", value));
+                facts.push((t("detail.released"), value));
             }
             if let Some(score) = metadata.metacritic {
-                facts.push(("Metacritic", format!("{score} / 100")));
+                facts.push((
+                    t("detail.metacritic"),
+                    t("detail.metacritic_score").replace("{score}", &score.to_string()),
+                ));
             }
-            facts.push(("Platforms", platforms_label(metadata.platforms)));
+            facts.push((t("detail.platforms"), platforms_label(metadata.platforms)));
             if metadata.is_free {
-                facts.push(("Price", "free to play".to_string()));
+                facts.push((t("detail.price"), t("detail.free_to_play").to_string()));
             }
 
             rsx! {
@@ -275,9 +279,9 @@ pub fn Detail(props: DetailProps) -> Element {
         }
         None => {
             let message = if entry.is_steam() {
-                "No store metadata cached yet. Steam is asked in the background after the library loads."
+                t("detail.no_metadata")
             } else {
-                "No description yet: this store's library listing carries only titles."
+                t("detail.no_description")
             };
             rsx! {
                 p {
@@ -314,11 +318,11 @@ pub fn Detail(props: DetailProps) -> Element {
                 mode: record
                     .mode
                     .clone()
-                    .unwrap_or_else(|| "not started".to_string()),
+                    .unwrap_or_else(|| t("history.not_started").to_string()),
                 verdict: record
                     .detail
                     .clone()
-                    .unwrap_or_else(|| "no verdict recorded".to_string()),
+                    .unwrap_or_else(|| t("history.no_verdict").to_string()),
                 ok: record.succeeded,
                 log: record
                     .log_path
@@ -347,8 +351,8 @@ pub fn Detail(props: DetailProps) -> Element {
     let compat_status = compat.read().clone();
     let runtime_note = runtime_message.read().clone();
     let compat_label = match &compat_status {
-        Some(tool) => format!("Steam forces {} for this game.", tool.name),
-        None => "Steam compatibility tool: (Steam decides).".to_string(),
+        Some(tool) => t("detail.steam_forces").replace("{tool}", &tool.name),
+        None => t("detail.steam_compat_decides").to_string(),
     };
     let steam_root = props.steam_root.clone();
 
@@ -396,7 +400,7 @@ pub fn Detail(props: DetailProps) -> Element {
                 Err(message) => Err(message),
             }
         }
-        None => Err("Create and select a profile to see the launch command.".to_string()),
+        None => Err(t("detail.no_command_profile").to_string()),
     };
 
     let mut handoff_note: Option<String> = None;
@@ -407,13 +411,16 @@ pub fn Detail(props: DetailProps) -> Element {
         (Ok(preview), Some(report)) => {
             runtime::handoff_preview(&entry.game, &preview, report).map(|handoff| {
                 handoff_note = Some(match &handoff.prefix {
-                    Some(prefix) => format!("{} · prefix {prefix}", handoff.mode),
-                    None => format!("{} · no per-game prefix", handoff.mode),
+                    Some(prefix) => t("detail.handoff_prefix")
+                        .replace("{mode}", &handoff.mode.to_string())
+                        .replace("{prefix}", prefix),
+                    None => t("detail.handoff_no_prefix")
+                        .replace("{mode}", &handoff.mode.to_string()),
                 });
                 handoff.command
             })
         }
-        (Ok(_), None) => Err("Proton discovery is not ready yet.".to_string()),
+        (Ok(_), None) => Err(t("detail.proton_not_ready").to_string()),
         (Err(message), _) => Err(message),
     };
     let (command_text, command_error) = match command_preview {
@@ -661,7 +668,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                                 );
                                             },
                                             style: "{hero_action_style(can_play)}{ring}",
-                                            "Play"
+                                            {t("action.play")}
                                         }
                                     }
                                 }
@@ -769,7 +776,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                         );
                                     },
                                     style: "{play_style(can_play)}{ring}",
-                                    "Play"
+                                    {t("action.play")}
                                 }
                             }
                         }
@@ -793,12 +800,12 @@ pub fn Detail(props: DetailProps) -> Element {
 
             div {
                 style: "display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;",
-                {info_card("Playtime", playtime)}
-                {info_card("Last played", last_played)}
-                {info_card("Size", size)}
-                {info_card("Install path", install_path)}
-                {info_card("Version", version)}
-                {info_card("Anti-cheat", anticheat_label)}
+                {info_card(t("detail.playtime"), playtime)}
+                {info_card(t("detail.last_played"), last_played)}
+                {info_card(t("detail.size"), size)}
+                {info_card(t("detail.install_path"), install_path)}
+                {info_card(t("detail.version"), version)}
+                {info_card(t("detail.anticheat"), anticheat_label)}
             }
 
             if let Some(warning) = anticheat_warning.clone() {
@@ -806,7 +813,7 @@ pub fn Detail(props: DetailProps) -> Element {
                     style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#3a2e1e;color:#e8c890;font-size:var(--text-caption);",
                     span {
                         style: "font-weight:600;",
-                        "Anti-cheat injection warning"
+                        {t("detail.anticheat_warning")}
                     }
                     span { "{warning}" }
                     for item in anticheat_evidence {
@@ -824,12 +831,12 @@ pub fn Detail(props: DetailProps) -> Element {
                     style: "display:flex;align-items:baseline;gap:12px;",
                     h3 {
                         style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
-                        "About"
+                        {t("detail.about")}
                     }
                     if let Some(age) = metadata_age.clone() {
                         span {
                             style: "font-size:var(--text-micro);color:var(--text-muted);",
-                            "store data updated {age}"
+                            {t("detail.metadata_updated").replace("{age}", &age)}
                         }
                     }
                 }
@@ -842,22 +849,22 @@ pub fn Detail(props: DetailProps) -> Element {
                     style: "display:flex;align-items:baseline;gap:12px;",
                     h3 {
                         style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
-                        "Recent launches"
+                        {t("detail.recent_launches")}
                     }
                     span {
                         style: "font-size:var(--text-micro);color:var(--text-muted);",
-                        "the sessions PitaGames started"
+                        {t("detail.recent_launches_hint")}
                     }
                 }
                 if is_steam {
                     p {
                         style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
-                        "Steam starts this game itself, so its sessions belong to Steam. PitaGames records only the launches it supervises: the games it starts through umu, a native executable or a store client."
+                        {t("detail.steam_sessions_hint")}
                     }
                 } else if sessions.is_empty() {
                     p {
                         style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
-                        "No sessions yet. Press Play and the outcome lands here — including a launch that could not start, with the reason."
+                        {t("detail.no_sessions")}
                     }
                 } else {
                     for row in sessions {
@@ -885,7 +892,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     style: "font-family:monospace;font-size:var(--text-micro);color:var(--text-disabled);max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
                                     "{log}"
                                 }
-                                CopyButton { text: log, label: "Copy log path".to_string() }
+                                CopyButton { text: log, label: t("history.copy_log_path").to_string() }
                             }
                         }
                     }
@@ -896,17 +903,17 @@ pub fn Detail(props: DetailProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
                 h3 {
                     style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
-                    "Profiles"
+                    {t("detail.profiles")}
                 }
                     p {
                         style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
-                        "A profile picks the Proton build and graphics settings this game launches with. New profiles start from the safe defaults."
+                        {t("detail.profiles_hint")}
                     }
 
                     if !has_profiles {
                         div {
                             style: "padding:16px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:var(--text-muted);font-size:var(--text-caption);",
-                            "No profiles yet."
+                            {t("detail.no_profiles")}
                         }
                     }
 
@@ -933,7 +940,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     if is_active {
                                         span {
                                             style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--accent);",
-                                            "active"
+                                            {t("detail.active")}
                                         }
                                     }
                                     button {
@@ -945,7 +952,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                                 .set(DiagnosticsDraft::from_diagnostics(&pick_diagnostics));
                                         },
                                         style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                                        "Use"
+                                        {t("detail.use")}
                                     }
                                     button {
                                         onclick: move |_| {
@@ -954,7 +961,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                             let name = delete_name.clone();
                                             spawn(async move {
                                                 let Some(db) = db else {
-                                                    error.set("Profiles are unavailable until the database opens.".to_string());
+                                                    error.set(t("detail.profiles_unavailable").to_string());
                                                     return;
                                                 };
                                                 match persist::delete_profile(&db, &game_id, &name).await {
@@ -964,7 +971,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                             });
                                         },
                                         style: "padding:6px 12px;border-radius:8px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                                        "Delete"
+                                        {t("detail.delete")}
                                     }
                                 }
                             }
@@ -974,7 +981,7 @@ pub fn Detail(props: DetailProps) -> Element {
                     div {
                         style: "display:flex;gap:8px;padding-top:4px;",
                         input {
-                            placeholder: "New profile name",
+                            placeholder: t("detail.new_profile_placeholder"),
                             value: "{name}",
                             oninput: move |event| new_name.set(event.value()),
                             onfocus: move |_| session.write().set_text_focused(true),
@@ -1002,7 +1009,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                 ));
                             },
                             style: create_style(name.trim().is_empty()),
-                            "Save profile"
+                            {t("detail.save_profile")}
                         }
                     }
                 }
@@ -1011,28 +1018,28 @@ pub fn Detail(props: DetailProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
                 h3 {
                     style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
-                    "Runtime"
+                    {t("detail.runtime")}
                 }
                 p {
                     style: "margin:0;font-size:var(--text-caption);color:var(--text-muted);",
                     if is_steam {
-                        "PitaGames launches this game through pitagames-shim. Pick the Proton build and wrapper chain for the active profile, then route the game through the shim in Steam's launch options."
+                        {t("detail.runtime_hint_steam")}
                     } else {
-                        "Pick the Proton build and wrapper chain for the active profile. PitaGames starts this game itself — through umu with a per-game Wine prefix, or through the store's own client when it launches a game by id."
+                        {t("detail.runtime_hint_other")}
                     }
                 }
 
                     if let Some(profile) = selected_profile.clone() {
                         div {
                             style: "font-size:var(--text-micro);color:var(--text-muted);",
-                            "Editing the active profile "
+                            {t("detail.editing_active")}
                             span { style: "color:var(--text-secondary);", "{profile.name}" }
-                            "."
+                            {t("detail.editing_active_suffix")}
                         }
                     } else {
                         div {
                             style: "padding:12px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:var(--text-muted);font-size:var(--text-caption);",
-                            "Create and select a profile to pick a Proton build."
+                            {t("detail.no_profile_proton")}
                         }
                     }
 
@@ -1074,15 +1081,15 @@ pub fn Detail(props: DetailProps) -> Element {
                             onclick: move |_| {
                                 runtime_message.set(String::new());
                                 let Some(profile) = save_target.clone() else {
-                                    runtime_message.set("Create and select a profile first.".to_string());
+                                    runtime_message.set(t("detail.create_profile_first").to_string());
                                     return;
                                 };
                                 let Some(report) = save_report.clone() else {
-                                    runtime_message.set("Proton discovery is not ready yet.".to_string());
+                                    runtime_message.set(t("detail.proton_not_ready").to_string());
                                     return;
                                 };
                                 let Some(db) = save_db.clone() else {
-                                    runtime_message.set("Profiles are unavailable until the database opens.".to_string());
+                                    runtime_message.set(t("detail.profiles_unavailable").to_string());
                                     return;
                                 };
                                 let game = save_game.clone();
@@ -1106,12 +1113,15 @@ pub fn Detail(props: DetailProps) -> Element {
                                     }
                                     match runtime::write_shim_profile(&profile, &report) {
                                         Ok((path, compiled)) => {
-                                            runtime_message.set(format!(
-                                                "Wrote {} · {} environment entr{}",
-                                                path.display(),
-                                                compiled.env.len(),
-                                                if compiled.env.len() == 1 { "y" } else { "ies" }
-                                            ));
+                                            runtime_message.set(
+                                                t("detail.wrote_profile")
+                                                    .replace("{path}", &path.display().to_string())
+                                                    .replace("{count}", &compiled.env.len().to_string())
+                                                    .replace(
+                                                        "{entries}",
+                                                        if compiled.env.len() == 1 { "y" } else { "ies" },
+                                                    ),
+                                            );
                                             load_profiles(Some(db), game, rows, selected, proton_choice, wrapper_draft, diagnostics_draft, error).await;
                                         }
                                         Err(message) => runtime_message.set(message),
@@ -1119,7 +1129,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                 });
                             },
                             style: action_style(save_available),
-                            "Save & write profile"
+                            {t("detail.save_write_profile")}
                         }
 
                         if let Some(root) = route_root.clone().filter(|_| is_steam) {
@@ -1134,10 +1144,12 @@ pub fn Detail(props: DetailProps) -> Element {
                                         spawn(async move {
                                             match runtime::apply(&root, &app_id, false) {
                                                 Ok(report) => {
-                                                    runtime_message.set(format!(
-                                                        "Routed through the shim: {}",
-                                                        report.applied.unwrap_or_default()
-                                                    ));
+                                                    runtime_message.set(
+                                                        t("detail.routed_shim").replace(
+                                                            "{options}",
+                                                            &report.applied.unwrap_or_default(),
+                                                        ),
+                                                    );
                                                     routing.set(Some(runtime::routing_status(&root, &app_id)));
                                                 }
                                                 Err(message) => runtime_message.set(message),
@@ -1146,7 +1158,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     }
                                 },
                                 style: action_style(true),
-                                "Route through PitaGames"
+                                {t("detail.route_through")}
                             }
                             button {
                                 onclick: {
@@ -1159,10 +1171,14 @@ pub fn Detail(props: DetailProps) -> Element {
                                         spawn(async move {
                                             match runtime::restore(&root, &app_id, false) {
                                                 Ok(report) => {
-                                                    runtime_message.set(format!(
-                                                        "Restored original options: {}",
-                                                        report.restored.unwrap_or_else(|| "(not set)".to_string())
-                                                    ));
+                                                    runtime_message.set(
+                                                        t("detail.restored_original").replace(
+                                                            "{options}",
+                                                            &report.restored.unwrap_or_else(|| {
+                                                                t("detail.not_set").to_string()
+                                                            }),
+                                                        ),
+                                                    );
                                                     routing.set(Some(runtime::routing_status(&root, &app_id)));
                                                 }
                                                 Err(message) => runtime_message.set(message),
@@ -1171,7 +1187,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     }
                                 },
                                 style: action_style(true),
-                                "Restore original"
+                                {t("detail.restore_original")}
                             }
                             button {
                                 disabled: current_tool.is_none(),
@@ -1182,9 +1198,8 @@ pub fn Detail(props: DetailProps) -> Element {
                                     move |_| {
                                         runtime_message.set(String::new());
                                         let Some(name) = tool_name.clone() else {
-                                            runtime_message.set(
-                                                "Pick a build in a compatibilitytools.d folder first; Steam manages its own Proton builds.".to_string(),
-                                            );
+                                            runtime_message
+                                                .set(t("detail.pick_ct_build").to_string());
                                             return;
                                         };
                                         let root = root.clone();
@@ -1197,9 +1212,10 @@ pub fn Detail(props: DetailProps) -> Element {
                                                         .applied
                                                         .map(|tool| tool.name)
                                                         .unwrap_or_default();
-                                                    runtime_message.set(format!(
-                                                        "Steam now forces {applied} for this game."
-                                                    ));
+                                                    runtime_message.set(
+                                                        t("detail.steam_now_forces")
+                                                            .replace("{tool}", &applied),
+                                                    );
                                                     compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
                                                 }
                                                 Err(message) => runtime_message.set(message),
@@ -1208,7 +1224,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     }
                                 },
                                 style: action_style(current_tool.is_some()),
-                                "Force in Steam"
+                                {t("detail.force_in_steam")}
                             }
                             button {
                                 disabled: compat_status.is_none(),
@@ -1222,9 +1238,8 @@ pub fn Detail(props: DetailProps) -> Element {
                                         spawn(async move {
                                             match runtime::clear_compat(&root, &app_id, false) {
                                                 Ok(_) => {
-                                                    runtime_message.set(
-                                                        "Cleared the forced compatibility tool; Steam decides again.".to_string(),
-                                                    );
+                                                    runtime_message
+                                                        .set(t("detail.cleared_forced").to_string());
                                                     compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
                                                 }
                                                 Err(message) => runtime_message.set(message),
@@ -1233,7 +1248,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     }
                                 },
                                 style: action_style(compat_status.is_some()),
-                                "Clear forced build"
+                                {t("detail.clear_forced")}
                             }
                             button {
                                 onclick: {
@@ -1249,10 +1264,13 @@ pub fn Detail(props: DetailProps) -> Element {
                                                     let restored = report
                                                         .restored
                                                         .map(|tool| tool.name)
-                                                        .unwrap_or_else(|| "Steam decides".to_string());
-                                                    runtime_message.set(format!(
-                                                        "Restored the original compatibility tool: {restored}."
-                                                    ));
+                                                        .unwrap_or_else(|| {
+                                                            t("detail.steam_decides_short").to_string()
+                                                        });
+                                                    runtime_message.set(
+                                                        t("detail.restored_compat")
+                                                            .replace("{tool}", &restored),
+                                                    );
                                                     compat.set(runtime::read_compat(&root, &app_id).ok().flatten());
                                                 }
                                                 Err(message) => runtime_message.set(message),
@@ -1261,7 +1279,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                     }
                                 },
                                 style: action_style(true),
-                                "Restore forced build"
+                                {t("detail.restore_forced")}
                             }
                         }
                     }
@@ -1269,14 +1287,14 @@ pub fn Detail(props: DetailProps) -> Element {
                     if let Some(status) = routing_status.clone().filter(|_| is_steam) {
                         div {
                             style: "display:flex;flex-direction:column;gap:2px;font-size:var(--text-micro);color:var(--text-muted);",
-                            span { "Steam: {status.steam.describe()}" }
+                            span { {t("detail.steam_status").replace("{status}", status.steam.describe())} }
                             if let Some(value) = status.launch_options.clone() {
-                                span { "Launch options: {value}" }
+                                span { {t("detail.launch_options").replace("{value}", &value)} }
                             } else {
-                                span { "Launch options: (not set)" }
+                                span { {t("detail.launch_options_not_set")} }
                             }
                             if status.shim_installed {
-                                span { style: "color:var(--accent);", "Routed through pitagames-shim." }
+                                span { style: "color:var(--accent);", {t("detail.routed_through_shim")} }
                             }
                             span { "{compat_label}" }
                             if let Some(warning) = status.warning.clone() {
@@ -1291,15 +1309,15 @@ pub fn Detail(props: DetailProps) -> Element {
                             style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                             span {
                                 style: "font-size:var(--text-caption);font-weight:600;color:var(--text);",
-                                "Command"
+                                {t("detail.command")}
                             }
                             CopyButton { text: command_text.clone() }
                             span {
                                 style: "font-size:var(--text-micro);color:var(--text-muted);",
                                 if is_steam {
-                                    "what pitagames-shim will run (the same line as --explain)"
+                                    {t("detail.command_hint_steam")}
                                 } else {
-                                    "what the launch hand-off will run"
+                                    {t("detail.command_hint_other")}
                                 }
                             }
                         }
@@ -1317,7 +1335,7 @@ pub fn Detail(props: DetailProps) -> Element {
                         if let Some(note) = handoff_note.clone() {
                             span {
                                 style: "font-size:var(--text-micro);color:var(--text-muted);",
-                                "launch shape: {note}"
+                                {t("detail.launch_shape").replace("{note}", &note)}
                             }
                         }
                     }
@@ -1335,7 +1353,7 @@ pub fn Detail(props: DetailProps) -> Element {
         // same way the pointer's Save button does.
         if osk_open() {
             crate::osk::OskSheet {
-                title: "New profile name".to_string(),
+                title: t("detail.new_profile_placeholder").to_string(),
                 keyboard: osk,
                 on_done: move |text| {
                     osk_open.set(false);
@@ -1401,7 +1419,7 @@ async fn load_profiles(
     mut error: Signal<String>,
 ) {
     let Some(db) = db else {
-        error.set("Profiles are unavailable until the database opens.".to_string());
+        error.set(t("detail.profiles_unavailable").to_string());
         return;
     };
 
@@ -1458,7 +1476,7 @@ async fn create_profile(
         return;
     }
     let Some(db) = db else {
-        error.set("Profiles are unavailable until the database opens.".to_string());
+        error.set(t("detail.profiles_unavailable").to_string());
         return;
     };
     match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
@@ -1499,16 +1517,16 @@ fn info_card(label: &str, value: String) -> Element {
 fn platforms_label(platforms: pitagames_core::Platforms) -> String {
     let mut names = Vec::new();
     if platforms.windows {
-        names.push("Windows");
+        names.push(t("detail.platform_windows"));
     }
     if platforms.mac {
-        names.push("macOS");
+        names.push(t("detail.platform_macos"));
     }
     if platforms.linux {
-        names.push("Linux");
+        names.push(t("detail.platform_linux"));
     }
     if names.is_empty() {
-        "none listed".to_string()
+        t("detail.platforms_none").to_string()
     } else {
         names.join(", ")
     }
@@ -1521,8 +1539,8 @@ fn platforms_label(platforms: pitagames_core::Platforms) -> String {
 /// the desktop shell's start screen.
 fn back_label(back: View) -> &'static str {
     match back {
-        View::Home => "← Home",
-        _ => "← Library",
+        View::Home => t("detail.back_home"),
+        _ => t("detail.back_library"),
     }
 }
 
@@ -1618,17 +1636,19 @@ fn proton_choices(report: Option<&DiscoveryReport>) -> Vec<ProtonChoice> {
     let mut choices = vec![
         ProtonChoice {
             reference: ProtonRef::Auto,
-            label: "Automatic".to_string(),
+            label: t("detail.proton_auto").to_string(),
             detail: match report.and_then(|report| report.best()) {
-                Some(best) => format!("best available: {} ({})", best.name, best.source.label()),
-                None => "no Proton build found".to_string(),
+                Some(best) => t("detail.proton_best")
+                    .replace("{name}", &best.name)
+                    .replace("{source}", best.source.label()),
+                None => t("detail.proton_none").to_string(),
             },
             tool_name: None,
         },
         ProtonChoice {
             reference: ProtonRef::SteamDefault,
-            label: "Steam default".to_string(),
-            detail: "Steam's own compatibility setting decides".to_string(),
+            label: t("detail.proton_steam_default").to_string(),
+            detail: t("detail.proton_steam_default_detail").to_string(),
             tool_name: None,
         },
     ];

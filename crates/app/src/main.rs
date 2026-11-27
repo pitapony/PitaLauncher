@@ -1660,7 +1660,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         if warning_count > 0 {
             div {
                 style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:var(--text-caption);",
-                "{warning_count} scan warning(s) — run `pitagames-cli scan --json` for detail."
+                {t("library.scan_warnings").replace("{count}", &warning_count.to_string())}
             }
         }
 
@@ -1671,7 +1671,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                     span { "{note}" }
                 }
                 if metadata_warning_count > 2 {
-                    span { "…and {metadata_warning_count - 2} more metadata warning(s)." }
+                    span { {t("library.more_metadata_warnings").replace("{count}", &(metadata_warning_count - 2).to_string())} }
                 }
             }
         }
@@ -1679,7 +1679,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         if !has_games {
             div {
                 style: "flex:1;padding:48px 32px;color:var(--text-muted);",
-                "No games yet. PitaGames reads Steam's own libraries; open Stores and choose \"Sync libraries\" to fetch your Epic, Amazon and GOG games."
+                {t("library.empty")}
             }
         } else {
             // The chip row sits above the grid in both shells, so the two shells
@@ -2498,7 +2498,9 @@ async fn fetch_batch(
     if !stopped && failures > 0 {
         note_metadata_problem(
             library_state,
-            format!("Steam has no store data for {failures} of {requested} appid(s)."),
+            t("library.no_store_data")
+                .replace("{failures}", &failures.to_string())
+                .replace("{requested}", &requested.to_string()),
         );
     }
 }
