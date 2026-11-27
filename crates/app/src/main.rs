@@ -69,6 +69,7 @@ mod navigation;
 mod osk;
 mod overlay;
 mod overlay_view;
+mod perf;
 mod persist;
 mod play;
 mod pumps;
@@ -132,6 +133,10 @@ fn main() {
 /// first render is up so the supervisor can tell a real exit from a failed
 /// start.
 fn run_gui(args: &shell::ShellArgs) {
+    // The perf harness: anchor the cold-start clock at this process's start.
+    // A no-op unless `PITAGAMES_PERF_FILE` is set.
+    perf::install();
+
     let (preferences, _warnings) = pitagames_core::ui::AppConfig::load_default();
 
     // Safe mode: disable the DMABUF renderer before WebKit starts and drop
@@ -1663,6 +1668,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         };
     };
 
+    // The first paint of a loaded library is the cold start the harness wants:
+    // the scan and the database read are behind it, so a 500-game library is
+    // what the budget is measured against. Idempotent and a no-op off-harness.
+    crate::perf::mark_first_paint(state.games.len());
+
     let matches: Vec<&library::GameEntry> = session
         .read()
         .filter()
@@ -2129,6 +2139,9 @@ fn perform_action(
             // Update the window model now so the next render draws the focused
             // row; the DOM scroll keeps the container in sync.
             scroll_top.set(target);
+            // A real scroll step is a frame for the perf harness: the interval
+            // since the previous step is what the 60 fps budget is measured on.
+            crate::perf::mark_frame();
             let future = scroller
                 .borrow()
                 .as_ref()
