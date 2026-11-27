@@ -1,0 +1,11 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_USE_OPTISCALER=0
+  WINEDLLOVERRIDES=dxgi=n,b
+wrappers:
+ini:
+  Network.model_scale=75
+warnings:

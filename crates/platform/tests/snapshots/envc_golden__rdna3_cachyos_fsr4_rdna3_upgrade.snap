@@ -1,0 +1,9 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_FSR4_RDNA3_UPGRADE=1
+wrappers:
+ini:
+warnings:

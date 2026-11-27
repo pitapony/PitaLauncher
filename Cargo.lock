@@ -4450,6 +4450,7 @@ name = "pitagames-platform"
 version = "0.1.0"
 dependencies = [
  "flate2",
+ "insta",
  "libc",
  "pitagames-core",
  "pitagames-mods",

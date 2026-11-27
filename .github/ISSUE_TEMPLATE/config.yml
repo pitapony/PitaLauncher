@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Beta tester checklist
+    url: https://github.com/pitapony/PitaLauncher/blob/main/docs/beta-testing.md
+    about: The clean-install-to-launched-game walk, including the console path and the TV checklist.
+  - name: Hardware test checklist
+    url: https://github.com/pitapony/PitaLauncher/blob/main/docs/M0-test.md
+    about: The M0 closer — launch one real Steam game with DXVK_HUD=fps on the target GPU.
+  - name: Per-slice documentation
+    url: https://github.com/pitapony/PitaLauncher/tree/main/docs
+    about: Implementation notes for every slice, plus the console-mode couch reference.

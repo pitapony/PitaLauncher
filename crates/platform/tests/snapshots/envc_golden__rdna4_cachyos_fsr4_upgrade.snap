@@ -1,0 +1,10 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_FSR4_UPGRADE=4.0.3
+  DXVK_HUD=fps
+wrappers:
+ini:
+warnings:
