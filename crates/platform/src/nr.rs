@@ -45,7 +45,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use pitagames_core::profile::{NeuralRendering, NrBackend, Profile};
-use pitagames_mods::release::{FetchedRelease, Fetcher, PinnedRelease, ReleaseError, ReleaseSource};
+use pitagames_mods::release::{
+    FetchedRelease, Fetcher, PinnedRelease, ReleaseError, ReleaseSource,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::capability::{Availability, Field};
@@ -82,7 +84,7 @@ pub const MESA_MIN: Version = Version {
 /// below appears verbatim in `docs/dlssnr.md`.
 pub mod reason {
     pub use crate::capability::reason::{
-        GAME_NOT_CURATED, GAME_NO_NR, NR_32BIT, NR_MESA_UNKNOWN, NR_NEEDS_MESA, NR_NEEDS_RDNA3_4,
+        GAME_NO_NR, GAME_NOT_CURATED, NR_32BIT, NR_MESA_UNKNOWN, NR_NEEDS_MESA, NR_NEEDS_RDNA3_4,
     };
 
     /// A card was offered the RDNA 4 package but is not RDNA 4.
@@ -90,7 +92,8 @@ pub mod reason {
     /// A card was offered the RDNA 3 fork but is not RDNA 3.
     pub const RDNA3_ONLY: &str = "the RDNA 3 fork is offered only on RDNA 3";
     /// The resolved backend has no shipped/caller pin.
-    pub const BACKEND_NOT_PINNED: &str = "no release is pinned for this neural-rendering backend yet";
+    pub const BACKEND_NOT_PINNED: &str =
+        "no release is pinned for this neural-rendering backend yet";
     /// The pinned release is older than the game's curated minimum.
     pub const PIN_BEHIND: &str = "the pinned DLSSNR release is older than this game requires";
 }
@@ -287,9 +290,7 @@ impl BackendRegistry {
 
     /// The pin for this backend, if any.
     pub fn get(&self, backend: NrBackend) -> Option<&BackendPin> {
-        self.backends
-            .iter()
-            .find(|pin| pin.backend == backend)
+        self.backends.iter().find(|pin| pin.backend == backend)
     }
 
     pub fn is_empty(&self) -> bool {
@@ -304,9 +305,7 @@ impl BackendRegistry {
     /// Refuse a document with a bad digest or a duplicated backend.
     fn validate(&self) -> Result<(), RegistryError> {
         for pin in &self.backends {
-            if pin.sha256.len() != 64
-                || !pin.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
-            {
+            if pin.sha256.len() != 64 || !pin.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
                 return Err(RegistryError::InvalidPin {
                     backend: backend_label(pin.backend),
                     detail: format!("`{}` is not a 64-hex SHA-256", pin.sha256),
@@ -410,11 +409,7 @@ pub struct NrRequest<'a> {
 
 impl<'a> NrRequest<'a> {
     /// A request with the machine, the profile and the registry.
-    pub fn new(
-        gpu: &'a GpuProfile,
-        profile: &'a Profile,
-        registry: &'a BackendRegistry,
-    ) -> Self {
+    pub fn new(gpu: &'a GpuProfile, profile: &'a Profile, registry: &'a BackendRegistry) -> Self {
         Self {
             gpu,
             profile,
@@ -702,7 +697,8 @@ pub fn default_scale(
     resolution: Resolution,
     vram_bytes: Option<u64>,
 ) -> u8 {
-    curated_scale(compat, arch).unwrap_or_else(|| model_scale_preset(backend, resolution, vram_bytes))
+    curated_scale(compat, arch)
+        .unwrap_or_else(|| model_scale_preset(backend, resolution, vram_bytes))
 }
 
 // ---------------------------------------------------------------------------
@@ -737,10 +733,7 @@ pub enum NrError {
     },
 
     #[error("{path} is not a Windows executable: {detail}")]
-    Binary {
-        path: PathBuf,
-        detail: String,
-    },
+    Binary { path: PathBuf, detail: String },
 }
 
 #[cfg(test)]
@@ -838,7 +831,9 @@ requires_64bit = true
     #[test]
     fn the_shipped_registry_pins_both_backends() {
         let registry = BackendRegistry::shipped();
-        let upstream = registry.get(NrBackend::Rdna4Upstream).expect("upstream pin");
+        let upstream = registry
+            .get(NrBackend::Rdna4Upstream)
+            .expect("upstream pin");
         assert_eq!(upstream.source, ReleaseSource::GitLab);
         assert_eq!(upstream.project, "mochizuki0323/DLSSNR-AMD");
         assert!(!upstream.is_experimental());
@@ -862,7 +857,10 @@ requires_64bit = true
         };
 
         let merged = BackendRegistry::shipped().merge(replacement);
-        assert_eq!(merged.get(NrBackend::Rdna3Fork).unwrap().sha256, "a".repeat(64));
+        assert_eq!(
+            merged.get(NrBackend::Rdna3Fork).unwrap().sha256,
+            "a".repeat(64)
+        );
         assert_eq!(
             merged.backends.len(),
             shipped.backends.len(),
@@ -913,7 +911,14 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         .unwrap();
 
         let registry = BackendRegistry::effective(Some(&path)).unwrap();
-        assert_eq!(registry.get(NrBackend::Rdna4Upstream).unwrap().version.patch, 9);
+        assert_eq!(
+            registry
+                .get(NrBackend::Rdna4Upstream)
+                .unwrap()
+                .version
+                .patch,
+            9
+        );
         // The fork pin is still there beside it.
         assert!(registry.get(NrBackend::Rdna3Fork).is_some());
     }
@@ -1060,10 +1065,7 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
     #[test]
     fn a_card_with_no_nr_path_is_hidden_with_the_arch_reason() {
-        assert_eq!(
-            resolve(None, GpuArch::Rdna1),
-            Err(reason::NR_NEEDS_RDNA3_4)
-        );
+        assert_eq!(resolve(None, GpuArch::Rdna1), Err(reason::NR_NEEDS_RDNA3_4));
         let verdict = plan(
             NrRequest::new(&gpu(GpuArch::Rdna1, Some(8)), &profile(), &registry())
                 .with_compat(Some(&cyberpunk())),
@@ -1104,7 +1106,10 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     #[test]
     fn a_fork_version_below_the_curated_minimum_is_hidden_with_a_reason() {
         // The registry's fork pin is v0.0.8; the game needs 0.0.9.
-        let text = CYBERPUNK.replace("dlssnr_min_version = \"0.0.8\"", "dlssnr_min_version = \"0.0.9\"");
+        let text = CYBERPUNK.replace(
+            "dlssnr_min_version = \"0.0.8\"",
+            "dlssnr_min_version = \"0.0.9\"",
+        );
         let entry = CompatEntry::from_toml(&text).unwrap();
         let proton = recent_proton();
         let verdict = plan(
@@ -1164,9 +1169,8 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     fn an_unreadable_mesa_is_hidden_never_guessed() {
         let mut gpu = gpu(GpuArch::Rdna4, Some(16));
         gpu.mesa = None;
-        let verdict = plan(
-            NrRequest::new(&gpu, &profile(), &registry()).with_compat(Some(&cyberpunk())),
-        );
+        let verdict =
+            plan(NrRequest::new(&gpu, &profile(), &registry()).with_compat(Some(&cyberpunk())));
         assert_eq!(verdict.reason(), Some(reason::NR_MESA_UNKNOWN));
     }
 
@@ -1274,16 +1278,34 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         let entry = cyberpunk();
         // The entry pins rdna4 = 100 and rdna3 = 50.
         assert_eq!(
-            default_scale(Some(&entry), NrBackend::Rdna4Upstream, GpuArch::Rdna4, Resolution::Uhd2160, gb(16)),
+            default_scale(
+                Some(&entry),
+                NrBackend::Rdna4Upstream,
+                GpuArch::Rdna4,
+                Resolution::Uhd2160,
+                gb(16)
+            ),
             100
         );
         assert_eq!(
-            default_scale(Some(&entry), NrBackend::Rdna3Fork, GpuArch::Rdna3, Resolution::Uhd2160, gb(16)),
+            default_scale(
+                Some(&entry),
+                NrBackend::Rdna3Fork,
+                GpuArch::Rdna3,
+                Resolution::Uhd2160,
+                gb(16)
+            ),
             50
         );
         // With no entry, the preset decides.
         assert_eq!(
-            default_scale(None, NrBackend::Rdna4Upstream, GpuArch::Rdna4, Resolution::Uhd2160, gb(16)),
+            default_scale(
+                None,
+                NrBackend::Rdna4Upstream,
+                GpuArch::Rdna4,
+                Resolution::Uhd2160,
+                gb(16)
+            ),
             100
         );
         assert_eq!(

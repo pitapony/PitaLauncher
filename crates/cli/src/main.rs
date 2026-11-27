@@ -1279,9 +1279,10 @@ fn nr(args: &[String]) -> Result<()> {
 
     let proton = nr_proton(&parsed)?;
     let game_64bit = match &parsed.game_exe {
-        Some(exe) => Some(nr::pe_is_64_bit(exe).with_context(|| {
-            format!("cannot read the PE header of {}", exe.display())
-        })?),
+        Some(exe) => Some(
+            nr::pe_is_64_bit(exe)
+                .with_context(|| format!("cannot read the PE header of {}", exe.display()))?,
+        ),
         None => None,
     };
 
@@ -1299,9 +1300,8 @@ fn nr(args: &[String]) -> Result<()> {
         .map(|plan| plan.backend)
         .or_else(|| nr::backend_for(gpu.arch));
     let vram = parsed.vram.or(gpu.vram_bytes);
-    let model_scale = backend.map(|backend| {
-        nr::default_scale(entry, backend, gpu.arch, parsed.resolution, vram)
-    });
+    let model_scale =
+        backend.map(|backend| nr::default_scale(entry, backend, gpu.arch, parsed.resolution, vram));
     let cost = backend.map(|backend| {
         nr::cost(
             backend,
@@ -1357,7 +1357,10 @@ fn nr(args: &[String]) -> Result<()> {
             );
         };
         let fetcher = nr_release_fixture(&plan.pin, fixture)?;
-        let dest = parsed.dest.clone().unwrap_or_else(|| fixture.join("unpacked"));
+        let dest = parsed
+            .dest
+            .clone()
+            .unwrap_or_else(|| fixture.join("unpacked"));
         let report = plan
             .pin
             .fetch_and_unpack(&fetcher, &dest)
@@ -1387,7 +1390,9 @@ fn nr(args: &[String]) -> Result<()> {
 
 /// The default DLSSNR profile a `--backend` flag builds, so the cross-offer rule
 /// can be exercised from the CLI.
-fn nr_profile(backend: pitagames_core::profile::NrBackend) -> pitagames_core::profile::NeuralRendering {
+fn nr_profile(
+    backend: pitagames_core::profile::NrBackend,
+) -> pitagames_core::profile::NeuralRendering {
     use pitagames_core::profile::{
         ModelSource, NeuralRendering, NrModel, NrProcessing, NrRoute, PkgArch,
     };
@@ -1426,8 +1431,8 @@ fn nr_proton(parsed: &NrArgs) -> Result<Option<ProtonInstall>> {
 /// needs no network.
 fn nr_release_fixture(pin: &nr::BackendPin, fixture: &Path) -> Result<MapFetcher> {
     let release_path = fixture.join("release.json");
-    let body =
-        fs::read(&release_path).with_context(|| format!("cannot read {}", release_path.display()))?;
+    let body = fs::read(&release_path)
+        .with_context(|| format!("cannot read {}", release_path.display()))?;
     let release = pin
         .source
         .parse(std::str::from_utf8(&body).context("release.json is not UTF-8")?)
@@ -1441,10 +1446,7 @@ fn nr_release_fixture(pin: &nr::BackendPin, fixture: &Path) -> Result<MapFetcher
     })?;
     let archive_path = fixture.join(&pin.asset);
     Ok(MapFetcher::new()
-        .with(
-            pin.source.release_url(&pin.project, &pin.tag),
-            body,
-        )
+        .with(pin.source.release_url(&pin.project, &pin.tag), body)
         .with(
             asset.url.clone(),
             fs::read(&archive_path)
@@ -1499,10 +1501,7 @@ fn parse_nr_args(args: &[String]) -> Result<NrArgs> {
                 set_nr_arg(&mut parsed, flag, value)?;
             }
             other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
-            other => bail!(
-                "unexpected argument `{other}` for `nr`\n\n{}",
-                nr_usage()
-            ),
+            other => bail!("unexpected argument `{other}` for `nr`\n\n{}", nr_usage()),
         }
         index += 1;
     }
