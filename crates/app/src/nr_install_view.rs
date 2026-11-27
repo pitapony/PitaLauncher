@@ -20,6 +20,7 @@ use pitagames_core::profile::{ModelSource, NeuralRendering, NrModel, NrProcessin
 use pitagames_mods::CapturedEnv;
 use pitagames_platform::nr::NrPlan;
 use pitagames_platform::nr_install::{self, DO_NOT_SHARE, InstallForm, ModelScan};
+use pitagames_platform::nr_uninstall::{self, Strategy};
 
 use crate::library::GameEntry;
 use crate::nr_install as runner;
@@ -173,6 +174,50 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
         }
     };
 
+    // Uninstall prefers upstream's own `remove` route (it knows files our
+    // manifest cannot); when that is not on disk, the launcher's manifest
+    // restores the tree. The check and the report are `platform::nr_uninstall`'s.
+    let uninstall_entry = entry.clone();
+    let uninstall = move |_| {
+        let Some(exe) = uninstall_entry.game.exe.clone() else {
+            status.set("This game has no executable path to uninstall beside.".to_string());
+            return;
+        };
+        let game_dir = exe
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| exe.clone());
+        let package_dir = std::path::PathBuf::from(package.read().as_str());
+        match nr_uninstall::strategy(&package_dir, &game_dir) {
+            Strategy::UpstreamRemove => match nr_uninstall::remove_plan(&package_dir, &game_dir) {
+                Ok(plan) => {
+                    let Some(sender) = (*events.read()).clone() else {
+                        return;
+                    };
+                    let label = runner::uninstall_title(uninstall_entry.title());
+                    let run = terminal::next_run();
+                    let started = runner::spawn_remove(run, plan, sender);
+                    inputs.set(Some(started.inputs));
+                    terminal.set(Some(Terminal::new(run, label)));
+                    status.set(String::new());
+                }
+                Err(error) => status.set(error.to_string()),
+            },
+            Strategy::Manifest => {
+                let mut status = status;
+                spawn(async move {
+                    match nr_uninstall::restore_manifest(&game_dir) {
+                        Ok(report) => status.set(report.summary()),
+                        Err(error) => status.set(error.to_string()),
+                    }
+                });
+            }
+            Strategy::Nothing => {
+                status.set("No DLSSNR install was found for this game.".to_string());
+            }
+        }
+    };
+
     // -- render ------------------------------------------------------------
 
     let current = form.read().clone();
@@ -314,6 +359,19 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                     onclick: install,
                     style: "{button_style(true)}",
                     "Install DLSSNR"
+                }
+            }
+
+            div {
+                style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                button {
+                    onclick: uninstall,
+                    style: "{button_style(true)}",
+                    "Uninstall DLSSNR"
+                }
+                span {
+                    style: "font-size:var(--text-micro);color:var(--text-muted);",
+                    "Upstream's own remove runs first; the launcher's manifest restores the tree, and a mismatch is reported rather than applied."
                 }
             }
 

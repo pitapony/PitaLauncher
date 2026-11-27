@@ -33,6 +33,7 @@ pub mod logs;
 pub mod nr;
 pub mod nr_ini;
 pub mod nr_install;
+pub mod nr_uninstall;
 pub mod power;
 pub mod prefix;
 pub mod proton;
@@ -81,6 +82,10 @@ pub use nr_install::{
     MODEL_DLL_NAME, MODEL_VERSIONS, ModelError, ModelScan, PREFERRED_MODEL_VERSION, PlanError,
     SUPPORTED_MODEL_VERSION, inspect_model, model_arg, model_version, scan, scan_roots,
     version_supported,
+};
+pub use nr_uninstall::{
+    REMOVE_ROUTE, RemoveError, RemovePlan, Strategy, UPSTREAM_LEDGER, UninstallReport,
+    has_upstream_ledger, remove_plan, restore_manifest, strategy, upstream_available,
 };
 pub use power::{PowerAction, PowerBackend, PowerError, request};
 pub use prefix::{PREFIX_DIR_ENV, Prefix};

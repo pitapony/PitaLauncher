@@ -227,7 +227,11 @@ reason string.
   (`docs/m3.5-nr-verify.md`): engagement read from `dlssnr-amd.log` with markers
   as data, an opt-in allowlisted support bundle that never carries the model
   weights or a secret, and the per-mode in-game key hints with a per-game note
-  override. Still later: the uninstall (#32), and the live fetch (ticket #12).
+  override. **The uninstall ships with ticket #32**
+  (`docs/m3.5-nr-uninstall.md`): upstream's own `remove` route is preferred,
+  the launcher's manifest + `.gl-backup/` restore is the fallback, and the
+  fallback's BLAKE3 check reports a changed tree rather than restoring over it.
+  Still later: the live fetch (ticket #12).
   `platform::nr` itself is the registry, the pinning, the gates and the cost
   data; the route is fixed to `optiscaler` by the profile validation.
 - **32-bit detection reads the game's PE header, not the package's.** A native
