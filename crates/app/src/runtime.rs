@@ -18,8 +18,9 @@ use pitagames_core::profile::{
     Diagnostics, GamescopeOptions, NeuralRendering, WrapperChain, WrapperStep,
 };
 use pitagames_core::{
-    Game, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, Store, flatten_wrappers,
-    render_shell_command, save_shim_profile, shell_quote, shim_launch_options, tokenize_command,
+    Game, GameId, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, Store,
+    flatten_wrappers, render_shell_command, save_shim_profile, shell_quote, shim_launch_options,
+    tokenize_command,
 };
 use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime, GraphicsContext};
 use pitagames_platform::gpu::GpuProfile;
@@ -42,6 +43,19 @@ pub fn discover_proton() -> DiscoveryReport {
 /// suppressed (nested gamescope is a bug).
 pub fn session_mode() -> bool {
     std::env::var_os("PITAGAMES_SESSION").is_some_and(|value| !value.is_empty())
+}
+
+/// Build a new profile, seeding its wrapper chain from the Settings default.
+///
+/// The chain is validated first: a `config.toml` a hand edit broke never blocks
+/// a new profile — it falls back to the empty chain, and the game's own Runtime
+/// panel is where wrappers are really set.
+pub fn new_profile(game_id: GameId, name: impl Into<String>, default: &WrapperChain) -> Profile {
+    let mut profile = Profile::new(game_id, name);
+    if default.validate().is_ok() {
+        profile.wrappers = default.clone();
+    }
+    profile
 }
 
 /// The editable form of a [`WrapperChain`].
@@ -900,6 +914,31 @@ mod tests {
             version: Some("proton-cachyos 10.0-20251101".to_string()),
             source: ProtonSource::SystemCompatibilityTools,
         }
+    }
+
+    #[test]
+    fn a_new_profile_is_seeded_from_the_default_wrapper_chain() {
+        let chain = WrapperChain {
+            gamemode: true,
+            mangohud: true,
+            ..WrapperChain::default()
+        };
+        let profile = new_profile(game(), "Default", &chain);
+        assert_eq!(profile.wrappers, chain);
+        assert_eq!(profile.name, "Default");
+
+        // A chain a hand edit broke is ignored: a new profile is never blocked
+        // by a bad config file.
+        let broken = WrapperChain {
+            gamescope: Some(GamescopeOptions {
+                width: Some(0),
+                ..GamescopeOptions::default()
+            }),
+            ..WrapperChain::default()
+        };
+        assert!(broken.validate().is_err());
+        let profile = new_profile(game(), "Default", &broken);
+        assert!(profile.wrappers.is_empty());
     }
 
     #[test]

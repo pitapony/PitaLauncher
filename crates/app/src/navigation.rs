@@ -22,6 +22,7 @@ pub(crate) enum View {
     Graphics,
     Account,
     Controls,
+    Settings,
     Logs,
 }
 
@@ -30,7 +31,7 @@ pub(crate) enum View {
 /// `Detail` is deliberately absent: it is a page opened *from* a destination,
 /// not a destination itself. The console top bar draws this strip and `Tab`
 /// cycles it, so the two can never disagree about which screens exist.
-pub(crate) const DESTINATIONS: [View; 8] = [
+pub(crate) const DESTINATIONS: [View; 9] = [
     View::Home,
     View::Library,
     View::Downloads,
@@ -38,6 +39,7 @@ pub(crate) const DESTINATIONS: [View; 8] = [
     View::Stores,
     View::Account,
     View::Controls,
+    View::Settings,
     View::Logs,
 ];
 
@@ -55,6 +57,7 @@ impl View {
             Self::Graphics => t("nav.graphics"),
             Self::Account => t("nav.account"),
             Self::Controls => t("nav.controls"),
+            Self::Settings => t("nav.settings"),
             Self::Logs => t("nav.logs"),
         }
     }
@@ -296,6 +299,7 @@ mod tests {
                 View::Stores,
                 View::Account,
                 View::Controls,
+                View::Settings,
                 View::Logs,
             ]
         );
@@ -310,6 +314,7 @@ mod tests {
                 "Stores",
                 "Account",
                 "Controls",
+                "Settings",
                 "Logs",
             ]
         );
@@ -341,7 +346,7 @@ mod tests {
             "backwards from the first wraps to the last"
         );
         nav.tab(false);
-        assert_eq!(nav.view(), View::Controls);
+        assert_eq!(nav.view(), View::Settings);
     }
 
     #[test]
