@@ -17,8 +17,9 @@ use anyhow::{Context, Result, bail};
 use pitagames_core::desktop::{self, DesktopEntry};
 use pitagames_core::paths;
 use pitagames_core::{
-    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Profile, ProtonRef, ShimProfile,
-    Store, read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
+    AntiCheat, Budget, Game, GameId, GameMetadata, LaunchSpec, Measurement, Metric, Platforms,
+    Profile, ProtonRef, ShimProfile, Store, Verdict, read_shim_profile, shim_launch_options,
+    shim_profile_path, steam_install,
 };
 use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
 use pitagames_mods::ini::{IniSetting, IniSurface};
@@ -96,6 +97,7 @@ fn run() -> Result<()> {
         "import" => import(&args.collect::<Vec<_>>()),
         "prefix" => prefix(&args.collect::<Vec<_>>()),
         "disk" => disk(&args.collect::<Vec<_>>()),
+        "perf" => perf(&args.collect::<Vec<_>>()),
         "mods" => mods(&args.collect::<Vec<_>>()),
         "history" => history(&args.collect::<Vec<_>>()),
         "launch" => launch(&args.collect::<Vec<_>>()),
@@ -1936,6 +1938,263 @@ fn parse_size_bytes(value: &str) -> Result<u64> {
             .with_context(|| format!("`{number}` is not a whole number"))?;
         Ok(amount.saturating_mul(multiplier))
     }
+}
+
+/// The performance budget diagnostic: check a harness measurement against the
+/// plan's budgets.
+fn perf(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("check") => perf_check(&args[1..]),
+        Some("-h") | Some("--help") | None => {
+            println!("{}", perf_usage());
+            Ok(())
+        }
+        Some(other) => bail!("unknown `perf` action `{other}`\n\n{}", perf_usage()),
+    }
+}
+
+/// Check one measurement JSON against the hardware budgets.
+///
+/// The harness (`scripts/perf-smoke.sh`) writes the measurement; this command
+/// is the one place the numbers are judged, so the container and the hardware
+/// runs cannot disagree about what "pass" means.
+fn perf_check(args: &[String]) -> Result<()> {
+    let parsed = parse_perf_args(args)?;
+    if parsed.help {
+        println!("{}", perf_usage());
+        return Ok(());
+    }
+
+    let input = match &parsed.file {
+        Some(path) => {
+            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
+        }
+        None => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .context("cannot read the measurement from stdin")?;
+            buffer
+        }
+    };
+
+    let measurement = Measurement::from_json(&input)?;
+    let required = parsed
+        .required
+        .clone()
+        .unwrap_or_else(|| Metric::ALL.to_vec());
+    let budget = Budget::default();
+    let verdict = budget.check(&measurement, &required);
+
+    if parsed.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&perf_report_json(
+                &measurement,
+                &budget,
+                &required,
+                &verdict
+            ))?
+        );
+    } else {
+        for line in perf_report_lines(&measurement, &budget, &required, &verdict) {
+            println!("{line}");
+        }
+    }
+
+    match verdict {
+        Verdict::Pass => Ok(()),
+        Verdict::Fail(_) => bail!("performance budget not met"),
+        Verdict::Incomplete(missing) => {
+            let names: Vec<&str> = missing.iter().map(|metric| metric.as_str()).collect();
+            bail!(
+                "measurement is missing required metric(s): {}",
+                names.join(", ")
+            )
+        }
+    }
+}
+
+/// Parsed `perf check` arguments.
+#[derive(Debug, Default, PartialEq)]
+struct PerfArgs {
+    file: Option<PathBuf>,
+    required: Option<Vec<Metric>>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_perf_args(args: &[String]) -> Result<PerfArgs> {
+    let mut parsed = PerfArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--file" => {
+                index += 1;
+                let value = args.get(index).with_context(|| "--file requires a path")?;
+                parsed.file = Some(PathBuf::from(value));
+            }
+            _ if arg.starts_with("--file=") => {
+                parsed.file = Some(PathBuf::from(&arg["--file=".len()..]));
+            }
+            "--require" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--require requires a metric list")?;
+                parsed.required = Some(parse_metric_list(value)?);
+            }
+            _ if arg.starts_with("--require=") => {
+                parsed.required = Some(parse_metric_list(&arg["--require=".len()..])?);
+            }
+            "-h" | "--help" => parsed.help = true,
+            other => bail!(
+                "unexpected argument `{other}` for `perf check`\n\n{}",
+                perf_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+/// Parse a comma-separated metric list; duplicates collapse and an empty list is
+/// an error rather than "enforce nothing".
+fn parse_metric_list(value: &str) -> Result<Vec<Metric>> {
+    let mut metrics = Vec::new();
+    for part in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let metric = Metric::parse(part).with_context(|| {
+            format!("unknown metric `{part}` (expected cold-start, frame-time or memory)")
+        })?;
+        if !metrics.contains(&metric) {
+            metrics.push(metric);
+        }
+    }
+    if metrics.is_empty() {
+        bail!("--require needs at least one metric");
+    }
+    Ok(metrics)
+}
+
+/// The human report: one line per metric and a verdict.
+fn perf_report_lines(
+    measurement: &Measurement,
+    budget: &Budget,
+    required: &[Metric],
+    verdict: &Verdict,
+) -> Vec<String> {
+    let mut lines = vec![format!("performance budget ({} games)", measurement.games)];
+    if measurement.games < budget.games {
+        lines.push(format!(
+            "  note: the cold-start budget is measured with {} games",
+            budget.games
+        ));
+    }
+
+    for metric in Metric::ALL {
+        let enforced = required.contains(&metric);
+        let budget_text = match metric {
+            Metric::Memory => disk::human_bytes(budget.limit(metric) as u64),
+            _ => format!("{:.1} {}", budget.limit(metric), metric.unit()),
+        };
+        let line = match measurement.value(metric) {
+            Some(value) => {
+                let measured = match metric {
+                    Metric::Memory => disk::human_bytes(value as u64),
+                    _ => format!("{value:.1} {}", metric.unit()),
+                };
+                let status = if !enforced {
+                    "recorded"
+                } else if value > budget.limit(metric) {
+                    "FAIL"
+                } else {
+                    "PASS"
+                };
+                format!(
+                    "  {:<12} {:>12}  (budget {budget_text})  {status}",
+                    metric.as_str(),
+                    measured
+                )
+            }
+            None => {
+                let status = if enforced { "MISSING" } else { "skipped" };
+                format!(
+                    "  {:<12} {:>12}  (budget {budget_text})  {status}",
+                    metric.as_str(),
+                    "not measured"
+                )
+            }
+        };
+        lines.push(line);
+    }
+
+    let verdict_text = match verdict {
+        Verdict::Pass => "PASS".to_string(),
+        Verdict::Fail(violations) => {
+            let names: Vec<&str> = violations.iter().map(|v| v.metric.as_str()).collect();
+            format!("FAIL ({})", names.join(", "))
+        }
+        Verdict::Incomplete(missing) => {
+            let names: Vec<&str> = missing.iter().map(|metric| metric.as_str()).collect();
+            format!("INCOMPLETE ({})", names.join(", "))
+        }
+    };
+    lines.push(format!("verdict: {verdict_text}"));
+    lines
+}
+
+/// The JSON report: the measurement, the budgets and the verdict.
+fn perf_report_json(
+    measurement: &Measurement,
+    budget: &Budget,
+    required: &[Metric],
+    verdict: &Verdict,
+) -> serde_json::Value {
+    let stats = measurement.frame_stats();
+    serde_json::json!({
+        "games": measurement.games,
+        "cold_start_ms": measurement.cold_start_ms,
+        "frame_time": stats.map(|stats| serde_json::json!({
+            "frames": stats.frames,
+            "p50_ms": stats.p50_ms,
+            "p95_ms": stats.p95_ms,
+            "max_ms": stats.max_ms,
+        })),
+        "memory_bytes": measurement.memory_bytes,
+        "budget": {
+            "cold_start_ms": budget.cold_start_ms,
+            "frame_time_ms": budget.frame_time_ms,
+            "memory_bytes": budget.memory_bytes,
+            "games": budget.games,
+        },
+        "required": required.iter().map(|metric| metric.as_str()).collect::<Vec<_>>(),
+        "verdict": match verdict {
+            Verdict::Pass => "pass",
+            Verdict::Fail(_) => "fail",
+            Verdict::Incomplete(_) => "incomplete",
+        },
+        "violations": match verdict {
+            Verdict::Fail(violations) => violations
+                .iter()
+                .map(|v| serde_json::json!({
+                    "metric": v.metric.as_str(),
+                    "measured": v.measured,
+                    "limit": v.limit,
+                }))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        },
+        "missing": match verdict {
+            Verdict::Incomplete(missing) => missing
+                .iter()
+                .map(|metric| metric.as_str())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        },
+    })
 }
 
 /// The mod diagnostics: a manifest in a game directory, or one of the shared
@@ -7293,7 +7552,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    perf       Check a performance measurement against the plan's budgets\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -7484,6 +7743,25 @@ fn disk_usage() -> String {
      Reports the filesystem's total, free and user-available bytes; --need prints\n\
      whether an install of that size would fit. A path that does not exist yet is\n\
      fine: the filesystem it would land on is what matters."
+        .to_string()
+}
+
+fn perf_usage() -> String {
+    "USAGE:\n    pitagames-cli perf check [--file <path>] [--require <metrics>] [--json]\n\n\
+     ARGS:\n    \
+     --file <path>          Measurement JSON (default: stdin)\n    \
+     --require <metrics>    Metrics to enforce, comma-separated: cold-start,\n                           \
+                            frame-time, memory (default: all three; one left out\n                           \
+                            is recorded, not enforced)\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Checks a harness measurement (scripts/perf-smoke.sh) against the plan's\n\
+     budgets: cold start to first paint < 2000 ms with a 500-game library, a\n\
+     scroll frame time < 16.7 ms (60 fps), and resident memory with the webview\n\
+     < 300 MiB. frame-time is the 95th percentile of the raw frame samples. The\n\
+     exit is non-zero when an enforced metric is over budget or a required one\n\
+     was not measured. The container records frame time rather than enforcing\n\
+     it, because a software renderer cannot show 60 fps."
         .to_string()
 }
 
@@ -10295,5 +10573,127 @@ verified = ["rdna4"]
             "--json".to_string(),
         ])
         .unwrap();
+    }
+
+    #[test]
+    fn perf_metric_list_rejects_unknown_and_empty() {
+        assert!(parse_metric_list("nonsense").is_err());
+        assert!(parse_metric_list("").is_err());
+        assert!(parse_metric_list(" , ").is_err());
+        assert_eq!(
+            parse_metric_list("memory,cold-start,memory").unwrap(),
+            vec![Metric::Memory, Metric::ColdStart]
+        );
+    }
+
+    #[test]
+    fn perf_args_parse_a_file_and_a_required_list() {
+        let parsed = parse_perf_args(&[
+            "--file".to_string(),
+            "m.json".to_string(),
+            "--require".to_string(),
+            "cold-start,memory".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.file, Some(PathBuf::from("m.json")));
+        assert_eq!(
+            parsed.required,
+            Some(vec![Metric::ColdStart, Metric::Memory])
+        );
+        assert!(parsed.json);
+
+        let default = parse_perf_args(&[]).unwrap();
+        assert_eq!(default.required, None);
+        assert!(parse_perf_args(&["--nope".to_string()]).is_err());
+    }
+
+    fn write_measurement(dir: &Path, json: &str) -> PathBuf {
+        let path = dir.join("perf.json");
+        fs::write(&path, json).unwrap();
+        path
+    }
+
+    #[test]
+    fn perf_check_passes_a_within_budget_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 1500.0, "frame_ms": [8.0, 9.0, 10.0], "memory_bytes": 1000 }"#,
+        );
+        perf_check(&["--file".to_string(), path.display().to_string()]).unwrap();
+    }
+
+    #[test]
+    fn perf_check_fails_an_over_budget_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 5000.0, "frame_ms": [8.0], "memory_bytes": 1000 }"#,
+        );
+        let error = perf_check(&["--file".to_string(), path.display().to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("performance budget not met"), "{error}");
+    }
+
+    #[test]
+    fn perf_check_records_but_does_not_enforce_an_unrequired_metric() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 1500.0, "frame_ms": [500.0], "memory_bytes": 1000 }"#,
+        );
+        perf_check(&[
+            "--file".to_string(),
+            path.display().to_string(),
+            "--require".to_string(),
+            "cold-start,memory".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn perf_check_errors_when_a_required_metric_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(temp.path(), r#"{ "games": 500 }"#);
+        let error = perf_check(&["--file".to_string(), path.display().to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing required metric"), "{error}");
+    }
+
+    #[test]
+    fn perf_report_lines_name_the_verdict_and_each_metric() {
+        let measurement = Measurement {
+            games: 500,
+            cold_start_ms: Some(1500.0),
+            frame_ms: vec![8.0, 9.0, 10.0],
+            memory_bytes: Some(1000),
+        };
+        let budget = Budget::default();
+        let verdict = budget.check(&measurement, &Metric::ALL);
+        let lines = perf_report_lines(&measurement, &budget, &Metric::ALL, &verdict);
+        let text = lines.join("\n");
+        assert!(text.contains("verdict: PASS"), "{text}");
+        assert!(text.contains("cold-start"), "{text}");
+        assert!(text.contains("frame-time"), "{text}");
+        assert!(text.contains("memory"), "{text}");
+    }
+
+    #[test]
+    fn perf_report_json_carries_the_percentiles() {
+        let measurement = Measurement {
+            games: 500,
+            cold_start_ms: Some(1500.0),
+            frame_ms: vec![8.0, 9.0, 10.0],
+            memory_bytes: Some(1000),
+        };
+        let budget = Budget::default();
+        let verdict = budget.check(&measurement, &Metric::ALL);
+        let report = perf_report_json(&measurement, &budget, &Metric::ALL, &verdict);
+        assert_eq!(report["verdict"], "pass");
+        assert_eq!(report["frame_time"]["frames"], 3);
+        assert_eq!(report["budget"]["games"], 500);
     }
 }

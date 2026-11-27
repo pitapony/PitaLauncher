@@ -15,6 +15,7 @@ pub mod launch;
 pub mod lock;
 pub mod metadata;
 pub mod paths;
+pub mod perf;
 pub mod profile;
 pub mod profile_file;
 pub mod store;
@@ -32,6 +33,10 @@ pub use launch::{
 };
 pub use lock::{InstanceLock, LockError};
 pub use metadata::{AppKind, GameMetadata, Platforms};
+pub use perf::{
+    Budget, COLD_START_BUDGET_MS, FRAME_TIME_BUDGET_MS, FrameStats, LIBRARY_GAMES,
+    MEMORY_CEILING_BYTES, Measurement, Metric, PerfError, Verdict, Violation,
+};
 pub use profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, ModelSource, NeuralRendering,
     NrBackend, NrModel, NrProcessing, NrRoute, PkgArch, Profile, ProfileError, ProtonRef, Upscaler,
