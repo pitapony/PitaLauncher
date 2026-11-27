@@ -26,7 +26,7 @@
 use std::path::Path;
 
 use pitagames_core::AntiCheat;
-use pitagames_core::profile::{FrameGen, Injection, Profile, Upscaler};
+use pitagames_core::profile::{FrameGen, Injection, NeuralRendering, Profile, ProtonRef, Upscaler};
 use pitagames_platform::anticheat::{self, GateDecision};
 use pitagames_platform::capability::{self, Availability, Field};
 use pitagames_platform::compat::CompatEntry;
@@ -191,6 +191,22 @@ const fn injection_label(injection: Injection) -> &'static str {
         Injection::DlssNr => "DLSSNR (its own OptiScaler)",
         Injection::Off => "Off (no injection)",
     }
+}
+
+/// The note the Upscaling section wears while neural rendering owns the route.
+///
+/// DLSSNR ships its own OptiScaler on the `optiscaler` route, so the launcher's
+/// upscaler/frame-gen env is off and the upscaler is chosen in DLSSNR's in-game
+/// menu. `Insert` opens OptiScaler's own upscaler/frame-gen menu, which DLSSNR
+/// shipped — NR Control itself is `End` (plan §7).
+pub const NR_UPSCALER_NOTE: &str = "Handled by DLSSNR (Insert)";
+
+/// The upscaler note for a profile, when DLSSNR owns the route.
+pub fn nr_upscaler_note(profile: &Profile) -> Option<&'static str> {
+    profile
+        .neural_rendering
+        .is_enabled()
+        .then_some(NR_UPSCALER_NOTE)
 }
 
 /// Every choice the screen can draw, in section order.
@@ -397,6 +413,23 @@ impl GraphicsEditor {
     pub fn press(&mut self, choice: &Choice) {
         let mut next = self.draft.clone();
         choice.press(&mut next);
+        self.commit_edit(next);
+    }
+
+    /// Enable neural rendering from the install panel.
+    ///
+    /// Sets the NR value — network, `model_scale`, int4, version and the
+    /// installer's captured launch options — and, when the profile still asks
+    /// for `Auto` Proton, applies the NR default ([`default_proton`]). An
+    /// explicit Proton choice survives, so the default only ever fills a blank.
+    ///
+    /// [`default_proton`]: pitagames_platform::nr::default_proton
+    pub fn enable_neural_rendering(&mut self, nr: NeuralRendering, default_proton: ProtonRef) {
+        let mut next = self.draft.clone();
+        next.neural_rendering = nr;
+        if next.proton == ProtonRef::Auto {
+            next.proton = default_proton;
+        }
         self.commit_edit(next);
     }
 
@@ -732,6 +765,34 @@ requires_64bit = true
             .find(|row| row.choice == Choice::Injection(Injection::DlssNr))
             .expect("DLSSNR's own row is drawn");
         assert!(nr_row.is_available());
+    }
+
+    #[test]
+    fn installing_nr_sets_the_value_and_defaults_the_proton() {
+        let mut editor = GraphicsEditor::new(profile());
+        // `Auto` gets the NR default (GE, then Valve).
+        editor.enable_neural_rendering(nr(), ProtonRef::GeProton);
+        assert!(editor.draft().neural_rendering.is_enabled());
+        assert_eq!(editor.draft().proton, ProtonRef::GeProton);
+        assert!(editor.is_dirty());
+
+        // An explicit choice survives the default.
+        let mut explicit = profile();
+        explicit.proton = ProtonRef::CachyOs;
+        let mut editor = GraphicsEditor::new(explicit);
+        editor.enable_neural_rendering(nr(), ProtonRef::GeProton);
+        assert_eq!(editor.draft().proton, ProtonRef::CachyOs);
+        assert!(editor.draft().neural_rendering.is_enabled());
+    }
+
+    #[test]
+    fn neural_rendering_hands_the_upscaler_to_dlssnr() {
+        let mut profile = profile();
+        assert_eq!(nr_upscaler_note(&profile), None);
+        profile.neural_rendering = nr();
+        let note = nr_upscaler_note(&profile).expect("the NR route owns the upscaler");
+        assert!(note.contains("DLSSNR"), "{note}");
+        assert!(note.contains("Insert"), "{note}");
     }
 
     #[test]
