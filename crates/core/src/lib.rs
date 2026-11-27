@@ -7,6 +7,7 @@
 //! desktop-integration files the launcher owns: the generated
 //! [`desktop`] entry and the [`activation`] socket a second launch talks to.
 
+pub mod a11y;
 #[cfg(unix)]
 pub mod activation;
 pub mod design;
