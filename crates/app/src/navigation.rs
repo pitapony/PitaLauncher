@@ -6,6 +6,7 @@
 //! the model owns the closed set of screens, not the root component.
 
 use pitagames_core::GameId;
+use pitagames_core::i18n::t;
 
 use crate::filter::LibraryFilter;
 
@@ -41,18 +42,18 @@ pub(crate) const DESTINATIONS: [View; 8] = [
 
 impl View {
     /// The label a nav pill or the console destination strip shows.
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Home => "Home",
-            Self::Library => "Library",
-            Self::Downloads => "Downloads",
-            Self::History => "History",
-            Self::Stores => "Stores",
+            Self::Home => t("nav.home"),
+            Self::Library => t("nav.library"),
+            Self::Downloads => t("nav.downloads"),
+            Self::History => t("nav.history"),
+            Self::Stores => t("nav.stores"),
             // Not a destination, but the enum is closed and a label is cheap.
-            Self::Detail => "Details",
-            Self::Account => "Account",
-            Self::Controls => "Controls",
-            Self::Logs => "Logs",
+            Self::Detail => t("nav.detail"),
+            Self::Account => t("nav.account"),
+            Self::Controls => t("nav.controls"),
+            Self::Logs => t("nav.logs"),
         }
     }
 }

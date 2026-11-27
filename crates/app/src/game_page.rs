@@ -9,6 +9,7 @@
 //! Continue hero share (Play, else Install, else open), so the two cannot drift.
 
 use pitagames_core::AntiCheat;
+use pitagames_core::i18n::t;
 
 use crate::home::store_label;
 use crate::library::GameEntry;
@@ -130,7 +131,7 @@ pub fn primary_action(entry: &GameEntry) -> Primary {
 /// disagree about the fact. `Open` shows no button.
 pub fn primary_label(entry: &GameEntry, primary: Primary) -> &'static str {
     match primary {
-        Primary::Play => "Play",
+        Primary::Play => t("action.play"),
         Primary::Install => entry.install_action(),
         Primary::Open => "",
     }

@@ -24,6 +24,7 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::activation::{Activation, ActivationError, ActivationServer};
+use pitagames_core::i18n::t;
 
 /// The receiver side, parked until the first render claims it.
 ///
@@ -71,12 +72,12 @@ pub fn start() {
 /// nothing useful left to do after the lock said "already running".
 pub fn focus_running() {
     let Some(path) = pitagames_core::paths::activation_socket() else {
-        eprintln!("PitaGames is already running, and there is no socket to raise it.");
+        eprintln!("{}", t("app.already_running_no_socket"));
         return;
     };
 
     match pitagames_core::activation::request_focus(&path) {
-        Ok(()) => println!("PitaGames is already running; asked it to come to the front."),
+        Ok(()) => println!("{}", t("app.already_running_raised")),
         Err(error) => {
             eprintln!("PitaGames is already running, but it could not be raised: {error}");
         }

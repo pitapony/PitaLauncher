@@ -10,6 +10,7 @@ use std::time::Duration;
 use pitagames_art::ArtRequest;
 use pitagames_core::launch::{steam_install, steam_run, steam_store};
 use pitagames_core::{Game, GameId, OwnedGame};
+use pitagames_core::i18n::t;
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_stores::{InstallPhase, scan_steam};
@@ -108,7 +109,7 @@ impl GameEntry {
     /// names its status instead — a `Local`/imported game with no installer shows
     /// "not installed" rather than a button that could only error.
     pub fn card_label(&self) -> &'static str {
-        self.status_label().unwrap_or("installed")
+        self.status_label().unwrap_or(t("install.installed_lower"))
     }
 
     /// Why Play is unavailable, as the detail page's sentence.
@@ -117,12 +118,12 @@ impl GameEntry {
     /// transient reason (Steam busy, files missing) and says so itself.
     pub fn play_blocked(&self) -> Option<&'static str> {
         if !self.game.installed {
-            return Some("Not installed. Play appears once the store's files are on disk.");
+            return Some(t("library.play_blocked_not_installed"));
         }
         if self.play_is_wired() {
             return None;
         }
-        Some("This row names no launch executable and its store has no client that launches one.")
+        Some(t("library.play_blocked_no_executable"))
     }
 
     /// The store description and art URLs, when the cache has them.
@@ -171,7 +172,7 @@ impl GameEntry {
     pub fn status_label(&self) -> Option<&'static str> {
         match self.phase {
             InstallPhase::Installed => None,
-            InstallPhase::Unknown => Some("state unknown"),
+            InstallPhase::Unknown => Some(t("install.state_unknown")),
             other => Some(other.as_str()),
         }
     }
@@ -200,9 +201,9 @@ impl GameEntry {
     /// ("downloading", "updating", …).
     pub fn install_status(&self) -> &'static str {
         match self.install_state() {
-            InstallState::Installed => "Installed",
-            InstallState::NotInstalled => "Not installed",
-            InstallState::UpdateAvailable => "Update",
+            InstallState::Installed => t("install.installed"),
+            InstallState::NotInstalled => t("install.not_installed"),
+            InstallState::UpdateAvailable => t("install.update"),
             InstallState::Busy(phase) => phase.as_str(),
             InstallState::Unknown => InstallPhase::Unknown.as_str(),
         }
@@ -218,8 +219,8 @@ impl GameEntry {
     /// button at all.
     pub fn install_action(&self) -> &'static str {
         match self.install_state() {
-            InstallState::UpdateAvailable => "Update",
-            _ => "Install",
+            InstallState::UpdateAvailable => t("install.update"),
+            _ => t("action.install"),
         }
     }
 
@@ -227,7 +228,7 @@ impl GameEntry {
     pub fn meta_line(&self) -> String {
         let mut parts = vec![self.game.id.store.as_str().to_string()];
         if self.is_steam() {
-            parts.push(format!("appid {}", self.app_id()));
+            parts.push(t("library.meta_appid").replace("{id}", self.app_id()));
         } else {
             parts.push(self.app_id().to_string());
         }
@@ -236,13 +237,12 @@ impl GameEntry {
             parts.push(crate::format::human_bytes(bytes));
         }
         if !self.game.playtime.is_zero() {
-            parts.push(format!(
-                "played {}",
-                crate::format::playtime(self.playtime())
-            ));
+            parts.push(
+                t("library.meta_played").replace("{time}", &crate::format::playtime(self.playtime())),
+            );
         }
 
-        parts.join(" · ")
+        parts.join(t("library.meta_separator"))
     }
 }
 
@@ -309,7 +309,7 @@ impl Library {
         if merged.steam_root.is_none() {
             merged
                 .warnings
-                .push("No Steam library found on this machine".to_string());
+                .push(t("library.no_steam_library").to_string());
         }
 
         merged.sort();

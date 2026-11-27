@@ -12,6 +12,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use pitagames_metadata::{OwnedClient, OwnedLibrary};
+use pitagames_core::i18n::t;
 use pitagames_secrets::{KeyStatus, SteamApiKey, SteamKeyStore};
 use pitagames_stores::steam;
 use time::OffsetDateTime;
@@ -46,23 +47,20 @@ impl Account {
             None => KeyStatus {
                 key: None,
                 backend: None,
-                warnings: vec!["no config directory (HOME and XDG_CONFIG_HOME are unset)".into()],
+                warnings: vec![t("steam_account.no_config_dir").into()],
             },
         };
 
         let (steam_id, steam_id_source) = match steam_root.and_then(steam::active_user_id) {
             Some(account_id) => (
                 Some(steam::steam_id64(account_id)),
-                Some(format!("Steam userdata · account {account_id}")),
+                Some(t("steam_account.steam_id_source").replace("{id}", &account_id.to_string())),
             ),
             None => (None, None),
         };
 
         if status.key.is_some() && steam_id.is_none() {
-            status.warnings.push(
-                "no Steam account was found in userdata; sign into Steam once, then reopen PitaGames"
-                    .to_string(),
-            );
+            status.warnings.push(t("steam_account.no_account").to_string());
         }
 
         Self {
@@ -94,7 +92,7 @@ impl Account {
     pub fn backend_label(&self) -> String {
         match self.status.backend {
             Some(backend) => backend.to_string(),
-            None => "not configured".to_string(),
+            None => t("steam_account.not_configured").to_string(),
         }
     }
 }
@@ -103,7 +101,7 @@ impl Account {
 pub fn save_key(raw: &str, steam_root: Option<&Path>) -> Result<Account, String> {
     let key = SteamApiKey::parse(raw).map_err(|error| error.to_string())?;
     let store = SteamKeyStore::default_chain()
-        .ok_or_else(|| "no config directory to store the key in".to_string())?;
+        .ok_or_else(|| t("steam_account.no_config_store").to_string())?;
     store.save(&key).map_err(|error| error.to_string())?;
     Ok(Account::load(steam_root))
 }
@@ -111,7 +109,7 @@ pub fn save_key(raw: &str, steam_root: Option<&Path>) -> Result<Account, String>
 /// Remove the key from every writable store, then reload the account.
 pub fn forget_key(steam_root: Option<&Path>) -> Result<Account, String> {
     let store = SteamKeyStore::default_chain()
-        .ok_or_else(|| "no config directory to remove the key from".to_string())?;
+        .ok_or_else(|| t("steam_account.no_config_remove").to_string())?;
     store.forget().map_err(|error| error.to_string())?;
     Ok(Account::load(steam_root))
 }

@@ -5,23 +5,33 @@
 
 use std::time::Duration;
 
+use pitagames_core::i18n::t;
 use time::{Month, OffsetDateTime};
 
 /// Human-readable binary size (`12.0 GiB`).
 pub fn human_bytes(bytes: u64) -> String {
-    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
-
     let mut value = bytes as f64;
     let mut unit = 0;
-    while value >= 1024.0 && unit < UNITS.len() - 1 {
+    while value >= 1024.0 && unit < 4 {
         value /= 1024.0;
         unit += 1;
     }
 
     if unit == 0 {
-        format!("{bytes} B")
+        format!("{bytes} {}", byte_unit(0))
     } else {
-        format!("{value:.1} {}", UNITS[unit])
+        format!("{value:.1} {}", byte_unit(unit))
+    }
+}
+
+/// The size unit at `unit` (0 = bytes).
+fn byte_unit(unit: usize) -> &'static str {
+    match unit {
+        0 => t("format.bytes_b"),
+        1 => t("format.kib"),
+        2 => t("format.mib"),
+        3 => t("format.gib"),
+        _ => t("format.tib"),
     }
 }
 
@@ -34,17 +44,17 @@ pub fn playtime(duration: Duration) -> String {
     let minutes = seconds / 60;
 
     if seconds < 60 {
-        return "<1 min".to_string();
+        return t("format.under_minute").to_string();
     }
     if minutes < 60 {
-        return format!("{minutes} min");
+        return t("format.minutes").replace("{value}", &minutes.to_string());
     }
 
     let hours = minutes as f64 / 60.0;
     if hours < 100.0 {
-        format!("{hours:.1} h")
+        t("format.hours").replace("{value}", &format!("{hours:.1}"))
     } else {
-        format!("{hours:.0} h")
+        t("format.hours").replace("{value}", &format!("{hours:.0}"))
     }
 }
 
@@ -65,20 +75,25 @@ pub fn last_played(at: OffsetDateTime, now: OffsetDateTime) -> String {
     let days = (now - at).whole_days();
 
     if days <= 0 {
-        return "today".to_string();
+        return t("format.last_today").to_string();
     }
     if days == 1 {
-        return "yesterday".to_string();
+        return t("format.last_yesterday").to_string();
     }
     if days < 7 {
-        return format!("{days} days ago");
+        return t("format.days_ago").replace("{count}", &days.to_string());
     }
 
     let month = month_short(at.month());
     if at.year() == now.year() {
-        format!("{} {month}", at.day())
+        t("format.date_day_month")
+            .replace("{day}", &at.day().to_string())
+            .replace("{month}", month)
     } else {
-        format!("{} {month} {}", at.day(), at.year())
+        t("format.date_day_month_year")
+            .replace("{day}", &at.day().to_string())
+            .replace("{month}", month)
+            .replace("{year}", &at.year().to_string())
     }
 }
 
@@ -89,42 +104,45 @@ pub fn last_played(at: OffsetDateTime, now: OffsetDateTime) -> String {
 pub fn duration_ago(age: time::Duration) -> String {
     let seconds = age.whole_seconds().max(0);
     if seconds < 60 {
-        return "just now".to_string();
+        return t("format.just_now").to_string();
     }
     let minutes = seconds / 60;
     if minutes < 60 {
-        return format!("{minutes} min ago");
+        return t("format.minutes_ago").replace("{count}", &minutes.to_string());
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return format!("{hours} h ago");
+        return t("format.hours_ago").replace("{count}", &hours.to_string());
     }
-    format!("{} d ago", hours / 24)
+    t("format.days_ago_short").replace("{count}", &(hours / 24).to_string())
 }
 
 /// A compact timestamp for the log list: `"today 14:32"` or `"09 Nov 14:32"`.
 pub fn log_time(at: OffsetDateTime, now: OffsetDateTime) -> String {
     let time = format!("{:02}:{:02}", at.hour(), at.minute());
     if at.date() == now.date() {
-        return format!("today {time}");
+        return t("format.log_today").replace("{time}", &time);
     }
-    format!("{} {} {time}", at.day(), month_short(at.month()))
+    t("format.date_day_month_time")
+        .replace("{day}", &at.day().to_string())
+        .replace("{month}", month_short(at.month()))
+        .replace("{time}", &time)
 }
 
 fn month_short(month: Month) -> &'static str {
     match month {
-        Month::January => "Jan",
-        Month::February => "Feb",
-        Month::March => "Mar",
-        Month::April => "Apr",
-        Month::May => "May",
-        Month::June => "Jun",
-        Month::July => "Jul",
-        Month::August => "Aug",
-        Month::September => "Sep",
-        Month::October => "Oct",
-        Month::November => "Nov",
-        Month::December => "Dec",
+        Month::January => t("format.month_jan"),
+        Month::February => t("format.month_feb"),
+        Month::March => t("format.month_mar"),
+        Month::April => t("format.month_apr"),
+        Month::May => t("format.month_may"),
+        Month::June => t("format.month_jun"),
+        Month::July => t("format.month_jul"),
+        Month::August => t("format.month_aug"),
+        Month::September => t("format.month_sep"),
+        Month::October => t("format.month_oct"),
+        Month::November => t("format.month_nov"),
+        Month::December => t("format.month_dec"),
     }
 }
 

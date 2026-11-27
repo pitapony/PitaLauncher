@@ -12,6 +12,8 @@
 
 use dioxus::prelude::*;
 
+use pitagames_core::i18n::t;
+
 use crate::focus;
 use crate::overlay::OverlayChoice;
 
@@ -40,6 +42,7 @@ pub fn OverlayView(props: OverlayViewProps) -> Element {
     let clock = props.clock;
     let on_choose = props.on_choose;
     let on_close = props.on_close;
+    let controller_line = t("overlay.controller").replace("{status}", &status);
 
     rsx! {
         div {
@@ -53,7 +56,7 @@ pub fn OverlayView(props: OverlayViewProps) -> Element {
                     style: "display:flex;align-items:baseline;gap:12px;margin-bottom:6px;",
                     span {
                         style: "font-size:var(--text-heading);font-weight:700;color:#ffffff;",
-                        "Menu"
+                        {t("overlay.menu")}
                     }
                     span {
                         style: "margin-left:auto;font-size:var(--text-heading);color:var(--text-secondary);",
@@ -96,10 +99,10 @@ pub fn OverlayView(props: OverlayViewProps) -> Element {
 
                 div {
                     style: "display:flex;align-items:center;gap:10px;margin-top:8px;padding-top:10px;border-top:1px solid #26262f;font-size:var(--text-caption);color:var(--text-muted);",
-                    span { "Controller: {status}" }
+                    span { "{controller_line}" }
                     span {
                         style: "margin-left:auto;",
-                        "M or Start closes"
+                        {t("overlay.close_hint")}
                     }
                 }
             }

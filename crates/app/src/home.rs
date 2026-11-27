@@ -17,6 +17,7 @@
 use std::cmp::Reverse;
 
 use pitagames_core::Store;
+use pitagames_core::i18n::t;
 use pitagames_input::{FocusGraph, FocusId};
 
 use crate::library::Library;
@@ -201,7 +202,7 @@ fn shelves(library: &Library) -> Vec<Shelf> {
     recent.truncate(RECENT_LIMIT);
     if !recent.is_empty() {
         shelves.push(Shelf {
-            title: "Recently played".to_string(),
+            title: t("home.recently_played").to_string(),
             kind: ShelfKind::RecentlyPlayed,
             games: recent,
         });
@@ -216,7 +217,7 @@ fn shelves(library: &Library) -> Vec<Shelf> {
         .collect();
     if !installed.is_empty() {
         shelves.push(Shelf {
-            title: "Installed".to_string(),
+            title: t("home.installed").to_string(),
             kind: ShelfKind::Installed,
             games: installed,
         });
@@ -251,11 +252,11 @@ fn shelves(library: &Library) -> Vec<Shelf> {
 /// The display name of a store shelf.
 pub fn store_label(store: Store) -> &'static str {
     match store {
-        Store::Steam => "Steam",
-        Store::Gog => "GOG",
-        Store::Epic => "Epic",
-        Store::Amazon => "Amazon",
-        Store::Local => "Local",
+        Store::Steam => t("store.steam"),
+        Store::Gog => t("store.gog"),
+        Store::Epic => t("store.epic"),
+        Store::Amazon => t("store.amazon"),
+        Store::Local => t("store.local"),
     }
 }
 

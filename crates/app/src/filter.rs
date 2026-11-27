@@ -16,6 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use pitagames_core::{Game, GameId, Store};
+use pitagames_core::i18n::t;
 use pitagames_input::{FocusGraph, FocusId};
 use pitagames_stores::InstallPhase;
 use pitagames_stores::status::updates;
@@ -55,11 +56,11 @@ impl Sort {
     pub const ALL: [Sort; 3] = [Sort::Title, Sort::Playtime, Sort::Recent];
 
     /// The label the Sort chip shows for this mode.
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Title => "Title",
-            Self::Playtime => "Playtime",
-            Self::Recent => "Recent",
+            Self::Title => t("sort.title"),
+            Self::Playtime => t("sort.playtime"),
+            Self::Recent => t("sort.recent"),
         }
     }
 
@@ -217,10 +218,10 @@ impl Chip {
     /// The label the chip draws; the Sort chip names the mode it is on.
     pub fn label(self, filter: &LibraryFilter) -> String {
         match self {
-            Self::Installed => "Installed".to_string(),
-            Self::Updates => "Updates".to_string(),
+            Self::Installed => t("filter.installed").to_string(),
+            Self::Updates => t("filter.updates").to_string(),
             Self::Store(store) => crate::home::store_label(store).to_string(),
-            Self::Sort => format!("Sort: {}", filter.sort.label()),
+            Self::Sort => format!("{} {}", t("filter.sort"), filter.sort.label()),
         }
     }
 
@@ -304,9 +305,9 @@ pub fn back_action(filter: &LibraryFilter) -> BackAction {
 pub fn empty_message(filter: &LibraryFilter) -> String {
     let needle = filter.query.trim();
     if needle.is_empty() {
-        "Nothing matches the current filters. Press Back to clear them.".to_string()
+        t("filter.empty").to_string()
     } else {
-        format!("Nothing matches \"{needle}\". Press Back to clear the filters.")
+        t("filter.empty_query").replace("{query}", needle)
     }
 }
 
