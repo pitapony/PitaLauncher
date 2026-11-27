@@ -31,6 +31,7 @@ use pitagames_platform::anticheat::{
 use pitagames_platform::capability::{self, Availability, Field};
 use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::disk;
+use pitagames_platform::eac::{self, EacProbe, EacReadiness, EacVerdict};
 use pitagames_platform::gpu::{self, GpuProbe, GpuProfile, HdrSupport};
 use pitagames_platform::launch as handoff;
 use pitagames_platform::launch::{Outcome, Prepared};
@@ -91,6 +92,7 @@ fn run() -> Result<()> {
         "capability" => capability(&args.collect::<Vec<_>>()),
         "compat" => compat(&args.collect::<Vec<_>>()),
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
+        "eac" => eac(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "logs" => logs(&args.collect::<Vec<_>>()),
         "import" => import(&args.collect::<Vec<_>>()),
@@ -7126,6 +7128,256 @@ fn anticheat_usage() -> String {
         .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// eac
+// ---------------------------------------------------------------------------
+
+/// Report EAC Linux v2 readiness and, with an appid, the game's verdict.
+///
+/// Read-only: it never runs `eac-setup`, never modifies the boot chain and
+/// never touches Secure Boot keys, the TPM or signing. `--cmdline`/`--root`
+/// point the probe at fixtures, so the whole report works with no EAC machine.
+fn eac(args: &[String]) -> Result<()> {
+    let parsed = parse_eac_args(args)?;
+    if parsed.help {
+        println!("{}", eac_usage());
+        return Ok(());
+    }
+
+    let mut probe = match &parsed.root {
+        Some(root) => EacProbe::from_root(root),
+        None => EacProbe::host(),
+    };
+    if let Some(file) = &parsed.cmdline {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        probe = probe.with_cmdline(text.trim());
+    }
+    if parsed.tools {
+        probe = probe.with_tools(true, true);
+    }
+
+    let readiness = eac::probe(&probe);
+    for warning in &readiness.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let game = parsed
+        .app_id
+        .as_ref()
+        .map(|app_id| GameId::new(Store::Steam, app_id.clone()));
+
+    let verdict = match &game {
+        Some(id) => {
+            let shipped = if parsed.shipped.is_empty() {
+                pitagames_platform::compat::default_shipped_dirs()
+            } else {
+                parsed.shipped.clone()
+            };
+            let user = if parsed.user.is_empty() {
+                pitagames_platform::compat::default_user_dirs()
+            } else {
+                parsed.user.clone()
+            };
+            let db = CompatDb::load_from(&shipped, &user);
+            for warning in db.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            let entry = db.get(id);
+            if entry.is_none() {
+                eprintln!(
+                    "warning: no compat entry for {}:{}",
+                    id.store.as_str(),
+                    id.store_id
+                );
+            }
+            let curated = entry
+                .map(|entry| entry.anticheat)
+                .unwrap_or(AntiCheat::Unknown);
+            let eac_v2 = entry.is_some_and(|entry| entry.eac_v2);
+            Some(eac::verdict(curated, eac_v2, &readiness))
+        }
+        None => None,
+    };
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "readiness": readiness,
+            "verdict": verdict,
+            "reboot": {
+                "argv": eac::reboot_argv(),
+                "command": eac::reboot_command_line(),
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for line in eac_lines(&readiness, verdict.as_ref(), game.as_ref()) {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+fn eac_lines(
+    readiness: &EacReadiness,
+    verdict: Option<&EacVerdict>,
+    game: Option<&GameId>,
+) -> Vec<String> {
+    let mut lines = vec!["EAC Linux v2 readiness".to_string()];
+
+    for check in &readiness.checks {
+        let mark = if check.satisfied { "ok  " } else { "FAIL" };
+        lines.push(format!(
+            "  {:<20} {mark}  {}",
+            check.requirement.as_str(),
+            check.detail
+        ));
+        if !check.satisfied {
+            lines.push(format!("      -> {}", check.requirement.fix()));
+        }
+    }
+
+    let presence = |present: bool| if present { "present" } else { "absent" };
+    lines.push(format!(
+        "  {:<20} {}",
+        "eac-setup",
+        presence(readiness.eac_setup)
+    ));
+    lines.push(format!(
+        "  {:<20} {}",
+        "eac-status",
+        presence(readiness.eac_status)
+    ));
+    lines.push(format!(
+        "  {:<20} {}",
+        "ready",
+        if readiness.ready() { "yes" } else { "no" }
+    ));
+    for warning in &readiness.warnings {
+        lines.push(format!("  warning: {warning}"));
+    }
+
+    if let Some(id) = game {
+        lines.push(format!("Game: {}:{}", id.store.as_str(), id.store_id));
+    }
+    if let Some(verdict) = verdict {
+        lines.push(format!("  verdict: {}", verdict.label()));
+        if let Some(message) = verdict.message() {
+            lines.push(format!("      {message}"));
+        }
+        if let Some(notice) = verdict.notice() {
+            lines.push(format!("      note: {notice}"));
+        }
+        match verdict {
+            EacVerdict::NeedsEacEntry {
+                can_reboot: true, ..
+            } => lines.push(format!(
+                "  reboot:  {}  (offered behind a confirmation)",
+                eac::reboot_command_line()
+            )),
+            EacVerdict::NeedsEacEntry { .. } => lines.push(format!(
+                "  reboot:  {}  (eac-setup not found)",
+                eac::reboot_command_line()
+            )),
+            EacVerdict::NotProtected
+            | EacVerdict::ProtectedUnsupported { .. }
+            | EacVerdict::Ready => {}
+        }
+    }
+
+    lines
+}
+
+/// Parsed `eac` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EacArgs {
+    app_id: Option<String>,
+    cmdline: Option<PathBuf>,
+    root: Option<PathBuf>,
+    shipped: Vec<PathBuf>,
+    user: Vec<PathBuf>,
+    tools: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_eac_args(args: &[String]) -> Result<EacArgs> {
+    let mut parsed = EacArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--tools" => parsed.tools = true,
+            "--cmdline" | "--root" | "--shipped" | "--user" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                set_eac_path(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--")
+                && (arg.starts_with("--cmdline=")
+                    || arg.starts_with("--root=")
+                    || arg.starts_with("--shipped=")
+                    || arg.starts_with("--user=")) =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                set_eac_path(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => {
+                if parsed.app_id.is_some() {
+                    bail!("expected a single <appid>\n\n{}", eac_usage());
+                }
+                parsed.app_id = Some(other.to_string());
+            }
+            other => bail!("unexpected argument `{other}` for `eac`\n\n{}", eac_usage()),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn set_eac_path(parsed: &mut EacArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--cmdline" => parsed.cmdline = Some(PathBuf::from(value)),
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--shipped" => parsed.shipped.push(PathBuf::from(value)),
+        "--user" => parsed.user.push(PathBuf::from(value)),
+        other => bail!("internal error: unknown eac flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn eac_usage() -> String {
+    "USAGE:\n    pitagames-cli eac [<appid>] [options]\n\n\
+     ARGS:\n    \
+     <appid>                Numeric Steam appid, to add the game's verdict\n\n\
+     OPTIONS:\n    \
+     --cmdline <file>       Read the kernel command line from this file (default: /proc/cmdline)\n    \
+     --root <dir>           Read the boot state from a fixture tree that mirrors `/`\n    \
+     --tools                Report eac-setup/eac-status as present (fixture runs)\n    \
+     --shipped <dir>        Read shipped compat entries from this directory (repeatable)\n    \
+     --user <dir>           Read user compat overrides from this directory (repeatable)\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Reports whether this boot satisfies the EAC Linux v2 requirements, read from\n\
+     /proc/cmdline, the kernel release and the boot state, with no dependency on\n\
+     eac-status. With an appid it adds the game's verdict. Read-only: it never runs\n\
+     eac-setup, never modifies the boot chain and never touches Secure Boot keys,\n\
+     the TPM or signing."
+        .to_string()
+}
+
 fn compat_usage() -> String {
     "USAGE:\n    pitagames-cli compat [<store> <id>] [--shipped <dir>]... [--user <dir>]... [--json]\n\n\
      ARGS:\n    \
@@ -7293,7 +7545,7 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    eac        Report EAC Linux v2 readiness and the game's verdict\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -10148,6 +10400,82 @@ verified = ["rdna4"]
         assert!(joined.contains("none (no markers found)"), "{joined}");
         assert!(joined.contains("(not installed here)"), "{joined}");
         assert!(joined.contains("injection allowed"), "{joined}");
+    }
+
+    #[test]
+    fn parses_eac_arguments() {
+        let parsed = parse_eac_args(&[
+            "1172470".to_string(),
+            "--cmdline".to_string(),
+            "/tmp/cmdline".to_string(),
+            "--root=/fixture".to_string(),
+            "--shipped".to_string(),
+            "/compat".to_string(),
+            "--tools".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.app_id.as_deref(), Some("1172470"));
+        assert_eq!(parsed.cmdline, Some(PathBuf::from("/tmp/cmdline")));
+        assert_eq!(parsed.root, Some(PathBuf::from("/fixture")));
+        assert_eq!(parsed.shipped, vec![PathBuf::from("/compat")]);
+        assert!(parsed.tools && parsed.json && !parsed.help);
+
+        for args in [
+            vec!["--cmdline"],
+            vec!["--cmdline="],
+            vec!["1", "2"],
+            vec!["--bogus"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_eac_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        assert!(parse_eac_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn renders_eac_readiness_and_the_verdict() {
+        use pitagames_platform::eac::{self, EacProbe};
+
+        // A normal CachyOS boot with an EAC v2 game: needs the EAC entry.
+        let normal = EacProbe::at("root=UUID=abc")
+            .with_secure_boot(true)
+            .with_tpm(2)
+            .with_tools(true, true);
+        let readiness = eac::probe(&normal);
+        let verdict = eac::verdict(AntiCheat::Eac, true, &readiness);
+        let lines = eac_lines(
+            &readiness,
+            Some(&verdict),
+            Some(&GameId::new(Store::Steam, "1172470")),
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("EAC Linux v2 readiness"), "{joined}");
+        assert!(joined.contains("secure_boot"), "{joined}");
+        assert!(joined.contains("FAIL"), "{joined}");
+        assert!(joined.contains("Game: steam:1172470"), "{joined}");
+        assert!(joined.contains("needs the EAC entry"), "{joined}");
+        assert!(joined.contains("eac-setup boot"), "{joined}");
+
+        // On the EAC entry: every check passes and the verdict says ready.
+        let eac_entry = EacProbe::at(
+            "lockdown=integrity lsm=landlock,lockdown,yama,integrity,bpf iommu.passthrough=0 \
+             intel_iommu=on module.sig_enforce=1 sysctl.kernel.kexec_load_disabled=1",
+        )
+        .with_osrelease("7.3.3-1-cachyos-eac")
+        .with_secure_boot(true)
+        .with_tpm(2)
+        .with_tools(true, true);
+        let ready = eac::probe(&eac_entry);
+        let verdict = eac::verdict(AntiCheat::Eac, true, &ready);
+        let lines = eac_lines(&ready, Some(&verdict), None);
+        let joined = lines.join("\n");
+        assert!(!joined.contains("FAIL"), "{joined}");
+        assert!(joined.contains("ready"), "{joined}");
+        assert!(joined.contains("EAC Linux v2 — ready"), "{joined}");
+        assert!(joined.contains("new — being tested"), "{joined}");
     }
 
     #[test]

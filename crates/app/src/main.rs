@@ -48,6 +48,7 @@ mod desktop_entry;
 mod detail;
 mod diagnostics;
 mod downloads;
+mod eac;
 mod filter;
 mod focus;
 mod format;

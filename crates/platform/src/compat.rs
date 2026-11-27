@@ -393,6 +393,12 @@ pub struct CompatEntry {
     pub id: GameId,
     pub title: String,
     pub anticheat: AntiCheat,
+    /// Whether Epic has enabled **EAC Linux v2** for this game (`platform::eac`).
+    ///
+    /// A launcher cannot infer this from a game directory, so it is curated
+    /// here, exactly like `anticheat`. `false` (the default) keeps the old
+    /// "protected → unsupported on Linux" answer.
+    pub eac_v2: bool,
     pub engine: Option<String>,
     /// Architectures this entry is offered for. Empty means unverified.
     pub verified: Vec<Arch>,
@@ -733,6 +739,7 @@ struct RawGame {
     store_id: Option<String>,
     title: Option<String>,
     anticheat: Option<AntiCheat>,
+    eac_v2: Option<bool>,
     engine: Option<String>,
     verified: Option<Vec<Arch>>,
 }
@@ -842,6 +849,7 @@ impl RawEntry {
             id: GameId::new(store, store_id),
             title,
             anticheat: game.anticheat.unwrap_or_default(),
+            eac_v2: game.eac_v2.unwrap_or(false),
             engine: game.engine,
             verified: game.verified.unwrap_or_default(),
             upscaling: self.upscaling.unwrap_or_default().into_rules()?,
@@ -945,6 +953,7 @@ impl MergeField for RawGame {
         set(&mut self.store_id, other.store_id);
         set(&mut self.title, other.title);
         set(&mut self.anticheat, other.anticheat);
+        set(&mut self.eac_v2, other.eac_v2);
         set(&mut self.engine, other.engine);
         set(&mut self.verified, other.verified);
     }
@@ -1128,6 +1137,65 @@ notes = "End = NR Control, Insert = OptiScaler"
             Some(NrBackend::Rdna3Fork)
         );
         assert_eq!(NrBackendChoice::Auto.backend(), None);
+    }
+
+    #[test]
+    fn eac_v2_is_curated_and_defaults_off() {
+        // The default keeps the old "protected → unsupported on Linux" answer.
+        assert!(!CompatEntry::from_toml(CYBERPUNK).unwrap().eac_v2);
+
+        let apex = CompatEntry::from_toml(
+            r#"
+[game]
+store = "steam"
+store_id = "1172470"
+title = "Apex Legends"
+anticheat = "eac"
+eac_v2 = true
+"#,
+        )
+        .unwrap();
+        assert_eq!(apex.anticheat, AntiCheat::Eac);
+        assert!(apex.eac_v2);
+    }
+
+    #[test]
+    fn a_user_override_can_flip_eac_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let shipped = dir.path().join("shipped");
+        let user = dir.path().join("user");
+        std::fs::create_dir_all(&shipped).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+
+        write(
+            &shipped,
+            "steam-1172470.toml",
+            r#"
+[game]
+store = "steam"
+store_id = "1172470"
+title = "Apex Legends"
+anticheat = "eac"
+"#,
+        );
+        // The user marks it EAC v2 once Epic enables it (or clears the claim).
+        write(
+            &user,
+            "steam-1172470.toml",
+            r#"
+[game]
+store = "steam"
+store_id = "1172470"
+eac_v2 = true
+"#,
+        );
+
+        let db = CompatDb::load_from(&[shipped], &[user]);
+        assert!(db.warnings().is_empty(), "{:?}", db.warnings());
+        let entry = db.get(&GameId::new(Store::Steam, "1172470")).unwrap();
+        assert_eq!(entry.anticheat, AntiCheat::Eac);
+        assert!(entry.eac_v2);
+        assert_eq!(entry.title, "Apex Legends");
     }
 
     #[test]
