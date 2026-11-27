@@ -81,6 +81,7 @@ mod runtime;
 mod safe_mode;
 mod session;
 mod session_entry;
+mod settings;
 mod shell;
 mod steam_account;
 mod store_installs;
@@ -399,6 +400,7 @@ fn App() -> Element {
     let detail_actions = use_hook(focus::ActionChannel::new);
     let graphics_actions = use_hook(focus::ActionChannel::new);
     let controls_actions = use_hook(focus::ActionChannel::new);
+    let settings_actions = use_hook(focus::ActionChannel::new);
     let downloads_focus = focus::use_focus();
 
     // The persisted input maps. The keyboard pump and the gamepad worker both
@@ -497,6 +499,7 @@ fn App() -> Element {
             detail_actions.clone(),
             graphics_actions.clone(),
             controls_actions.clone(),
+            settings_actions.clone(),
         ),
         shell_state.clone(),
         pad_active,
@@ -614,6 +617,7 @@ fn App() -> Element {
             detail_actions.clone(),
             graphics_actions.clone(),
             controls_actions.clone(),
+            settings_actions.clone(),
         ),
         shell_state.clone(),
         pad_active,
@@ -874,8 +878,18 @@ fn App() -> Element {
     } else if current_view == View::Graphics {
         // The graphics screen's own row: Choose (Confirm) and Back.
         pitagames_input::hints_for(&hint_map, &pitagames_input::GRAPHICS_HINTS)
+    } else if current_view == View::Settings {
+        // The settings screen's own row: Change (Confirm) and Back.
+        pitagames_input::hints_for(&hint_map, &pitagames_input::SETTINGS_HINTS)
     } else {
         pitagames_input::hints(&hint_map)
+    };
+
+    // The settings screen's theme chips switch the live shell through the shell
+    // state's own `set`, so the preference is remembered exactly as `F11` does.
+    let settings_on_shell = {
+        let mut state = shell_state.clone();
+        move |shell: Shell| state.set(shell)
     };
 
     // The grid is a child component so scroll-position changes re-render only
@@ -1357,6 +1371,13 @@ fn App() -> Element {
                     }
                     button {
                         onclick: move |_| {
+                            session.write().go(View::Settings);
+                        },
+                        style: nav_style(current_view == View::Settings),
+                        "{View::Settings.label()}"
+                    }
+                    button {
+                        onclick: move |_| {
                             session.write().go(View::Logs);
                         },
                         style: nav_style(current_view == View::Logs),
@@ -1503,6 +1524,17 @@ fn App() -> Element {
                         actions: controls_actions,
                         remap,
                         pads,
+                    }
+                }
+            } else if current_view == View::Settings {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    settings::SettingsView {
+                        actions: settings_actions,
+                        shell: shell_state.shell,
+                        on_shell: settings_on_shell,
+                        library: library_state,
+                        proton: proton_report.clone(),
                     }
                 }
             } else if current_view == View::Logs {
@@ -2446,6 +2478,7 @@ pub(crate) fn dispatch_action(
     detail: &focus::ActionChannel,
     graphics: &focus::ActionChannel,
     controls: &focus::ActionChannel,
+    settings: &focus::ActionChannel,
 ) {
     // Read the current view first: the match scrutinee's guard would live for
     // the whole match and clash with the `set_view` in the fallback arm.
@@ -2458,6 +2491,7 @@ pub(crate) fn dispatch_action(
         View::Detail => detail,
         View::Graphics => graphics,
         View::Controls => controls,
+        View::Settings => settings,
         View::History | View::Account | View::Logs => {
             // These screens have no graph yet; Back still leaves them so the
             // keyboard and a pad cannot trap the user.

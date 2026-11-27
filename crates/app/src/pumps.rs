@@ -405,6 +405,7 @@ pub(crate) fn gamepad_actions(
         focus::ActionChannel,
         focus::ActionChannel,
         focus::ActionChannel,
+        focus::ActionChannel,
     ),
     pad_shell: shell::ShellState,
     pad_active: Signal<bool>,
@@ -507,6 +508,7 @@ pub(crate) fn gamepad_actions(
                             &actions.4,
                             &actions.5,
                             &actions.6,
+                            &actions.7,
                         );
                     }
                     gamepad::GamepadEvent::Control(binding) => {
@@ -566,6 +568,14 @@ pub(crate) fn bootstrap(
             let mut owned_stale = false;
             // Read-only and fast; the detail page needs it as soon as a game opens.
             proton_state.set(Some(runtime::discover_proton()));
+
+            // The Settings screen's compat-DB sync, when it is on: refresh the
+            // data-directory copy once per launch, so a package update is picked
+            // up without opening Settings. A failure is silent here; the screen
+            // is where a user asks and reads the report.
+            if pitagames_core::ui::AppConfig::load_default().0.compat.sync {
+                let _ = crate::settings::run_sync();
+            }
 
             match persist::open_default().await {
                 Ok(db) => {
@@ -727,6 +737,7 @@ pub(crate) fn keyboard(
         focus::ActionChannel,
         focus::ActionChannel,
         focus::ActionChannel,
+        focus::ActionChannel,
     ),
     mut key_shell: shell::ShellState,
     mut key_pad_active: Signal<bool>,
@@ -857,6 +868,7 @@ pub(crate) fn keyboard(
             &key_actions.4,
             &key_actions.5,
             &key_actions.6,
+            &key_actions.7,
         );
     });
 }
