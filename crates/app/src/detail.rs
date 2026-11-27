@@ -159,7 +159,9 @@ pub fn Detail(props: DetailProps) -> Element {
         async move {
             let db = pitagames_platform::compat::CompatDb::load();
             let entry = db.get(&id);
-            let curated = entry.map(|entry| entry.anticheat).unwrap_or(AntiCheat::Unknown);
+            let curated = entry
+                .map(|entry| entry.anticheat)
+                .unwrap_or(AntiCheat::Unknown);
             let eac_v2 = entry.is_some_and(|entry| entry.eac_v2);
             let view = crate::anticheat::summarize(dir.as_deref(), curated);
             let effective = view.kind;

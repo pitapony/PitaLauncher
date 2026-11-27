@@ -7191,7 +7191,9 @@ fn eac(args: &[String]) -> Result<()> {
                     id.store_id
                 );
             }
-            let curated = entry.map(|entry| entry.anticheat).unwrap_or(AntiCheat::Unknown);
+            let curated = entry
+                .map(|entry| entry.anticheat)
+                .unwrap_or(AntiCheat::Unknown);
             let eac_v2 = entry.is_some_and(|entry| entry.eac_v2);
             Some(eac::verdict(curated, eac_v2, &readiness))
         }

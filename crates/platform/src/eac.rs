@@ -378,10 +378,9 @@ fn check_requirement(
 ) -> RequirementCheck {
     let (satisfied, detail) = match requirement {
         Requirement::SecureBoot => match input.secure_boot {
-            Some(true) if input.setup_mode == Some(true) => (
-                false,
-                "the firmware is in setup mode".to_string(),
-            ),
+            Some(true) if input.setup_mode == Some(true) => {
+                (false, "the firmware is in setup mode".to_string())
+            }
             Some(true) => (true, "enabled".to_string()),
             Some(false) => (false, "disabled".to_string()),
             None => (false, "not readable".to_string()),
@@ -424,9 +423,9 @@ fn check_requirement(
         }
         Requirement::BpfLsm => {
             let lsm = lsm_list(tokens);
-            let has_all = lsm
-                .as_ref()
-                .is_some_and(|list| list.contains("bpf") && list.contains("lockdown") && list.contains("integrity"));
+            let has_all = lsm.as_ref().is_some_and(|list| {
+                list.contains("bpf") && list.contains("lockdown") && list.contains("integrity")
+            });
             if has_all {
                 (true, lsm.unwrap_or_default())
             } else {
@@ -440,7 +439,10 @@ fn check_requirement(
             let passthrough = has_token(tokens, "iommu.passthrough=0");
             let enabled = has_token(tokens, "intel_iommu=on") || has_token(tokens, "amd_iommu=on");
             if passthrough && enabled {
-                (true, "iommu.passthrough=0 with an iommu=on option".to_string())
+                (
+                    true,
+                    "iommu.passthrough=0 with an iommu=on option".to_string(),
+                )
             } else if input.iommu == Some(true) {
                 (
                     false,
@@ -460,7 +462,7 @@ fn check_requirement(
 }
 
 fn has_token(tokens: &[&str], wanted: &str) -> bool {
-    tokens.iter().any(|token| *token == wanted)
+    tokens.contains(&wanted)
 }
 
 /// The `lsm=` value, as a comma-separated list, when present.
@@ -607,7 +609,11 @@ pub fn verdict(anticheat: AntiCheat, eac_v2: bool, readiness: &EacReadiness) -> 
 /// string, so a caller execs it directly.
 #[must_use]
 pub fn reboot_argv() -> Vec<String> {
-    vec![PKEXEC.to_string(), EAC_SETUP.to_string(), "boot".to_string()]
+    vec![
+        PKEXEC.to_string(),
+        EAC_SETUP.to_string(),
+        "boot".to_string(),
+    ]
 }
 
 /// The command to show when the reboot cannot be offered (no `eac-setup`).
@@ -754,10 +760,7 @@ mod tests {
     fn each_requirement_fails_on_its_own() {
         // Start from a ready boot and break one thing at a time.
         let cases: &[(Requirement, EacProbe)] = &[
-            (
-                Requirement::SecureBoot,
-                eac_probe().with_secure_boot(false),
-            ),
+            (Requirement::SecureBoot, eac_probe().with_secure_boot(false)),
             (
                 Requirement::SecureBoot,
                 eac_probe().with_secure_boot(true).with_setup_mode(true),
@@ -796,11 +799,13 @@ mod tests {
             ),
             (
                 Requirement::BpfLsm,
-                EacProbe::at(EAC_CMDLINE.replace("landlock,lockdown,yama,integrity,bpf", "landlock,yama"))
-                    .with_osrelease("7.3.3-1-cachyos-eac")
-                    .with_secure_boot(true)
-                    .with_tpm(2)
-                    .with_tools(true, true),
+                EacProbe::at(
+                    EAC_CMDLINE.replace("landlock,lockdown,yama,integrity,bpf", "landlock,yama"),
+                )
+                .with_osrelease("7.3.3-1-cachyos-eac")
+                .with_secure_boot(true)
+                .with_tpm(2)
+                .with_tools(true, true),
             ),
             (
                 Requirement::Iommu,
@@ -855,7 +860,10 @@ mod tests {
         let readiness = probe(&EacProbe::default());
         assert!(!readiness.ready());
         assert!(
-            readiness.warnings.iter().any(|line| line.contains(PROC_CMDLINE)),
+            readiness
+                .warnings
+                .iter()
+                .any(|line| line.contains(PROC_CMDLINE)),
             "{:?}",
             readiness.warnings
         );
@@ -865,7 +873,12 @@ mod tests {
     #[test]
     fn the_verdict_distinguishes_the_three_states() {
         let ready = probe(&eac_probe());
-        let off_entry = probe(&EacProbe::at("root=UUID=abc").with_secure_boot(true).with_tpm(2).with_tools(true, true));
+        let off_entry = probe(
+            &EacProbe::at("root=UUID=abc")
+                .with_secure_boot(true)
+                .with_tpm(2)
+                .with_tools(true, true),
+        );
 
         // Protected but not EAC v2: unsupported on Linux, no reboot offered.
         let unsupported = verdict(AntiCheat::Eac, false, &ready);
@@ -887,7 +900,11 @@ mod tests {
 
         // EAC v2 off the entry: needs the EAC entry, offers the reboot.
         let needs = verdict(AntiCheat::Eac, true, &off_entry);
-        let EacVerdict::NeedsEacEntry { missing, can_reboot } = &needs else {
+        let EacVerdict::NeedsEacEntry {
+            missing,
+            can_reboot,
+        } = &needs
+        else {
             panic!("expected NeedsEacEntry, got {needs:?}");
         };
         assert!(can_reboot);
@@ -923,7 +940,10 @@ mod tests {
     #[test]
     fn a_game_with_no_curated_v2_and_no_eac_is_not_protected() {
         let ready = probe(&eac_probe());
-        assert_eq!(verdict(AntiCheat::None, false, &ready), EacVerdict::NotProtected);
+        assert_eq!(
+            verdict(AntiCheat::None, false, &ready),
+            EacVerdict::NotProtected
+        );
         assert!(EacVerdict::NotProtected.message().is_none());
     }
 
@@ -986,7 +1006,9 @@ mod tests {
             "cachyos-eac-ca",
         ] {
             assert!(
-                !argv.iter().any(|arg| arg.to_lowercase().contains(forbidden)),
+                !argv
+                    .iter()
+                    .any(|arg| arg.to_lowercase().contains(forbidden)),
                 "reboot argv mentions `{forbidden}`: {argv:?}"
             );
         }

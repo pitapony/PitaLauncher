@@ -43,7 +43,7 @@ pub use compat::{
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
 pub use eac::{
-    EacProbe, EacReadiness, EacVerdict, Requirement, RequirementCheck, NOT_VALIDATED, probe,
+    EacProbe, EacReadiness, EacVerdict, NOT_VALIDATED, Requirement, RequirementCheck, probe,
     reboot_argv, verdict,
 };
 pub use envc::{

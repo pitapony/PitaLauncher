@@ -113,7 +113,11 @@ mod tests {
     fn a_protected_game_without_v2_explains_it_cannot_run_on_linux() {
         let view = summarize(AntiCheat::Eac, false, &ready_probe());
         assert!(view.show);
-        assert!(view.label.contains("not supported on Linux"), "{}", view.label);
+        assert!(
+            view.label.contains("not supported on Linux"),
+            "{}",
+            view.label
+        );
         assert!(view.message.unwrap().contains("not enabled"));
         assert!(view.reboot.is_none());
         assert!(view.notice.is_none());
