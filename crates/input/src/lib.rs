@@ -47,6 +47,7 @@ mod binding;
 mod focus;
 mod gamepad;
 mod hint;
+mod layout;
 mod map;
 mod mapper;
 mod osk;
@@ -57,11 +58,12 @@ mod source;
 
 pub use action::{Action, ActionEvent, ActionKind, UnknownAction};
 pub use binding::{Axis, Binding, Button, Direction, Key, Stick};
-pub use focus::{FocusGraph, FocusId, FocusNode};
+pub use focus::{Band, FocusGraph, FocusId, FocusNode};
 pub use gamepad::{GilrsSource, SourceError};
 pub use hint::{
     GAME_PAGE_HINTS, HINT_ACTIONS, Hint, ScreenHint, action_label, binding_label, hints, hints_for,
 };
+pub use layout::{COLUMN_GAP, H_PADDING, TILE_MIN_WIDTH, TILE_MIN_WIDTH_CONSOLE, fit_columns};
 pub use map::{
     DEFAULT_DEADZONE, DEFAULT_REPEAT_DELAY_MS, DEFAULT_REPEAT_INTERVAL_MS, InputMap, InputMaps,
     InputMapsError, KEYBOARD_DEVICE,

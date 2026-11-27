@@ -77,8 +77,10 @@ dioxus = { version = "0.7", features = ["desktop"] }
 futures-channel = "0.3"
 futures-util = "0.3"
 
-# Golden-file snapshots for the M3 env compiler (`platform::envc`, ticket #18).
-# No inline snapshots: the matrix is committed as files under `tests/snapshots`.
+# Golden-file snapshots: the M3 env compiler (`platform::envc`, ticket #18) and
+# the pure-model layout snapshots at 1080p/4K (`pitagames-input`, ticket #14).
+# No inline snapshots: both are committed as files under `tests/snapshots`, and
+# the pure-model ones need no webview, so they run on macOS and in the container.
 insta = "1"
 
 tempfile = "3.15"

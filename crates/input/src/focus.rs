@@ -80,6 +80,29 @@ impl FocusNode {
     }
 }
 
+/// One run of cells in a ragged layout.
+///
+/// A band is a contiguous group of cells that starts on a fresh row and lays
+/// its cells row-major, `columns` to a line. The console library's chip row
+/// over its tiles and the home's Continue hero over its shelves are both lists
+/// of bands, and [`FocusGraph::ragged`] turns either into the one graph the
+/// screens walk. A zero `count` occupies no row; a zero `columns` behaves as
+/// one column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Band {
+    /// How many cells the band holds.
+    pub count: usize,
+    /// How many cells fit on one row before the band wraps.
+    pub columns: usize,
+}
+
+impl Band {
+    /// A band of `count` cells wrapped every `columns`.
+    pub const fn new(count: usize, columns: usize) -> Self {
+        Self { count, columns }
+    }
+}
+
 /// A screen's focusable cells and the one that currently has focus.
 ///
 /// Registering is cheap and idempotent, so a screen can rebuild the graph from
@@ -114,6 +137,38 @@ impl FocusGraph {
                 col: index % columns,
             })
             .collect();
+        Self {
+            nodes,
+            current: None,
+        }
+    }
+
+    /// A ragged layout of consecutive bands.
+    ///
+    /// Each band starts on the row after the previous band's last row and lays
+    /// its cells row-major `columns` to a line. Ids are the flat cell indices
+    /// across all bands, so the first band's cells are `0..count` and the next
+    /// band continues from there — the id space the console library's
+    /// chip-over-tiles graph and the home's `cells` list both use, so one
+    /// screen focus signal can store the id like a grid index.
+    ///
+    /// This is the shared builder behind the two ragged screens: the library's
+    /// chip row over its tiles and the home's hero over its shelves are the same
+    /// shape to the resolver, and neither can drift from the other.
+    pub fn ragged(bands: &[Band]) -> Self {
+        let mut nodes = Vec::new();
+        let mut row = 0usize;
+        for band in bands {
+            let columns = band.columns.max(1);
+            for index in 0..band.count {
+                nodes.push(FocusNode::new(
+                    FocusId::from(nodes.len()),
+                    row + index / columns,
+                    index % columns,
+                ));
+            }
+            row += band.count.div_ceil(columns);
+        }
         Self {
             nodes,
             current: None,
@@ -379,12 +434,7 @@ mod tests {
     /// The ids one move from `id` in the four directions.
     fn moves_from(graph: &FocusGraph, from: FocusId) -> Vec<FocusId> {
         let mut out = Vec::new();
-        for action in [
-            Action::NavigateUp,
-            Action::NavigateDown,
-            Action::NavigateLeft,
-            Action::NavigateRight,
-        ] {
+        for action in NAV_ACTIONS {
             let mut copy = graph.clone();
             assert!(copy.focus(from));
             if let Some(next) = copy.move_focus(action)
@@ -394,6 +444,74 @@ mod tests {
             }
         }
         out
+    }
+
+    /// The four actions the focus graph resolves.
+    const NAV_ACTIONS: [Action; 4] = [
+        Action::NavigateUp,
+        Action::NavigateDown,
+        Action::NavigateLeft,
+        Action::NavigateRight,
+    ];
+
+    /// Every id reachable from `start` by any sequence of navigation moves.
+    fn reachable(graph: &FocusGraph, start: FocusId) -> BTreeSet<FocusId> {
+        let mut seen = BTreeSet::new();
+        seen.insert(start);
+        let mut queue = vec![start];
+        while let Some(cell) = queue.pop() {
+            for next in moves_from(graph, cell) {
+                if seen.insert(next) {
+                    queue.push(next);
+                }
+            }
+        }
+        seen
+    }
+
+    /// Assert the ring can never trap the user.
+    ///
+    /// Two properties, both over the graph's public moves: **reachability** —
+    /// from every cell, every other cell is reachable by some sequence of
+    /// directions, so no layout strands the ring — and **determinism** — the
+    /// answer from a cell does not depend on the order the cells were
+    /// registered, so two identically built screens cannot diverge. An empty
+    /// graph has nothing to check.
+    fn assert_trap_free(graph: &FocusGraph) {
+        let ids: Vec<FocusId> = graph.nodes().iter().map(|node| node.id).collect();
+        if ids.is_empty() {
+            return;
+        }
+        for start in &ids {
+            let seen = reachable(graph, *start);
+            assert_eq!(
+                seen.len(),
+                ids.len(),
+                "from {start} only reached {} of {}",
+                seen.len(),
+                ids.len()
+            );
+        }
+
+        // Register the same cells in reverse; `insert` sorts, so the two graphs
+        // hold identical nodes and every move must agree.
+        let mut reversed = FocusGraph::new();
+        for node in graph.nodes().iter().rev() {
+            reversed.insert(node.id, node.row, node.col);
+        }
+        for cell in &ids {
+            for action in NAV_ACTIONS {
+                let mut forward = graph.clone();
+                let mut backward = reversed.clone();
+                forward.focus(*cell);
+                backward.focus(*cell);
+                assert_eq!(
+                    forward.move_focus(action),
+                    backward.move_focus(action),
+                    "{cell} {action} diverged with registration order"
+                );
+            }
+        }
     }
 
     #[test]
@@ -505,26 +623,49 @@ mod tests {
 
     #[test]
     fn every_cell_of_a_rectangular_grid_reaches_every_other() {
-        for (count, columns) in [(12, 4), (20, 5), (9, 3), (6, 1), (5, 5)] {
-            let graph = FocusGraph::grid(count, columns);
-            for start in 0..count {
-                let mut seen: BTreeSet<FocusId> = BTreeSet::new();
-                let mut queue = vec![id(start)];
-                seen.insert(id(start));
-                while let Some(cell) = queue.pop() {
-                    for next in moves_from(&graph, cell) {
-                        if seen.insert(next) {
-                            queue.push(next);
-                        }
+        for (count, columns) in [(12, 4), (20, 5), (9, 3), (6, 1), (5, 5), (1, 1), (48, 7)] {
+            assert_trap_free(&FocusGraph::grid(count, columns));
+        }
+    }
+
+    #[test]
+    fn every_cell_of_a_ragged_chip_over_tiles_graph_reaches_every_other() {
+        // The console library's shape: a wrapping chip row over a ragged tile
+        // grid. Sweep the sizes a real library reaches — no chips, one chip,
+        // an overflowing row, and a tile grid whose last row is partial.
+        for chip_count in [0, 1, 5, 8] {
+            for chip_columns in [1, 3, 5] {
+                for tile_count in [0, 1, 6, 13] {
+                    for tile_columns in [1, 2, 5, 11] {
+                        let graph = FocusGraph::ragged(&[
+                            Band::new(chip_count, chip_columns),
+                            Band::new(tile_count, tile_columns),
+                        ]);
+                        assert_trap_free(&graph);
                     }
                 }
-                assert_eq!(
-                    seen.len(),
-                    count,
-                    "from {start} in a {count}x{columns} grid only reached {} of {count}",
-                    seen.len()
-                );
             }
+        }
+    }
+
+    #[test]
+    fn every_cell_of_the_home_shelves_reaches_every_other() {
+        // The home is a Continue hero over shelves of different lengths: a
+        // one-tile shelf beside a long one, and shelves shorter than the hero's
+        // column. `assert_trap_free` proves none of them strands the ring.
+        for shelves in [
+            vec![1usize],
+            vec![3],
+            vec![1, 1, 1],
+            vec![5, 1, 9, 2],
+            vec![20, 1, 3, 1, 40, 2],
+            vec![7, 7, 7, 7],
+        ] {
+            let mut bands = vec![Band::new(1, 1)]; // the hero on row 0
+            for length in &shelves {
+                bands.push(Band::new(*length, *length)); // one row per shelf
+            }
+            assert_trap_free(&FocusGraph::ragged(&bands));
         }
     }
 
@@ -627,6 +768,48 @@ mod tests {
         // The old id is gone; the next navigation re-enters at the first cell.
         assert_eq!(graph.focused_node(), None);
         assert_eq!(graph.move_focus(Action::NavigateRight), Some(id(0)));
+    }
+
+    #[test]
+    fn a_ragged_layout_lays_each_band_on_a_fresh_row() {
+        // The chip-over-tiles shape: three chips on one row, then four tiles two
+        // to a line. Ids run flat across the bands.
+        let graph = FocusGraph::ragged(&[Band::new(3, 3), Band::new(4, 2)]);
+        assert_eq!(
+            graph.nodes(),
+            &[
+                FocusNode::new(id(0), 0, 0),
+                FocusNode::new(id(1), 0, 1),
+                FocusNode::new(id(2), 0, 2),
+                FocusNode::new(id(3), 1, 0),
+                FocusNode::new(id(4), 1, 1),
+                FocusNode::new(id(5), 2, 0),
+                FocusNode::new(id(6), 2, 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_wrapped_band_pushes_the_next_band_down() {
+        // Six chips four to a line occupy rows 0 and 1; the next band starts on
+        // row 2, not row 1.
+        let graph = FocusGraph::ragged(&[Band::new(6, 4), Band::new(1, 1)]);
+        assert_eq!(graph.nodes()[5], FocusNode::new(id(5), 1, 1));
+        assert_eq!(graph.nodes()[6], FocusNode::new(id(6), 2, 0));
+    }
+
+    #[test]
+    fn an_empty_band_occupies_no_row() {
+        // A screen with no chips still starts its tiles on row 0.
+        let graph = FocusGraph::ragged(&[Band::new(0, 3), Band::new(2, 2)]);
+        assert_eq!(graph.len(), 2);
+        assert_eq!(graph.nodes()[0], FocusNode::new(id(0), 0, 0));
+    }
+
+    #[test]
+    fn a_zero_column_band_behaves_as_one_column() {
+        let graph = FocusGraph::ragged(&[Band::new(3, 0)]);
+        assert_eq!(graph.nodes()[2], FocusNode::new(id(2), 2, 0));
     }
 
     #[test]

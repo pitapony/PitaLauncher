@@ -1,0 +1,36 @@
+{
+  "device": {
+    "id": 0,
+    "name": "Replay Pad",
+    "guid": "replay-pad",
+    "is_gamepad": true
+  },
+  "events": [
+    { "kind": "button", "button": "d_pad_down", "pressed": true },
+    { "kind": "button", "button": "d_pad_down", "pressed": false },
+    { "kind": "button", "button": "south", "pressed": true },
+    { "kind": "button", "button": "south", "pressed": false },
+    { "kind": "button", "button": "start", "pressed": true },
+    { "kind": "button", "button": "start", "pressed": false },
+    { "kind": "button", "button": "east", "pressed": true },
+    { "kind": "button", "button": "east", "pressed": false },
+    { "kind": "button", "button": "mode", "pressed": true },
+    { "kind": "button", "button": "mode", "pressed": false },
+    { "kind": "button", "button": "right_bumper", "pressed": true },
+    { "kind": "button", "button": "right_bumper", "pressed": false }
+  ],
+  "expected": [
+    { "action": "navigate_down", "kind": "pressed" },
+    { "action": "navigate_down", "kind": "released" },
+    { "action": "confirm", "kind": "pressed" },
+    { "action": "confirm", "kind": "released" },
+    { "action": "menu", "kind": "pressed" },
+    { "action": "menu", "kind": "released" },
+    { "action": "back", "kind": "pressed" },
+    { "action": "back", "kind": "released" },
+    { "action": "guide", "kind": "pressed" },
+    { "action": "guide", "kind": "released" },
+    { "action": "tab_next", "kind": "pressed" },
+    { "action": "tab_next", "kind": "released" }
+  ]
+}

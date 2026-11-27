@@ -1,0 +1,42 @@
+{
+  "events": [
+    { "kind": "key", "key": "arrow_down", "pressed": true },
+    { "kind": "key", "key": "arrow_down", "pressed": false },
+    { "kind": "key", "key": "w", "pressed": true },
+    { "kind": "key", "key": "w", "pressed": false },
+    { "kind": "key", "key": "enter", "pressed": true },
+    { "kind": "key", "key": "enter", "pressed": false },
+    { "kind": "key", "key": "escape", "pressed": true },
+    { "kind": "key", "key": "escape", "pressed": false },
+    { "kind": "key", "key": "f", "pressed": true },
+    { "kind": "key", "key": "f", "pressed": false },
+    { "kind": "key", "key": "m", "pressed": true },
+    { "kind": "key", "key": "m", "pressed": false },
+    { "kind": "key", "key": "f11", "pressed": true },
+    { "kind": "key", "key": "f11", "pressed": false },
+    { "kind": "key", "key": "tab", "pressed": true },
+    { "kind": "key", "key": "tab", "pressed": false },
+    { "kind": "key", "key": "q", "pressed": true },
+    { "kind": "key", "key": "q", "pressed": false }
+  ],
+  "expected": [
+    { "action": "navigate_down", "kind": "pressed" },
+    { "action": "navigate_down", "kind": "released" },
+    { "action": "navigate_up", "kind": "pressed" },
+    { "action": "navigate_up", "kind": "released" },
+    { "action": "confirm", "kind": "pressed" },
+    { "action": "confirm", "kind": "released" },
+    { "action": "back", "kind": "pressed" },
+    { "action": "back", "kind": "released" },
+    { "action": "search", "kind": "pressed" },
+    { "action": "search", "kind": "released" },
+    { "action": "menu", "kind": "pressed" },
+    { "action": "menu", "kind": "released" },
+    { "action": "guide", "kind": "pressed" },
+    { "action": "guide", "kind": "released" },
+    { "action": "tab_next", "kind": "pressed" },
+    { "action": "tab_next", "kind": "released" },
+    { "action": "tab_prev", "kind": "pressed" },
+    { "action": "tab_prev", "kind": "released" }
+  ]
+}
