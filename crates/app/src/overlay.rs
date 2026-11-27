@@ -22,6 +22,7 @@
 //!   disappear (a controller user would wonder where it went).
 
 use pitagames_core::GameId;
+use pitagames_core::i18n::t;
 use pitagames_input::{Action, FocusGraph};
 
 /// One thing the overlay can do.
@@ -105,21 +106,21 @@ impl Overlay {
         let mut entries = Vec::new();
         entries.push(OverlayEntry::enabled(
             OverlayChoice::Close,
-            "Resume",
-            "Back to the launcher",
+            t("overlay.resume"),
+            t("overlay.resume_detail"),
         ));
 
         if let Some(game) = &context.game {
             entries.push(OverlayEntry::enabled(
                 OverlayChoice::Details,
-                "Game details",
-                format!("{} · play, profiles and runtime", game.title),
+                t("overlay.details"),
+                format!("{} · {}", game.title, t("overlay.details_hint")),
             ));
             if game.steam {
                 entries.push(OverlayEntry::enabled(
                     OverlayChoice::StorePage,
-                    "Store page",
-                    "Open in Steam",
+                    t("overlay.store_page"),
+                    t("overlay.store_page_detail"),
                 ));
             }
         }
@@ -127,20 +128,21 @@ impl Overlay {
         entries.push(OverlayEntry::enabled(
             OverlayChoice::ToggleShell,
             if context.console {
-                "Exit console mode"
+                t("overlay.exit_console")
             } else {
-                "Enter console mode"
+                t("overlay.enter_console")
             },
-            "Switch between the windowed and 10-foot shells",
+            t("overlay.shell_detail"),
         ));
 
         // Power is the console session's (v1.1, over logind). The rows are shown
         // so the shape is honest and disabled so a press cannot half-do it.
-        for label in ["Suspend", "Restart", "Shut down"] {
-            entries.push(OverlayEntry::disabled(
-                label,
-                "arrives with the console session",
-            ));
+        for label in [
+            t("overlay.power_suspend"),
+            t("overlay.power_restart"),
+            t("overlay.power_shutdown"),
+        ] {
+            entries.push(OverlayEntry::disabled(label, t("overlay.power_detail")));
         }
 
         let focus = (!entries.is_empty()).then_some(0);

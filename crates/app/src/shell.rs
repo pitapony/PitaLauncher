@@ -19,6 +19,7 @@ use dioxus::desktop::tao::monitor::MonitorHandle;
 use dioxus::desktop::tao::window::{Fullscreen, Window, WindowBuilder};
 use dioxus::prelude::*;
 use pitagames_core::design::{self, DesignTokens};
+use pitagames_core::i18n::t;
 use pitagames_core::ui::{
     AppConfig, DESKTOP_HEIGHT, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH, DESKTOP_WIDTH, DisplayConfig,
     MonitorInfo, Placement, Shell,
@@ -106,7 +107,7 @@ impl WindowConfig {
     /// and close), so a frameless window cannot trap the player.
     pub fn desktop() -> Self {
         Self {
-            title: "PitaGames".to_string(),
+            title: t("app.name").to_string(),
             fullscreen: false,
             decorations: false,
             maximized: false,
@@ -123,7 +124,7 @@ impl WindowConfig {
     /// still a usable size.
     pub fn console(display: &DisplayConfig) -> Self {
         Self {
-            title: "PitaGames".to_string(),
+            title: t("app.name").to_string(),
             fullscreen: display.console_fullscreen,
             decorations: false,
             maximized: !display.console_fullscreen,

@@ -21,6 +21,7 @@
 //! into the running gamepad worker so a remap takes effect without a restart.
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 use pitagames_input::{
     Action, Binding, CaptureSlot, Device, InputMaps, PadAccess, RemapSession, RemapTarget,
     action_label, binding_label,
@@ -106,14 +107,14 @@ fn detail_cells(session: &RemapSession, action: Action) -> Vec<DetailCell> {
 
 /// One binding's short label, or a placeholder for a shape with none.
 fn binding_text(binding: &Binding) -> String {
-    binding_label(binding).unwrap_or_else(|| "?".to_string())
+    binding_label(binding).unwrap_or_else(|| t("controls.no_binding").to_string())
 }
 
 /// An action's bindings as one line, `unbound` when it has none.
 fn binding_summary(session: &RemapSession, action: Action) -> String {
     let labels: Vec<String> = session.bindings(action).iter().map(binding_text).collect();
     if labels.is_empty() {
-        "unbound".to_string()
+        t("controls.unbound").to_string()
     } else {
         labels.join("  ·  ")
     }
@@ -185,11 +186,11 @@ fn save(
         Ok(()) => {
             maps.set(next.clone());
             reload.send(next);
-            status.set("Saved. The new bindings apply at once.".to_string());
+            status.set(t("controls.saved").to_string());
             status_error.set(false);
         }
         Err(error) => {
-            status.set(format!("Could not save input.toml: {error}"));
+            status.set(t("controls.save_error").replace("{error}", &error.to_string()));
             status_error.set(true);
         }
     }
@@ -279,11 +280,11 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:6px;",
                 span {
                     style: "font-size:16px;font-weight:600;color:#ffffff;",
-                    "Controls"
+                    {t("controls.title")}
                 }
                 span {
                     style: "font-size:12px;color:#78788a;line-height:1.5;",
-                    "Rebind the keyboard or a connected controller. A rebind asks you to press the control you want; the launcher writes it to input.toml, so a remap survives a restart and a replugged controller."
+                    {t("controls.description")}
                 }
             }
 
@@ -300,7 +301,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                     style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                     span {
                         style: "font-size:12px;color:#9a9aac;",
-                        "Device:"
+                        {t("controls.device")}
                     }
                     for (index, target) in target_list.iter().enumerate() {
                         button {
@@ -315,7 +316,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                 if capture {
                     div {
                         style: "padding:10px 14px;border-radius:8px;background:#2a2a1e;color:#e8d8a0;font-size:13px;font-weight:600;",
-                        "Press a control now…"
+                        {t("controls.capture_prompt")}
                     }
                 }
 
@@ -356,12 +357,12 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                                 }
                             },
                             style: "{action_style()}{focus::ring_style(focused == Some(list.len() - 3))}",
-                            "Reset all"
+                            {t("controls.reset_all")}
                         }
                         button {
                             onclick: move |_| save(maps, remap, reload(), status, status_error),
                             style: "{primary_style()}{focus::ring_style(focused == Some(list.len() - 2))}",
-                            "Save"
+                            {t("action.save")}
                         }
                         button {
                             disabled: !customized,
@@ -370,7 +371,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                                 status.set(String::new());
                             },
                             style: "{action_style()}{focus::ring_style(focused == Some(list.len() - 1))}",
-                            "Discard changes"
+                            {t("controls.discard")}
                         }
                     }
                 } else if let Some(action) = detail {
@@ -383,7 +384,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                                 screen_focus.set(None);
                             },
                             style: "{action_style()}{focus::ring_style(focused == Some(back_cell))}",
-                            "Back"
+                            {t("action.back")}
                         }
                         span {
                             style: "font-size:14px;font-weight:600;color:#ffffff;",
@@ -404,7 +405,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                                 }
                                 span {
                                     style: "color:#a8a8b8;font-size:12px;",
-                                    "press a control to rebind"
+                                    {t("controls.press_to_rebind")}
                                 }
                             }
                             button {
@@ -414,7 +415,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                                     }
                                 },
                                 style: "{action_style()}{focus::ring_style(focused == Some(index * 2 + 1))}",
-                                "Remove"
+                                {t("action.remove")}
                             }
                         }
                     }
@@ -424,7 +425,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                         button {
                             onclick: move |_| begin_capture(remap, CaptureSlot::Add { action }),
                             style: "{action_style()}{focus::ring_style(focused == Some(back_cell - 2))}",
-                            "Add binding"
+                            {t("controls.add_binding")}
                         }
                         button {
                             onclick: move |_| {
@@ -433,7 +434,7 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                                 }
                             },
                             style: "{action_style()}{focus::ring_style(focused == Some(back_cell - 1))}",
-                            "Reset action"
+                            {t("controls.reset_action")}
                         }
                     }
                 }
@@ -442,21 +443,21 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
                 div {
                     style: "display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding-top:8px;border-top:1px solid #26262f;",
                     TuningField {
-                        label: "Deadzone",
+                        label: t("controls.deadzone"),
                         field: Tuning::Deadzone,
                         value: session.map().deadzone.to_string(),
                         remap,
                         session: nav,
                     }
                     TuningField {
-                        label: "Repeat delay (ms)",
+                        label: t("controls.repeat_delay"),
                         field: Tuning::RepeatDelay,
                         value: session.map().repeat_delay_ms.to_string(),
                         remap,
                         session: nav,
                     }
                     TuningField {
-                        label: "Repeat every (ms)",
+                        label: t("controls.repeat_every"),
                         field: Tuning::RepeatInterval,
                         value: session.map().repeat_interval_ms.to_string(),
                         remap,
@@ -466,12 +467,12 @@ pub fn ControlsView(props: ControlsViewProps) -> Element {
 
                 span {
                     style: "font-size:11px;color:#78788a;line-height:1.5;",
-                    "Save writes {maps_path}. A device with no changes keeps no entry, so resetting everything empties the file."
+                    {t("controls.save_hint").replace("{path}", &maps_path)}
                 }
             } else {
                 div {
                     style: "padding:40px 0;color:#78788a;font-size:13px;",
-                    "Preparing the remap session…"
+                    {t("controls.preparing")}
                 }
             }
 

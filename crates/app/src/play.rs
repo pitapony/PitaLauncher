@@ -23,6 +23,7 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::{Game, GameId, ShimProfile};
+use pitagames_core::i18n::t;
 use pitagames_db::LaunchRecord;
 use pitagames_platform::launch::{self as launch, DEFAULT_GRACE, LaunchMode, Outcome, RunOptions};
 use time::OffsetDateTime;
@@ -170,10 +171,7 @@ impl Play {
     /// row, but a second click from the detail page must not start a twin.
     pub fn begin(&mut self, game: &Game) -> Result<(), String> {
         if let Some(running) = &self.running {
-            return Err(format!(
-                "{} is still running; stop it before starting another game.",
-                running.title
-            ));
+            return Err(t("play.still_running").replace("{title}", &running.title));
         }
         self.running = Some(Running {
             id: game.id.clone(),
@@ -238,9 +236,9 @@ impl Play {
     pub fn label(&self, id: &GameId) -> Option<&'static str> {
         let running = self.running.as_ref().filter(|running| running.id == *id)?;
         Some(if running.pid.is_some() {
-            "playing"
+            t("play.playing")
         } else {
-            "starting"
+            t("play.starting")
         })
     }
 
@@ -311,14 +309,14 @@ fn start_game(game: &Game, sender: &UnboundedSender<PlayEvent>) -> Result<Outcom
         // The two shapes fail on different missing programs: a Windows build
         // wants `umu-run`, a store client wants its own CLI on PATH.
         let hint = if prepared.mode == LaunchMode::StoreClient {
-            "is the store's CLI installed?"
+            t("play.store_cli_hint")
         } else {
-            "is umu-run installed?"
+            t("play.umu_hint")
         };
-        format!(
-            "could not start {} ({error}); {hint}",
-            prepared.spec.program.display()
-        )
+        t("play.could_not_start")
+            .replace("{program}", &prepared.spec.program.display().to_string())
+            .replace("{error}", &error.to_string())
+            .replace("{hint}", hint)
     })?;
 
     let _ = sender.unbounded_send(PlayEvent::Started {

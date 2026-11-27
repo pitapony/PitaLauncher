@@ -8,6 +8,7 @@
 use std::path::Path;
 
 use pitagames_core::AntiCheat;
+use pitagames_core::i18n::t;
 use pitagames_platform::anticheat::{self, AnticheatSource};
 
 /// What the detail page renders for one game's anti-cheat.
@@ -28,7 +29,7 @@ impl AnticheatView {
     /// The placeholder shown until the scan resolves.
     pub fn pending() -> Self {
         Self {
-            label: "checking…".to_string(),
+            label: t("anticheat.checking").to_string(),
             kind: AntiCheat::Unknown,
             evidence: Vec::new(),
             warning: None,
@@ -58,7 +59,7 @@ pub fn summarize(install_dir: Option<&Path>, curated: AntiCheat) -> AnticheatVie
         .map(|finding| format!("{}  ({})", finding.path.display(), finding.kind.as_str()))
         .collect();
     if scan.truncated {
-        evidence.push("scan stopped early (large game directory)".to_string());
+        evidence.push(t("anticheat.scan_truncated").to_string());
     }
 
     AnticheatView {
@@ -71,9 +72,9 @@ pub fn summarize(install_dir: Option<&Path>, curated: AntiCheat) -> AnticheatVie
 
 fn source_label(source: AnticheatSource) -> &'static str {
     match source {
-        AnticheatSource::Detected => "detected",
-        AnticheatSource::Curated => "compat DB",
-        AnticheatSource::Undetermined => "not detected",
+        AnticheatSource::Detected => t("anticheat.source_detected"),
+        AnticheatSource::Curated => t("anticheat.source_curated"),
+        AnticheatSource::Undetermined => t("anticheat.source_undetermined"),
     }
 }
 

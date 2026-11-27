@@ -11,6 +11,7 @@
 pub mod activation;
 pub mod design;
 pub mod desktop;
+pub mod i18n;
 pub mod launch;
 pub mod lock;
 pub mod metadata;
@@ -26,6 +27,7 @@ pub use activation::{Activation, ActivationError, ActivationServer, request_focu
 pub use desktop::{
     APP_ID, DESKTOP_SPEC_VERSION, DesktopEntry, DesktopEntryError, ENTRY_FILE_NAME, InstallOutcome,
 };
+pub use i18n::{Catalog, CatalogError, Language, t};
 pub use launch::{
     LaunchSpec, SHIM_PROGRAM, TokenizeError, flatten_wrappers, render_command,
     render_shell_command, shell_quote, shim_launch_options, steam_install, steam_run,

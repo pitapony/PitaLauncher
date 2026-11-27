@@ -13,6 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
+use pitagames_core::i18n::t;
 use pitagames_core::profile::{Diagnostics, GamescopeOptions, WrapperChain, WrapperStep};
 use pitagames_core::{
     Game, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, Store, flatten_wrappers,
@@ -114,11 +115,11 @@ impl WrapperDraft {
     pub fn to_chain(&self) -> Result<WrapperChain, String> {
         let gamescope = if self.gamescope {
             Some(GamescopeOptions {
-                width: parse_dimension(&self.width, "Gamescope width")?,
-                height: parse_dimension(&self.height, "Gamescope height")?,
-                refresh_hz: parse_dimension(&self.refresh_hz, "Gamescope refresh rate")?,
+                width: parse_dimension(&self.width, t("wrapper.gamescope_width"))?,
+                height: parse_dimension(&self.height, t("wrapper.gamescope_height"))?,
+                refresh_hz: parse_dimension(&self.refresh_hz, t("wrapper.gamescope_refresh"))?,
                 fullscreen: self.fullscreen,
-                extra_args: parse_args(&self.extra_args, "Gamescope extra args")?,
+                extra_args: parse_args(&self.extra_args, t("wrapper.gamescope_extra_args"))?,
             })
         } else {
             None
@@ -128,11 +129,13 @@ impl WrapperDraft {
         for (index, step) in self.custom.iter().enumerate() {
             let program = step.program.trim();
             if program.is_empty() {
-                return Err(format!("Custom wrapper #{} needs a program.", index + 1));
+                return Err(t("wrapper.custom_needs_program")
+                    .replace("{index}", &(index + 1).to_string()));
             }
+            let args_label = t("wrapper.custom_args_named").replace("{index}", &(index + 1).to_string());
             custom.push(WrapperStep {
                 program: PathBuf::from(program),
-                args: parse_args(&step.args, &format!("Custom wrapper #{} args", index + 1))?,
+                args: parse_args(&step.args, &args_label)?,
             });
         }
 
@@ -149,9 +152,9 @@ impl WrapperDraft {
     pub fn add_step(&mut self, program: &str, args: &str) -> Result<(), String> {
         let program = program.trim();
         if program.is_empty() {
-            return Err("A custom wrapper needs a program.".to_string());
+            return Err(t("wrapper.custom_program_missing").to_string());
         }
-        parse_args(args, "Custom wrapper args")?;
+        parse_args(args, t("wrapper.custom_args"))?;
         self.custom.push(WrapperDraftStep {
             program: program.to_string(),
             args: args.trim().to_string(),
@@ -226,14 +229,14 @@ impl DiagnosticToggle {
     ];
 
     /// The short label on the toggle chip.
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::DxvkHud => "DXVK HUD",
-            Self::Mangohud => "MangoHUD",
-            Self::ProtonLog => "Proton log",
-            Self::DxvkLog => "DXVK log",
-            Self::Fsr4Indicator => "FSR 4 indicator",
-            Self::DlssIndicator => "DLSS indicator",
+            Self::DxvkHud => t("diag.dxvk_hud"),
+            Self::Mangohud => t("diag.mangohud"),
+            Self::ProtonLog => t("diag.proton_log"),
+            Self::DxvkLog => t("diag.dxvk_log"),
+            Self::Fsr4Indicator => t("diag.fsr4_indicator"),
+            Self::DlssIndicator => t("diag.dlss_indicator"),
         }
     }
 
@@ -380,16 +383,16 @@ fn parse_dimension(text: &str, label: &str) -> Result<Option<u32>, String> {
     }
     let value = text
         .parse::<u32>()
-        .map_err(|_| format!("{label} must be a whole number."))?;
+        .map_err(|_| t("wrapper.must_be_number").replace("{label}", label))?;
     if value == 0 {
-        return Err(format!("{label} must be greater than zero."));
+        return Err(t("wrapper.must_be_positive").replace("{label}", label));
     }
     Ok(Some(value))
 }
 
 fn profiles_dir() -> Result<PathBuf, String> {
     pitagames_core::paths::profiles_dir()
-        .ok_or_else(|| "no data directory (HOME is unset)".to_string())
+        .ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 fn logs_dir() -> Option<PathBuf> {
@@ -398,7 +401,7 @@ fn logs_dir() -> Option<PathBuf> {
 
 fn backup_dir() -> Result<PathBuf, String> {
     pitagames_core::paths::steam_backup_dir()
-        .ok_or_else(|| "no data directory (HOME is unset)".to_string())
+        .ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 /// Compile the runtime subset of a profile against the current discovery.
@@ -612,7 +615,7 @@ pub fn compose_handoff(
     };
 
     let root = pitagames_platform::prefix::default_root()
-        .ok_or_else(|| "no data directory (HOME is unset)".to_string())?;
+        .ok_or_else(|| t("runtime.no_data_dir").to_string())?;
     // A store whose client starts games by id (gogdl, nile) names no
     // executable, so its argv is composed here and the hand-off only supervises
     // it.
@@ -685,7 +688,7 @@ pub fn resolve_user(steam_root: &Path) -> Result<(String, PathBuf), String> {
     user_configs(steam_root)
         .into_iter()
         .next()
-        .ok_or_else(|| "no Steam user with a localconfig.vdf; sign in to Steam once".to_string())
+        .ok_or_else(|| t("runtime.no_steam_user").to_string())
 }
 
 /// What the routing panel shows for one game.
@@ -722,7 +725,7 @@ pub fn routing_status(steam_root: &Path, app_id: &str) -> RoutingStatus {
     };
 
     let Some(localconfig) = status.localconfig.clone() else {
-        status.warning = Some("No Steam user config found.".to_string());
+        status.warning = Some(t("runtime.no_steam_config").to_string());
         return status;
     };
 

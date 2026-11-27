@@ -26,6 +26,7 @@ use dioxus::html::{MountedData, ScrollBehavior, ScrollLogicalPosition, ScrollToO
 use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 
+use pitagames_core::i18n::t;
 use pitagames_input::Action;
 
 use crate::View;
@@ -189,7 +190,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         return rsx! {
             div {
                 style: "flex:1;padding:32px;color:var(--text-muted);",
-                "Scanning libraries…"
+                {t("library.scanning")}
             }
         };
     };
@@ -198,7 +199,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         return rsx! {
             div {
                 style: "flex:1;padding:48px 32px;color:var(--text-muted);",
-                "No games yet. Publish a library from the Stores screen, then play through this couch home."
+                {t("home.empty")}
             }
         };
     }
@@ -293,7 +294,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
 
                     span {
                         style: "font-size:var(--text-caption);font-weight:600;text-transform:uppercase;letter-spacing:0.14em;color:#8fb0e8;",
-                        "Continue"
+                        {t("home.continue")}
                     }
                     h2 {
                         style: "margin:0;font-size:var(--text-title);font-weight:700;color:#ffffff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
@@ -337,7 +338,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                     );
                                 },
                                 style: "{play_style}",
-                                "Play"
+                                {t("action.play")}
                             }
                         } else if is_install {
                             button {
@@ -362,7 +363,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                         } else {
                             span {
                                 style: "padding:10px 16px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-muted);font-size:var(--text-body);",
-                                "Installed · open for details"
+                                {t("home.installed_open_details")}
                             }
                         }
 
@@ -372,7 +373,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                 session.write().open_detail(detail_id.clone(), View::Home);
                             },
                             style: "padding:10px 16px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                            "Details"
+                            {t("action.details")}
                         }
                     }
                 }
@@ -531,7 +532,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         // focus and scroll while typing.
         if osk_open() {
             osk::OskSheet {
-                title: "Search your library".to_string(),
+                title: t("osk.search_library").to_string(),
                 keyboard: osk,
                 on_done: move |text| commit_home_search(session, screen_focus, osk_open, text),
                 on_cancel: move |_| osk_open.set(false),

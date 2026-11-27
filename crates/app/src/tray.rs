@@ -15,6 +15,7 @@
 
 use dioxus::desktop::trayicon::TrayIconBuilder;
 use dioxus::desktop::trayicon::menu::{Menu, MenuId, MenuItem, PredefinedMenuItem};
+use pitagames_core::i18n::t;
 
 use crate::icon;
 
@@ -84,14 +85,14 @@ pub fn build_optional() -> Option<Tray> {
 
 fn build() -> Result<Tray, String> {
     let menu = Menu::new();
-    let show = MenuItem::new("Show PitaGames", true, None);
-    let quit = MenuItem::new("Quit PitaGames", true, None);
+    let show = MenuItem::new(t("tray.show"), true, None);
+    let quit = MenuItem::new(t("tray.quit"), true, None);
     menu.append_items(&[&show, &PredefinedMenuItem::separator(), &quit])
         .map_err(|error| error.to_string())?;
 
     let mut builder = TrayIconBuilder::new()
         .with_menu(Box::new(menu.clone()))
-        .with_tooltip("PitaGames")
+        .with_tooltip(t("app.name"))
         // A left click raises the window (Dioxus's own handler); the menu is
         // for the right click.
         .with_menu_on_left_click(false);

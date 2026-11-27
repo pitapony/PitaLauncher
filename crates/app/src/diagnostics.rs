@@ -7,6 +7,8 @@
 
 use dioxus::prelude::*;
 
+use pitagames_core::i18n::t;
+
 use crate::runtime::{DiagnosticToggle, DiagnosticsDraft};
 
 #[derive(Props, Clone, PartialEq)]
@@ -23,10 +25,12 @@ pub fn DiagnosticsEditor(props: DiagnosticsEditorProps) -> Element {
 
     let enabled = current.enabled_labels();
     let summary = if current.is_empty() {
-        "None enabled.".to_string()
+        t("diagnostics.none").to_string()
     } else {
-        format!("Enabled: {}", enabled.join(" · "))
+        t("diagnostics.enabled").replace("{list}", &enabled.join(" · "))
     };
+    let title = t("diagnostics.title");
+    let hint = t("diagnostics.hint");
 
     rsx! {
         div {
@@ -36,11 +40,11 @@ pub fn DiagnosticsEditor(props: DiagnosticsEditorProps) -> Element {
                 style: "display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;",
                 span {
                     style: "font-size:var(--text-caption);font-weight:600;color:var(--text);",
-                    "Diagnostics"
+                    "{title}"
                 }
                 span {
                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                    "overlays, logs and indicators, applied at launch"
+                    "{hint}"
                 }
             }
 
