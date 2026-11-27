@@ -168,6 +168,15 @@ cargo test -p pitagames
 
 CI runs the same commands in `.github/workflows/ci.yml`.
 
+## Beta testing
+
+The beta program is a small group of CachyOS testers on the RX 9070 / RX 5700 XT
+(and other hardware, published as "not tested by us"). Running the program is a
+**human task** — no container has a GPU, a controller or a TV — so testers walk
+[`docs/beta-testing.md`](docs/beta-testing.md) from a clean install to a launched
+game, including the console path and the TV checklist, and report through the
+issue templates in [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE).
+
 ## Repository layout
 
 | Path | What it is |
@@ -231,6 +240,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2.5-handoff.md`](docs/m2.5-handoff.md) — the launch hand-off: hide the window while a game runs and come back when it ends.
 - [`docs/m2.5-overlay.md`](docs/m2.5-overlay.md) — the console overlay: the `Menu`/`Start` system menu.
 - [`docs/m2.5-safe-mode.md`](docs/m2.5-safe-mode.md) — safe mode and the window watchdog.
+- [`docs/beta-testing.md`](docs/beta-testing.md) — the beta tester checklist: clean install to a launched game, the console path and the TV checklist.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

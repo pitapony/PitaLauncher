@@ -1,0 +1,113 @@
+name: Hardware report
+description: Report how PitaGames behaves on your machine — a validation result, a "not tested by us" confirmation, or a hardware-specific failure.
+title: "[hardware] "
+labels: ["needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this to report what a specific machine/GPU/display combination actually did.
+        It is how a claim moves from **"not tested by us"** to validated — or how a
+        machine that should work gets a bug filed instead.
+
+        Running the program is a **human task**: only you are at the machine, so your
+        observation (and a photo, for a TV) is the evidence. PitaGames runs only on
+        **CachyOS/Arch Linux**, x86_64, with native Steam.
+  - type: dropdown
+    id: machine
+    attributes:
+      label: Machine / GPU
+      description: The two in-house machines are the validated paths; everything else ships experimental.
+      options:
+        - RX 9070 (RDNA 4)
+        - RX 5700 XT (RDNA 1)
+        - Other AMD (RDNA 3 / 2)
+        - NVIDIA
+        - Intel
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Hardware
+      description: Exact GPU model, driver version, Mesa version, CPU, RAM.
+      placeholder: "RX 9070, amdgpu 6.18, Mesa 26.2.0, Ryzen 7 9800X3D, 32 GB"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and kernel
+      placeholder: "CachyOS 2026.11, 6.18.1-cachyos, Wayland"
+    validations:
+      required: true
+  - type: dropdown
+    id: display
+    attributes:
+      label: Display
+      options:
+        - Monitor (desktop shell)
+        - TV at couch distance (console shell)
+        - Both
+    validations:
+      required: true
+  - type: input
+    id: display-details
+    attributes:
+      label: Display details
+      description: Resolution, refresh rate, HDR/VRR if relevant, and the TV model if it is one.
+      placeholder: "1920×1080 @ 60 Hz; or 3840×2160 @ 120 Hz HDR, LG C3"
+    validations:
+      required: true
+  - type: textarea
+    id: runtimes
+    attributes:
+      label: Proton and runtimes
+      description: "Paste `pitagames-cli proton`, and note the umu/gamescope/MangoHud/gamemode versions in use."
+      render: shell
+    validations:
+      required: true
+  - type: checkboxes
+    id: tested
+    attributes:
+      label: What did you test?
+      options:
+        - label: A clean install (`makepkg -si`) and `pitagames-cli scan`
+        - label: Launch one real Steam game through the shim with `DXVK_HUD=fps`
+        - label: A non-Steam store game (Epic / Amazon / GOG) — sign in, install, launch
+        - label: The console path (`pitagames --console`) with a pad
+        - label: The TV checklist in `docs/console-mode.md`
+        - label: Safe mode (`pitagames --safe-mode`)
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: Results
+      description: |
+        One line per item above: **pass** or **fail**, with what you saw. If something
+        failed, say which step and what the screen/terminal showed. A pass is as
+        valuable as a fail — it is what lets a claim stop saying "not tested by us".
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Evidence
+      description: |
+        Attach what you have: `pitagames-cli scan --json`, the launch transcript from
+        `~/.local/share/pitagames/logs/`, and — for a TV — a **photo of the screen**
+        at couch distance (overscan, legibility and the focus ring are the point).
+        Do not attach a Steam Web API key, store token or auth URL/code.
+    validations:
+      required: false
+  - type: checkboxes
+    id: claims
+    attributes:
+      label: Claim acknowledgement
+      options:
+        - label: I understand that results on hardware other than the RX 9070 / RX 5700 XT are published as "not tested by us", and TV results stay "not tested on a TV" until confirmed.
+          required: true
+        - label: This report contains no secret (API key, store token, auth URL/code).
+          required: true
