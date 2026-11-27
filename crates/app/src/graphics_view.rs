@@ -64,11 +64,14 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let mut editor = use_signal(|| None::<GraphicsEditor>);
     let mut gpu = use_signal(|| None::<GpuProfile>);
     let mut compat = use_signal(|| None::<CompatEntry>);
-    // The effective anti-cheat (detection merged with curation) and the user's
-    // acknowledgement of the injection risk, which the gate reads.
+    // The effective anti-cheat (detection merged with curation). The entry in
+    // `compat` carries the same value, so the capability matrix and the
+    // compiler gate read the effective state, not only the curated one. The
+    // user's acknowledgement is the profile's own recorded field, so nothing
+    // here holds it.
     let mut anticheat = use_signal(|| AntiCheat::Unknown);
-    let mut acknowledged = use_signal(|| false);
     let mut manifest = use_signal(|| None::<DurableRevert>);
+    let mut conflicts = use_signal(|| None::<pitagames_mods::ConflictScan>);
     let mut status = use_signal(String::new);
     // The engagement rows (read from the mod's own log) and the support-bundle
     // result. Both are refreshed on demand, never on a timer.
@@ -93,19 +96,35 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 .get(&id)
                 .map(|entry| entry.anticheat)
                 .unwrap_or(AntiCheat::Unknown);
-            compat.set(db_compat.get(&id).cloned());
             // The injection gate reads the effective anti-cheat: a real on-disk
-            // marker wins, otherwise the compat DB's curated value.
+            // marker wins, otherwise the compat DB's curated value. The same
+            // value is written onto the entry the capability matrix and the
+            // compiler read, so the gate is enforced where the profile is
+            // compiled, not only in this screen.
             let scan = install
                 .as_deref()
                 .map(pitagames_platform::anticheat::detect)
                 .unwrap_or_default();
-            anticheat.set(pitagames_platform::anticheat::effective(curated, &scan).kind);
+            let effective = pitagames_platform::anticheat::effective(curated, &scan).kind;
+            anticheat.set(effective);
+            let mut entry = db_compat.get(&id).cloned();
+            if let Some(entry) = entry.as_mut() {
+                entry.anticheat = effective;
+            }
+            compat.set(entry);
             match install.as_deref().map(graphics::durable_revert) {
                 Some(Ok(Some(summary))) => manifest.set(Some(summary)),
                 Some(Ok(None)) | None => manifest.set(None),
                 Some(Err(message)) => status.set(message),
             }
+            // The pre-flight: the known injection files present in the game
+            // directory and their owners.
+            conflicts.set(
+                install
+                    .as_deref()
+                    .or(exe.as_deref())
+                    .map(graphics::conflicts),
+            );
             let profile = match db.as_ref() {
                 Some(db) => match persist::profiles(db, &id).await {
                     Ok(rows) => rows.into_iter().next().map(|row| row.profile),
@@ -209,15 +228,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     Control::Apply => {
                         // The injection gate, enforced at the controller seam
                         // too: a protected game cannot be applied unacknowledged.
+                        let eac_v2 = compat.read().as_ref().is_some_and(|entry| entry.eac_v2);
                         let allows = {
                             let guard = editor.read();
                             guard.as_ref().is_some_and(|editor| {
-                                graphics::injection_gate(
-                                    editor.draft(),
-                                    *anticheat.read(),
-                                    *acknowledged.read(),
-                                )
-                                .allows()
+                                graphics::injection_gate(editor.draft(), *anticheat.read(), eac_v2)
+                                    .allows()
                             })
                         };
                         if !allows {
@@ -463,13 +479,34 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let console = props.shell.read().is_console();
     // The injection gate: a draft that injects into an anti-cheat-protected
     // game cannot be applied until the risk is acknowledged.
-    let gate = graphics::injection_gate(
-        editor_state.draft(),
-        *anticheat.read(),
-        *acknowledged.read(),
-    );
+    let eac_v2 = compat_snapshot.as_ref().is_some_and(|entry| entry.eac_v2);
+    let gate = graphics::injection_gate(editor_state.draft(), *anticheat.read(), eac_v2);
     let gate_allows = gate.allows();
-    let gate_message = gate.message();
+    // Shown whenever the game is protected and unconfirmed, even before any
+    // injection is selected: the rows are hidden until the confirmation is
+    // recorded, so this is the only way to unlock them.
+    let gate_message = graphics::anticheat_warning(
+        *anticheat.read(),
+        eac_v2,
+        editor_state.draft().injection_confirmed,
+    );
+    // The single-slot switch: editing the injection owner away from a
+    // file-writing mechanism offers to uninstall the previous one.
+    let switch_offer = manifest_snapshot
+        .as_ref()
+        .and_then(|revert| {
+            graphics::slot_switch(
+                editor_state.applied(),
+                editor_state.draft(),
+                Some(revert.mod_name.as_str()),
+            )
+        })
+        .and_then(|switch| switch.offer());
+    let conflict_lines = conflicts
+        .read()
+        .as_ref()
+        .map(pitagames_mods::ConflictScan::summary)
+        .unwrap_or_default();
     // DLSSNR ships its own OptiScaler, so on the NR route the Upscaling section
     // points at DLSSNR's in-game menu rather than offering launcher upscalers.
     let nr_upscaler = graphics::nr_upscaler_note(editor_state.draft());
@@ -705,15 +742,18 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                         "Anti-cheat injection warning"
                     }
                     span { "{message}" }
-                    label {
-                        style: "display:flex;align-items:center;gap:8px;color:var(--text);",
-                        input {
-                            r#type: "checkbox",
-                            checked: *acknowledged.read(),
-                            onchange: move |event| acknowledged.set(event.checked()),
-                            style: "min-height:var(--hit-min);min-width:var(--hit-min);",
-                        }
-                        "I understand the risk and want to inject anyway."
+                    button {
+                        onclick: move |_| {
+                            if let Some(editor) = editor.write().as_mut() {
+                                editor.set_injection_confirmed(true);
+                            }
+                        },
+                        style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
+                        "I understand the risk and want to inject anyway"
+                    }
+                    span {
+                        style: "font-size:var(--text-micro);color:var(--text-muted);",
+                        "The confirmation is recorded in the profile and can be undone."
                     }
                 }
             }
@@ -811,6 +851,26 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 div {
                     style: "font-size:var(--text-micro);color:var(--text-muted);",
                     "Installed mod: {revert.mod_name} ({revert.files} file(s)). The durable revert is the mod manifest; restoring returns the game directory to its pre-install state."
+                }
+            }
+
+            if let Some(offer) = switch_offer {
+                div {
+                    style: "padding:10px 14px;border-radius:8px;background:#2a1e1e;color:#e0a0a0;font-size:var(--text-caption);",
+                    "{offer}"
+                }
+            }
+
+            if !conflict_lines.is_empty() {
+                div {
+                    style: "display:flex;flex-direction:column;gap:4px;padding:10px 14px;border-radius:8px;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-micro);",
+                    span {
+                        style: "font-weight:600;color:var(--text);",
+                        "Pre-flight: injection files already in the game folder"
+                    }
+                    for line in conflict_lines {
+                        span { style: "overflow-wrap:anywhere;", "{line}" }
+                    }
                 }
             }
 

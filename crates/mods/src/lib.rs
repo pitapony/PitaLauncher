@@ -28,12 +28,18 @@
 //!   DLL name from the ordered candidate list, fetch/verify the pinned release,
 //!   patch the ini, write the manifest, and return the `WINEDLLOVERRIDES` env as
 //!   a vector. Uninstall restores the tree from the manifest.
+//! - [`conflict`] — the pre-flight scan for the single injection slot: it names
+//!   each known injection file in a game directory and its manifest owner, so a
+//!   slot switch can offer to uninstall the previous one before it clobbers it.
 
 pub mod capture;
+pub mod conflict;
 pub mod ini;
 pub mod manifest;
 pub mod release;
 pub mod tierb;
+
+pub use conflict::{ConflictFile, ConflictScan, KnownFile, Mechanism, Owner, scan, scan_dir};
 
 pub use capture::{ALLOWED_KEYS, ALLOWED_PREFIXES, CapturedEnv, RejectReason, RejectedAssignment};
 pub use ini::{

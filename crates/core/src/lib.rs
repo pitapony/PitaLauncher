@@ -43,8 +43,8 @@ pub use perf::{
 };
 pub use profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, ModelSource, NeuralRendering,
-    NrBackend, NrModel, NrProcessing, NrRoute, PkgArch, Profile, ProfileError, ProtonRef, Upscaler,
-    WrapperChain, WrapperStep,
+    NrBackend, NrModel, NrProcessing, NrRoute, PkgArch, Profile, ProfileError, ProtonRef,
+    SlotOwner, Upscaler, WrapperChain, WrapperStep,
 };
 pub use profile_file::{
     ProfileFileError, SHIM_PROFILE_SCHEMA, ShimProfile, ShimProton, ShimProtonInstall,

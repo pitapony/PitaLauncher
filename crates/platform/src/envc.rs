@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 
 use pitagames_core::profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, NeuralRendering, Profile,
-    ProtonRef, Upscaler, WrapperChain, WrapperStep,
+    ProtonRef, SlotOwner, Upscaler, WrapperChain, WrapperStep,
 };
 use pitagames_core::{
     ProfileError, ShimProton, ShimProtonInstall, flatten_wrappers, render_command,
@@ -145,6 +145,21 @@ pub enum EnvcError {
     /// An env key outside the launcher's supported set.
     #[error("`{key}` is not a supported environment key for {origin}")]
     UnsupportedEnvKey { key: String, origin: &'static str },
+
+    /// The profile asks for injection into a game protected by a concrete
+    /// anti-cheat runtime, without the confirmation the graphics screen records.
+    ///
+    /// The compiler refuses to emit any injection env in this state (plan §6:
+    /// "capability refuses injection and `envc` refuses injection env for a
+    /// protected game without a recorded confirmation"). `Unknown` never
+    /// reaches here.
+    #[error(
+        "injection into a game protected by {anticheat} is off until it is confirmed in the \
+         Graphics screen"
+    )]
+    AntiCheatGate {
+        anticheat: pitagames_core::AntiCheat,
+    },
 }
 
 /// Compile the full M3 profile into a launch.
@@ -180,6 +195,17 @@ pub fn compile(
             left,
             right,
             resolve: RESOLVE_SLOT,
+        });
+    }
+
+    // The hard anti-cheat gate: a protected game emits no injection env without
+    // the recorded confirmation. `capability` hides the fields too (the UI's
+    // reason), but this gives a caller that compiles a profile the one typed
+    // failure and guarantees nothing is emitted (plan §6; `Unknown` never gates).
+    let gate = capability::InjectionGate::from_compat(graphics.compat, profile.injection_confirmed);
+    if profile.requests_injection() && gate.refuses() {
+        return Err(EnvcError::AntiCheatGate {
+            anticheat: gate.effective(),
         });
     }
 
@@ -537,63 +563,21 @@ fn injection_dll_name(dll: InjectionDll) -> &'static str {
 // The one injection slot (ADR-0023)
 // ---------------------------------------------------------------------------
 
-/// The four mechanisms that contend for the single injection slot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Slot {
-    /// Proton's own env hooks (FSR/FFX/XeSS upgrades, OptiScaler, MLFG).
-    TierA,
-    /// The launcher's managed OptiScaler files.
-    TierB,
-    /// HelixSR, which ships its own OptiScaler.
-    HelixSr,
-    /// DLSSNR-AMD, which ships its own OptiScaler too.
-    DlssNr,
-}
-
-/// The slot mechanisms this profile uses, in a stable order.
-fn slot_groups(profile: &Profile) -> Vec<(&'static str, Slot)> {
-    let mut groups = Vec::new();
-
-    let tier_a = profile.injection == Injection::EnvOnly
-        || matches!(
-            profile.upscaler,
-            Upscaler::Fsr4Upgrade { .. }
-                | Upscaler::Fsr4Rdna3 { .. }
-                | Upscaler::XessUpgrade
-                | Upscaler::Ffx3Upgrade
-                | Upscaler::Ffx4Upgrade
-                | Upscaler::DlssToFsr4
-                | Upscaler::DlssToFsr31
-                | Upscaler::DlssToXess
-        )
-        || profile.frame_gen != FrameGen::Off;
-    if tier_a {
-        groups.push(("Tier A (Proton env injection)", Slot::TierA));
-    }
-    if profile.injection == Injection::Manual {
-        groups.push(("Tier B (managed OptiScaler injection)", Slot::TierB));
-    }
-    if matches!(
-        profile.upscaler,
-        Upscaler::HlxDlss | Upscaler::HlxFsr4 | Upscaler::HlxFsr4DropIn
-    ) || profile.injection == Injection::HelixSr
-    {
-        groups.push(("HelixSR", Slot::HelixSr));
-    }
-    if profile.neural_rendering.is_enabled() || profile.injection == Injection::DlssNr {
-        groups.push(("neural rendering", Slot::DlssNr));
-    }
-
-    groups
-}
-
 /// The first two mechanisms that cannot share the slot, if any.
+///
+/// The fold across the profile's fields lives in
+/// [`pitagames_core::profile::Profile::slot_owners`], so the graphics screen's
+/// "who owns the slot" answer and this compiler's conflict cannot drift.
 fn slot_conflict(profile: &Profile) -> Option<(&'static str, &'static str)> {
-    let groups = slot_groups(profile);
-    if groups.len() < 2 {
+    let labels: Vec<&'static str> = profile
+        .slot_owners()
+        .into_iter()
+        .map(SlotOwner::conflict_label)
+        .collect();
+    if labels.len() < 2 {
         return None;
     }
-    Some((groups[0].0, groups[1].0))
+    Some((labels[0], labels[1]))
 }
 
 // ---------------------------------------------------------------------------
@@ -1033,6 +1017,84 @@ mod tests {
         let error = compile_runtime(request(&profile, None)).unwrap_err();
         assert!(
             matches!(error, EnvcError::SlotConflict { resolve, .. } if resolve == RESOLVE_SLOT),
+            "{error}"
+        );
+    }
+
+    // -- The hard anti-cheat gate -------------------------------------------
+
+    fn protected_compat() -> CompatEntry {
+        CompatEntry::from_toml(
+            "[game]\nstore = \"steam\"\nstore_id = \"620\"\ntitle = \"x\"\nanticheat = \"eac\"\n",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn a_protected_game_refuses_injection_env_without_confirmation() {
+        let mut profile = Profile::new(game(), "Tier B");
+        profile.injection = Injection::Manual;
+        let gpu = rdna4();
+        let entry = protected_compat();
+
+        let error = compile(
+            request(&profile, None),
+            GraphicsContext::new(&gpu, Some(&entry)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                EnvcError::AntiCheatGate { anticheat } if anticheat.is_protected()
+            ),
+            "{error}"
+        );
+
+        // A recorded confirmation emits the injection env.
+        let mut confirmed = profile.clone();
+        confirmed.injection_confirmed = true;
+        let compiled = compile(
+            request(&confirmed, None),
+            GraphicsContext::new(&gpu, Some(&entry)),
+        )
+        .unwrap();
+        assert_eq!(
+            compiled.env,
+            vec![("WINEDLLOVERRIDES".to_string(), "dxgi=n,b".to_string())]
+        );
+
+        // A profile that injects nothing is never gated.
+        let plain = Profile::new(game(), "Default");
+        assert!(
+            compile(
+                request(&plain, None),
+                GraphicsContext::new(&gpu, Some(&entry))
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn an_eac_v2_game_is_protected_for_the_compiler() {
+        // The curated `anticheat` field is `none`; the v2 claim alone protects it.
+        let entry = CompatEntry::from_toml(
+            "[game]\nstore = \"steam\"\nstore_id = \"620\"\ntitle = \"x\"\n\
+             anticheat = \"none\"\neac_v2 = true\n",
+        )
+        .unwrap();
+        let mut profile = Profile::new(game(), "Tier A");
+        profile.injection = Injection::EnvOnly;
+        let install = cachyos("11.0-20260516");
+        let error = compile(
+            request(&profile, Some(&install)),
+            GraphicsContext::new(&rdna4(), Some(&entry)),
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                EnvcError::AntiCheatGate { anticheat } if anticheat == pitagames_core::AntiCheat::Eac
+            ),
             "{error}"
         );
     }
