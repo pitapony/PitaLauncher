@@ -15,6 +15,7 @@
 use dioxus::prelude::*;
 
 use pitagames_core::AntiCheat;
+use pitagames_core::paths;
 use pitagames_core::profile::{NeuralRendering, Profile, ProtonRef};
 use pitagames_core::ui::Shell;
 use pitagames_input::Action;
@@ -69,16 +70,22 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let mut acknowledged = use_signal(|| false);
     let mut manifest = use_signal(|| None::<DurableRevert>);
     let mut status = use_signal(String::new);
+    // The engagement rows (read from the mod's own log) and the support-bundle
+    // result. Both are refreshed on demand, never on a timer.
+    let mut verify_rows = use_signal(Vec::<pitagames_platform::verify::Row>::new);
+    let mut bundle_status = use_signal(String::new);
 
     // Read-only detection and the game's profile, once per mounted game. The
     // parent keys this component by game, so opening another remounts it.
     let load_db = db.clone();
     let load_id = entry.game.id.clone();
     let load_install = entry.game.install_dir.clone();
+    let load_exe = entry.game.exe.clone();
     use_future(move || {
         let db = load_db.clone();
         let id = load_id.clone();
         let install = load_install.clone();
+        let exe = load_exe.clone();
         async move {
             gpu.set(Some(gpu::detect(&GpuProbe::host())));
             let db_compat = CompatDb::load();
@@ -109,9 +116,21 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 },
                 None => None,
             };
-            editor.set(Some(GraphicsEditor::new(
-                profile.unwrap_or_else(|| Profile::new(id.clone(), "Default")),
-            )));
+            let profile = profile.unwrap_or_else(|| Profile::new(id.clone(), "Default"));
+            let checks = pitagames_platform::verify::checks_for(&profile);
+            editor.set(Some(GraphicsEditor::new(profile)));
+
+            // The engagement verdict, read from the mod's own log. The log lives
+            // beside the game executable (the installer's working directory), so
+            // prefer the exe's directory and fall back to the install root.
+            let log_dir = exe
+                .as_deref()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+                .or(install.clone());
+            if let Some(dir) = log_dir {
+                let data = pitagames_platform::verify::MarkerData::shipped();
+                verify_rows.set(pitagames_platform::verify::panel(&data, &checks, &dir));
+            }
         }
     });
 
@@ -358,6 +377,71 @@ pub fn Graphics(props: GraphicsProps) -> Element {
         _ => None,
     };
 
+    // The engagement rows and the support-bundle actions. The re-check reads the
+    // current draft's mode; the bundle collects the allowlisted files beside the
+    // game and writes a zip into our own data directory.
+    let verify_entry = entry.clone();
+    let recheck = move |_| {
+        let checks = editor
+            .read()
+            .as_ref()
+            .map(|editor| pitagames_platform::verify::checks_for(editor.draft()))
+            .unwrap_or_default();
+        let log_dir = verify_entry
+            .game
+            .exe
+            .as_deref()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| verify_entry.game.install_dir.clone());
+        match log_dir {
+            Some(dir) => {
+                let data = pitagames_platform::verify::MarkerData::shipped();
+                verify_rows.set(pitagames_platform::verify::panel(&data, &checks, &dir));
+            }
+            None => verify_rows.set(Vec::new()),
+        }
+    };
+
+    let bundle_entry = entry.clone();
+    let write_bundle = move |_| {
+        let dir = bundle_entry
+            .game
+            .exe
+            .as_deref()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| bundle_entry.game.install_dir.clone());
+        let Some(dir) = dir else {
+            bundle_status.set("This game has no directory to collect logs from.".to_string());
+            return;
+        };
+        let versions = pitagames_platform::support::versions(gpu.read().as_ref(), None);
+        let request = pitagames_platform::support::BundleRequest::new(versions).with_game_dir(&dir);
+        let bundle = pitagames_platform::support::collect(&request);
+        let out_dir = paths::data_dir().unwrap_or_default().join("support");
+        if let Err(error) = std::fs::create_dir_all(&out_dir) {
+            bundle_status.set(format!("Cannot create {}: {error}", out_dir.display()));
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let out = out_dir.join(pitagames_platform::support::suggested_name(
+            &stamp.to_string(),
+        ));
+        match bundle.write_zip(&out) {
+            Ok(()) => bundle_status.set(format!(
+                "Wrote {} ({} file(s)).",
+                out.display(),
+                bundle.items.len()
+            )),
+            Err(error) => bundle_status.set(error.to_string()),
+        }
+    };
+
+    let verify_snapshot = verify_rows.read().clone();
+    let bundle_text = bundle_status.read().clone();
+
     // Group the rows by section so the screen draws the four headings in order.
     let mut sections: Vec<(Section, Vec<(usize, OptionRow)>)> = Section::ALL
         .iter()
@@ -523,6 +607,66 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                                 .to_string(),
                         );
                     },
+                }
+            }
+
+            div {
+                style: "display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:12px;background:#1a1e28;border:1px solid #2c3444;",
+                div {
+                    style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
+                    h3 {
+                        style: "margin:0;font-size:var(--text-heading);font-weight:600;color:#ffffff;",
+                        "Verification"
+                    }
+                    span {
+                        style: "font-size:var(--text-micro);color:var(--text-muted);",
+                        "read from the mod's own log — no in-game menu needed"
+                    }
+                    button {
+                        onclick: recheck,
+                        style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
+                        "Re-check"
+                    }
+                    button {
+                        onclick: write_bundle,
+                        style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
+                        "Write support bundle"
+                    }
+                }
+                if verify_snapshot.is_empty() {
+                    span {
+                        style: "font-size:var(--text-caption);color:var(--text-secondary);",
+                        "Nothing to verify yet — choose an upscaler or install DLSSNR, launch the game once, then Re-check."
+                    }
+                } else {
+                    for (index, row) in verify_snapshot.iter().enumerate() {
+                        div {
+                            key: "verify-{index}",
+                            style: "display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:9px;background:#151a22;border:1px solid #262e3c;",
+                            span {
+                                style: "font-size:var(--text-caption);color:var(--text);min-width:150px;",
+                                "{row.check.label()}"
+                            }
+                            span {
+                                style: "font-family:monospace;font-size:var(--text-micro);color:var(--text-muted);",
+                                "{row.log}"
+                            }
+                            span {
+                                style: if row.engagement.is_engaged() {
+                                    "margin-left:auto;font-size:var(--text-caption);color:var(--success);"
+                                } else {
+                                    "margin-left:auto;font-size:var(--text-caption);color:#e8c890;"
+                                },
+                                "{row.engagement.label()}"
+                            }
+                        }
+                    }
+                }
+                if !bundle_text.is_empty() {
+                    span {
+                        style: "font-size:var(--text-micro);color:var(--text-secondary);overflow-wrap:anywhere;",
+                        "{bundle_text}"
+                    }
                 }
             }
 

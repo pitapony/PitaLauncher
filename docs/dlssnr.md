@@ -222,11 +222,14 @@ reason string.
   terminal with the game's executable directory as cwd, the `%command%` capture,
   and the model scan / PE-version check / picker. The safe ini surface, the
   network/`model_scale`/int4 selection, the GE/Valve Proton default and the
-  merged-env explanation ship with ticket #30 (above). Still later: the in-game
-  hints, the verify-from-log and the uninstall (#31–#32), and
-  the live fetch (ticket #12). `platform::nr` itself is the registry, the pinning,
-  the gates and the cost data; the route is fixed to `optiscaler` by the profile
-  validation.
+  merged-env explanation ship with ticket #30 (above). **The verification, the
+  support bundle and the in-game hints ship with ticket #31**
+  (`docs/m3.5-nr-verify.md`): engagement read from `dlssnr-amd.log` with markers
+  as data, an opt-in allowlisted support bundle that never carries the model
+  weights or a secret, and the per-mode in-game key hints with a per-game note
+  override. Still later: the uninstall (#32), and the live fetch (ticket #12).
+  `platform::nr` itself is the registry, the pinning, the gates and the cost
+  data; the route is fixed to `optiscaler` by the profile validation.
 - **32-bit detection reads the game's PE header, not the package's.** A native
   Linux game has no NR path, so `pe_is_64_bit` treats a non-PE file as an error
   rather than guessing.

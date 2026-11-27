@@ -111,6 +111,8 @@ pub fn Detail(props: DetailProps) -> Element {
     let mut eac_view = use_signal(EacView::hidden);
     let mut reboot_confirm = use_signal(|| false);
     let mut eac_message = use_signal(String::new);
+    // The game's curated compat entry, for the in-game hint card's note override.
+    let mut compat_entry = use_signal(|| None::<pitagames_platform::compat::CompatEntry>);
 
     // Load the profiles once per mounted game; the parent keys this component
     // by appid so opening another game remounts it.
@@ -160,6 +162,7 @@ pub fn Detail(props: DetailProps) -> Element {
         async move {
             let db = pitagames_platform::compat::CompatDb::load();
             let entry = db.get(&id);
+            compat_entry.set(entry.cloned());
             let curated = entry
                 .map(|entry| entry.anticheat)
                 .unwrap_or(AntiCheat::Unknown);
@@ -365,6 +368,21 @@ pub fn Detail(props: DetailProps) -> Element {
         .as_deref()
         .and_then(|name| profile_rows.iter().find(|row| row.profile.name == name))
         .map(|row| row.profile.clone());
+
+    // The in-game key hints for the selected profile's injection mode, with the
+    // game's curated `[ingame] notes` as the note override. Pure and cheap, so
+    // it recomputes with the profile; the shipped key data is parsed once.
+    let hint_data = use_hook(pitagames_platform::hints::HintData::shipped);
+    let in_game_hints = selected_profile.as_ref().and_then(|profile| {
+        pitagames_platform::hints::set_for(
+            &hint_data,
+            profile,
+            compat_entry
+                .read()
+                .as_ref()
+                .and_then(|entry| entry.ingame.notes.as_deref()),
+        )
+    });
 
     let proton_options = proton_choices(props.proton.as_ref());
     let current_choice = proton_choice();
@@ -966,6 +984,43 @@ pub fn Detail(props: DetailProps) -> Element {
                     }
                 }
                 {about_body}
+            }
+
+            if let Some(hints) = in_game_hints.clone() {
+                div {
+                    style: "display:flex;flex-direction:column;gap:10px;padding-top:6px;",
+                    div {
+                        style: "display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;",
+                        h3 {
+                            style: "margin:0;font-size:var(--text-body);font-weight:600;color:#ffffff;",
+                            "In-game keys"
+                        }
+                        span {
+                            style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
+                            "{hints.mode.label()}"
+                        }
+                    }
+                    if let Some(note) = hints.note.clone() {
+                        p {
+                            style: "margin:0;font-size:var(--text-caption);color:var(--text-secondary);",
+                            "{note}"
+                        }
+                    }
+                    for hint in hints.hints.iter() {
+                        div {
+                            key: "{hint.keys}",
+                            style: "display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;",
+                            span {
+                                style: "font-family:monospace;font-size:var(--text-caption);color:var(--accent);min-width:88px;",
+                                "{hint.keys}"
+                            }
+                            span {
+                                style: "font-size:var(--text-caption);color:var(--text-secondary);",
+                                "{hint.action}"
+                            }
+                        }
+                    }
+                }
             }
 
             div {
