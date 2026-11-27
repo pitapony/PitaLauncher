@@ -1908,8 +1908,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
 
                                 let play_db = db_handle.clone();
                                 let play_game = entry.game.clone();
-                                let install_game = game_id.clone();
-                                let install_title = title.clone();
+                                let install_game = entry.game.clone();
                                 let card_key = format!("{}-{app_id}", entry.store().as_str());
                                 // The Steam install path needs the downloads
                                 // channel; the CLI stores need the install queue's.
@@ -2020,7 +2019,6 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                         event.stop_propagation();
                                                         launch_start::start_install(
                                                             &install_game,
-                                                            &install_title,
                                                             installs,
                                                             install_events,
                                                             events,
