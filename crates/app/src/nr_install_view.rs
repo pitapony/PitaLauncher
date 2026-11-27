@@ -15,6 +15,7 @@
 use dioxus::prelude::*;
 use std::sync::{Arc, Mutex};
 
+use pitagames_core::i18n::t;
 use pitagames_core::paths;
 use pitagames_core::profile::{ModelSource, NeuralRendering, NrModel, NrProcessing};
 use pitagames_mods::CapturedEnv;
@@ -88,7 +89,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                         .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
                         .unwrap_or_default();
                     if captured_env.is_empty() {
-                        status.set("Install finished.".to_string());
+                        status.set(t("nr.finished").to_string());
                     } else {
                         let names = captured_env
                             .env
@@ -96,10 +97,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                             .cloned()
                             .collect::<Vec<_>>()
                             .join(", ");
-                        status.set(format!(
-                            "Install finished. Captured launch options: {names}. \
-                             Press Apply & verify to save the NR profile."
-                        ));
+                        status.set(t("nr.finished_captured").replace("{names}", &names));
                     }
                     // Hand the chosen network, scale and the installer's printed
                     // launch options to the Graphics screen's draft. Nothing is
@@ -127,9 +125,9 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
             nr_install::scan_roots(scan_entry.game.install_dir.as_deref(), prefix.as_deref());
         let found = nr_install::scan(&roots);
         status.set(if found.is_empty() {
-            "No verified model found. Pick your nvngx_dlssnr.dll (or a zip with it).".to_string()
+            t("nr.no_model").to_string()
         } else {
-            format!("Found {} model file(s).", found.found.len())
+            t("nr.found_models").replace("{count}", &found.found.len().to_string())
         });
         scanned.set(Some(found));
     };
@@ -139,11 +137,11 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
         match nr_install::inspect_model(&path) {
             Ok(model) => {
                 form.write().source = model.source();
-                status.set(format!(
-                    "Using {} ({}).",
-                    model.path.display(),
-                    model.version
-                ));
+                status.set(
+                    t("nr.using_file")
+                        .replace("{path}", &model.path.display().to_string())
+                        .replace("{version}", &model.version),
+                );
             }
             Err(error) => status.set(error.to_string()),
         }
@@ -152,7 +150,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
     let install_entry = entry.clone();
     let install = move |_| {
         let Some(exe) = install_entry.game.exe.clone() else {
-            status.set("This game has no executable path to install beside.".to_string());
+            status.set(t("nr.no_exe_install").to_string());
             return;
         };
         let form_value = form.read().clone();
@@ -180,7 +178,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
     let uninstall_entry = entry.clone();
     let uninstall = move |_| {
         let Some(exe) = uninstall_entry.game.exe.clone() else {
-            status.set("This game has no executable path to uninstall beside.".to_string());
+            status.set(t("nr.no_exe_uninstall").to_string());
             return;
         };
         let game_dir = exe
@@ -213,7 +211,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                 });
             }
             Strategy::Nothing => {
-                status.set("No DLSSNR install was found for this game.".to_string());
+                status.set(t("nr.nothing_to_uninstall").to_string());
             }
         }
     };
@@ -240,28 +238,28 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                 style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;",
                 h3 {
                     style: "margin:0;font-size:var(--text-heading);font-weight:600;color:#ffffff;",
-                    "Neural rendering — install"
+                    {t("nr.title")}
                 }
                 span {
                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                    "backend {backend} · v{version}"
+                    {t("nr.backend").replace("{backend}", backend).replace("{version}", &version)}
                 }
                 if experimental {
                     span {
                         style: "padding:2px 8px;border-radius:999px;font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;background:#3a2a1e;color:#e0c090;",
-                        "not tested by us"
+                        {t("nr.not_tested")}
                     }
                 }
             }
 
             span {
                 style: "font-size:var(--text-caption);color:var(--text-secondary);line-height:1.5;",
-                "Route: OptiScaler (fixed in v1). Upstream's install.sh runs in the terminal below; its prompts are yours to answer."
+                {t("nr.route_hint")}
             }
 
             div {
                 style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                span { style: "font-size:var(--text-caption);color:var(--text-muted);", "Route" }
+                span { style: "font-size:var(--text-caption);color:var(--text-muted);", {t("nr.route")} }
                 span {
                     style: "padding:3px 10px;border-radius:7px;background:#243044;color:#ffffff;font-size:var(--text-caption);",
                     "OptiScaler"
@@ -270,7 +268,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
 
             div {
                 style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                span { style: "font-size:var(--text-caption);color:var(--text-muted);", "Network" }
+                span { style: "font-size:var(--text-caption);color:var(--text-muted);", {t("nr.network")} }
                 for (model, label) in model_choices() {
                     button {
                         key: "model-{label}",
@@ -283,7 +281,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
 
             div {
                 style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                span { style: "font-size:var(--text-caption);color:var(--text-muted);", "Processing" }
+                span { style: "font-size:var(--text-caption);color:var(--text-muted);", {t("nr.processing")} }
                 for (processing, label) in processing_choices() {
                     button {
                         key: "proc-{label}",
@@ -296,11 +294,11 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
 
             div {
                 style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
-                span { style: "font-size:var(--text-caption);color:var(--text-muted);", "Model" }
+                span { style: "font-size:var(--text-caption);color:var(--text-muted);", {t("nr.model")} }
                 button {
                     onclick: scan,
                     style: "{button_style(true)}",
-                    "Scan game & prefix"
+                    {t("nr.scan")}
                 }
                 if let Some(found) = scan_snapshot {
                     for (index, model) in found.found.iter().enumerate() {
@@ -321,7 +319,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                     if found.offers_picker() {
                         span {
                             style: "font-size:var(--text-caption);color:#e0c090;",
-                            "No verified DLL found — pick one below."
+                            {t("nr.no_verified")}
                         }
                     }
                 }
@@ -338,7 +336,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                 button {
                     onclick: pick,
                     style: "{button_style(true)}",
-                    "Use this file"
+                    {t("nr.use_file")}
                 }
             }
 
@@ -349,7 +347,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
 
             div {
                 style: "display:flex;align-items:center;gap:8px;",
-                span { style: "font-size:var(--text-caption);color:var(--text-muted);", "Package" }
+                span { style: "font-size:var(--text-caption);color:var(--text-muted);", {t("nr.package")} }
                 input {
                     value: "{package_text}",
                     oninput: move |event| package.set(event.value()),
@@ -358,7 +356,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                 button {
                     onclick: install,
                     style: "{button_style(true)}",
-                    "Install DLSSNR"
+                    {t("nr.install")}
                 }
             }
 
@@ -367,11 +365,11 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                 button {
                     onclick: uninstall,
                     style: "{button_style(true)}",
-                    "Uninstall DLSSNR"
+                    {t("nr.uninstall")}
                 }
                 span {
                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                    "Upstream's own remove runs first; the launcher's manifest restores the tree, and a mismatch is reported rather than applied."
+                    {t("nr.uninstall_hint")}
                 }
             }
 
@@ -402,7 +400,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                             button {
                                 onclick: move |_| close_sheet(terminal, inputs, typed),
                                 style: "{button_style(true)}",
-                                if sheet.running() { "Cancel" } else { "Close" }
+                                if sheet.running() { t("action.cancel") } else { t("action.close") }
                             }
                         }
 
@@ -440,7 +438,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                                 button {
                                     onclick: move |_| submit_line(inputs, typed),
                                     style: "{button_style(true)}",
-                                    "Send"
+                                    {t("nr.send")}
                                 }
                             }
                         }
@@ -448,7 +446,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                         if let Some(log) = sheet.log() {
                             span {
                                 style: "font-size:var(--text-micro);color:var(--text-muted);overflow-wrap:anywhere;",
-                                "transcript: {log.display()}"
+                                {t("nr.transcript").replace("{path}", &log.display().to_string())}
                             }
                         }
                     }
@@ -517,10 +515,10 @@ const fn processing_choices() -> [(NrProcessing, &'static str); 2] {
 
 fn sheet_status(status: &TerminalStatus) -> &'static str {
     match status {
-        TerminalStatus::Running => "running",
-        TerminalStatus::Succeeded => "installed",
-        TerminalStatus::Failed(_) => "failed",
-        TerminalStatus::Cancelled => "cancelled",
+        TerminalStatus::Running => t("nr.status_running"),
+        TerminalStatus::Succeeded => t("nr.status_installed"),
+        TerminalStatus::Failed(_) => t("nr.status_failed"),
+        TerminalStatus::Cancelled => t("nr.status_cancelled"),
     }
 }
 
