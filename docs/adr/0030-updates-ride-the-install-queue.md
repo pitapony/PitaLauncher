@@ -70,7 +70,9 @@ Two temptations had to be refused:
   trait.
 - Follow-up: the GUI's Update button wiring (a CLI row that is installed and
   flagged offers **Update**, enqueuing `installer::update_plan(&game).job()`) is
-  deliberately left to a later slice; nothing in `stores` changes for it.
+  done: `library::install_plan` + `launch_start::start_install` wire the grid
+  card, the home hero and the game page to the same queue, and nothing in
+  `stores` changed for it.
 
 ## Alternatives considered
 
