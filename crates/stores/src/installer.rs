@@ -81,6 +81,9 @@ impl InstallPlan {
         match self.kind {
             JobKind::Install => job,
             JobKind::Update => job.as_update(),
+            // A verify-only repair (the reconciled row's Verify) checks the
+            // files an interrupted install left, without fetching again.
+            JobKind::Verify => job.with_kind(JobKind::Verify),
         }
     }
 
@@ -302,6 +305,33 @@ pub fn update_plan(game: &Game) -> Result<InstallPlan, InstallerError> {
     })
 }
 
+/// Plan a **verify-only** repair for an installed game: the store's own check
+/// over an existing directory, without fetching anything.
+///
+/// This is the headless half of the reconciled row's Verify — what a row left
+/// behind by an interrupted install offers. The directory wins from the row, so
+/// the check runs against what the user saw; a row that does not know it falls
+/// back to the store's default, exactly like an update.
+pub fn verify_plan(game: &Game) -> Result<InstallPlan, InstallerError> {
+    let program = match game.id.store {
+        Store::Epic => epic::PROGRAM,
+        Store::Amazon => amazon::PROGRAM,
+        Store::Gog => gog::GAME_PROGRAM,
+        other => return Err(InstallerError::Unsupported(other)),
+    };
+    let target = match &game.install_dir {
+        Some(dir) => dir.clone(),
+        None => plan(&game.id, &game.title)?.target,
+    };
+    Ok(InstallPlan {
+        id: game.id.clone(),
+        title: game.title.clone(),
+        program,
+        target,
+        kind: JobKind::Verify,
+    })
+}
+
 /// Run one queued job to completion, or until `control` cancels it.
 ///
 /// Blocks while the store CLI works: call this on a worker thread. Every
@@ -323,60 +353,69 @@ pub fn run(
     options: &CliOptions,
     control: &InstallControl,
     mut on_progress: impl FnMut(JobProgress),
+    mut on_started: impl FnMut(u32),
 ) -> Result<InstallRun, String> {
     if !is_installable(job.id.store) {
         return Err(InstallerError::Unsupported(job.id.store).to_string());
     }
 
-    let command = install_command(&job.id, &job.target);
-    let report = match run_phase(
-        backends,
-        job.id.store,
-        &command,
-        options,
-        control,
-        &mut on_progress,
-    )? {
-        Phase::Cancelled => return Ok(cancelled_run(job)),
-        Phase::Finished(report) => report,
-    };
-    if !report.succeeded() {
-        return Err(failure_message(&job.id, "install", &report));
-    }
     let mut install = InstallRun {
         program: program_for(job.id.store),
         target: job.target.clone(),
-        transcript: report.log_path().map(Path::to_path_buf),
+        transcript: None,
         cancelled: false,
         verify: None,
     };
 
-    // A plain install is done; only an update carries the extra verify.
-    if !job.kind.verifies() {
-        return Ok(install);
-    }
-
-    let verify_command = verify_command(&job.id, &job.target);
-    install.verify = Some(
-        match run_phase(
+    // The install phase: a fresh install, or the fetch half of an update.
+    if job.kind.installs() {
+        let command = install_command(&job.id, &job.target);
+        let report = match run_phase(
             backends,
             job.id.store,
-            &verify_command,
+            &command,
             options,
             control,
             &mut on_progress,
+            &mut on_started,
         )? {
-            Phase::Cancelled => VerifyRun::cancelled(job.id.store),
-            Phase::Finished(report) => verify_run(job.id.store, &report),
-        },
-    );
-
-    if let Some(verify) = &install.verify
-        && !verify.cancelled
-        && !verify.verified
-    {
-        return Err(verify_failure_message(&job.id, verify));
+            Phase::Cancelled => return Ok(cancelled_run(job)),
+            Phase::Finished(report) => report,
+        };
+        if !report.succeeded() {
+            return Err(failure_message(&job.id, "install", &report));
+        }
+        install.transcript = report.log_path().map(Path::to_path_buf);
     }
+
+    // A plain install is done; an update follows it with the backend's verify,
+    // and a verify job (the reconciled repair) runs the verify alone.
+    if job.kind.verifies() {
+        let command = verify_command(&job.id, &job.target);
+        let verify = match run_phase(
+            backends,
+            job.id.store,
+            &command,
+            options,
+            control,
+            &mut on_progress,
+            &mut on_started,
+        )? {
+            Phase::Cancelled => {
+                // A verify with no install to fall back on was the whole run.
+                if !job.kind.installs() {
+                    install.cancelled = true;
+                }
+                VerifyRun::cancelled(job.id.store)
+            }
+            Phase::Finished(report) => verify_run(job.id.store, &report),
+        };
+        if !verify.cancelled && !verify.verified {
+            return Err(verify_failure_message(&job.id, job.kind, &verify));
+        }
+        install.verify = Some(verify);
+    }
+
     Ok(install)
 }
 
@@ -400,6 +439,7 @@ fn run_phase(
     options: &CliOptions,
     control: &InstallControl,
     on_progress: &mut impl FnMut(JobProgress),
+    on_started: &mut impl FnMut(u32),
 ) -> Result<Phase, String> {
     // Cancelled before the CLI started: no process, no directory.
     if control.is_cancelled() {
@@ -411,6 +451,11 @@ fn run_phase(
         spawn_backend(backends, store, command, options)
             .map_err(|error| format!("could not run the {store} {label}: {error}"))?,
     );
+    // The pid reaches persistence before the CLI can be orphaned, so the next
+    // boot can reap it if this launcher crashes mid-run.
+    if let Some(pid) = handle.pid() {
+        on_started(pid);
+    }
     if control.attach(&handle) {
         handle.cancel();
     }
@@ -540,7 +585,11 @@ fn verify_command(id: &GameId, target: &Path) -> CliCommand {
     }
 }
 
-const fn program_for(store: Store) -> &'static str {
+/// The program a store's installs run (`legendary`, `nile`, `gogdl`).
+///
+/// Public because crash recovery asks the same question when it decides whether
+/// a recorded pid still belongs to an install before reaping it.
+pub const fn program_for(store: Store) -> &'static str {
     match store {
         Store::Epic => epic::PROGRAM,
         Store::Amazon => amazon::PROGRAM,
@@ -564,10 +613,15 @@ fn failure_message(id: &GameId, phase: &str, report: &RunReport) -> String {
     message
 }
 
-/// An update whose verify did not pass, as one line.
-fn verify_failure_message(id: &GameId, verify: &VerifyRun) -> String {
+/// An update or verify whose check did not pass, as one line.
+fn verify_failure_message(id: &GameId, kind: JobKind, verify: &VerifyRun) -> String {
+    let phase = if kind.installs() {
+        "update verify"
+    } else {
+        "verify"
+    };
     let mut message = format!(
-        "{} update verify failed: {}",
+        "{} {phase} failed: {}",
         id.store,
         verify
             .message
@@ -786,6 +840,7 @@ mod tests {
             &options(),
             &InstallControl::new(),
             |progress| seen.push(progress),
+            |_| {},
         )
         .unwrap();
 
@@ -815,7 +870,15 @@ mod tests {
             "Gizmo",
             dir.path().join("Gizmo"),
         );
-        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
         assert!(error.contains("another launcher"), "{error}");
         assert!(error.starts_with("epic install failed"), "{error}");
     }
@@ -841,7 +904,15 @@ mod tests {
             "Game",
             dir.path().join("Game"),
         );
-        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
         assert!(error.contains("gog install failed"), "{error}");
     }
 
@@ -859,7 +930,15 @@ mod tests {
             "Game",
             dir.path().join("Game"),
         );
-        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
         assert!(error.contains("amazon"), "{error}");
         assert!(error.contains("nile"), "{error}");
     }
@@ -873,7 +952,15 @@ mod tests {
             "Portal 2",
             dir.path().join("Portal 2"),
         );
-        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
         assert!(error.contains("no command-line install backend"), "{error}");
     }
 
@@ -901,7 +988,7 @@ mod tests {
         let control = InstallControl::new();
 
         let outcome = std::thread::scope(|scope| {
-            let worker = scope.spawn(|| run(&backends, &job, &options, &control, |_| {}));
+            let worker = scope.spawn(|| run(&backends, &job, &options, &control, |_| {}, |_| {}));
 
             // Wait for the fake CLI to be alive before cancelling: the signal
             // has to reach a running process, not a flag set before the spawn.
@@ -943,7 +1030,7 @@ mod tests {
         let control = InstallControl::new();
         control.cancel();
 
-        let run = run(&backends, &job, &options(), &control, |_| {}).unwrap();
+        let run = run(&backends, &job, &options(), &control, |_| {}, |_| {}).unwrap();
         assert!(run.cancelled);
         assert!(run.transcript.is_none(), "no process means no transcript");
         assert!(!marker.exists(), "the CLI must not have been started");
@@ -961,7 +1048,7 @@ mod tests {
         );
 
         let control = InstallControl::new();
-        let run = run(&backends, &job, &options(), &control, |_| {}).unwrap();
+        let run = run(&backends, &job, &options(), &control, |_| {}, |_| {}).unwrap();
         assert!(!run.cancelled);
 
         // The worker is gone; cancel now only records the flag.
@@ -1041,6 +1128,31 @@ mod tests {
     }
 
     #[test]
+    fn a_verify_plan_checks_the_existing_directory_without_installing() {
+        let installed = tempfile::tempdir().unwrap();
+        let mut game = Game::new(game(Store::Epic, "Gizmo"), "Gizmo");
+        game.installed = true;
+        game.install_dir = Some(installed.path().join("Gizmo"));
+
+        let plan = verify_plan(&game).unwrap();
+        assert_eq!(plan.kind, JobKind::Verify);
+        assert!(!plan.kind.installs(), "a verify never lays files down");
+        assert!(plan.kind.verifies());
+        assert_eq!(plan.target, installed.path().join("Gizmo"));
+        assert_eq!(plan.job().kind, JobKind::Verify);
+    }
+
+    #[test]
+    fn verify_plan_refuses_a_store_with_no_installer() {
+        let mut game = Game::new(game(Store::Steam, "620"), "Portal 2");
+        game.install_dir = Some(PathBuf::from("/games/Portal 2"));
+        assert_eq!(
+            verify_plan(&game),
+            Err(InstallerError::Unsupported(Store::Steam))
+        );
+    }
+
+    #[test]
     fn update_plan_refuses_a_store_with_no_installer() {
         let mut game = Game::new(game(Store::Steam, "620"), "Portal 2");
         game.install_dir = Some(PathBuf::from("/games/Portal 2"));
@@ -1079,7 +1191,15 @@ mod tests {
         )
         .as_update();
 
-        let run = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap();
+        let run = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
 
         assert!(install_marker.exists(), "the install phase ran");
         assert!(verify_marker.exists(), "the verify ran after the install");
@@ -1110,8 +1230,125 @@ mod tests {
             dir.path().join("Gizmo"),
         );
 
-        let run = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap();
+        let run = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
         assert!(run.verify.is_none());
+    }
+
+    #[test]
+    fn a_verify_job_checks_the_files_without_fetching_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let install_marker = dir.path().join("installed");
+        let verify_marker = dir.path().join("verified");
+        let program = script(
+            dir.path(),
+            "legendary",
+            &format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 install) : > '{installed}'; exit 0 ;;\n\
+                 verify) : > '{verified}'; \
+                 echo 'Verification finished successfully.'; exit 0 ;;\n\
+                 *) exit 2 ;;\n\
+                 esac\n",
+                installed = install_marker.display(),
+                verified = verify_marker.display(),
+            ),
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        )
+        .with_kind(JobKind::Verify);
+
+        let run = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap();
+
+        // This is the reconciled row's Verify: the store's own check over what
+        // the interrupted install left, with no second download.
+        assert!(!install_marker.exists(), "a verify never installs");
+        assert!(verify_marker.exists(), "the store's own verify ran");
+        let verify = run.verify.expect("a verify job carries its verdict");
+        assert!(verify.verified);
+        assert_eq!(verify.program, "legendary");
+        assert!(!verify.cancelled);
+    }
+
+    #[test]
+    fn a_failed_verify_only_job_is_reported_as_a_verify_not_an_update() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(
+            dir.path(),
+            "legendary",
+            "#!/bin/sh\n\
+             case \"$1\" in\n\
+             verify) echo 'Verification failed, 2 file(s) corrupted.'; exit 0 ;;\n\
+             *) exit 2 ;;\n\
+             esac\n",
+        );
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        )
+        .with_kind(JobKind::Verify);
+
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
+        assert!(error.contains("epic verify failed"), "{error}");
+        assert!(!error.contains("update verify"), "{error}");
+    }
+
+    #[test]
+    fn the_runner_reports_the_cli_pid_before_the_cli_can_be_orphaned() {
+        let dir = tempfile::tempdir().unwrap();
+        let program = script(dir.path(), "legendary", "#!/bin/sh\nexit 0\n");
+        let backends = backends(program.to_str().unwrap(), "/nonexistent/nile", "gogdl");
+        let job = InstallJob::new(
+            game(Store::Epic, "Gizmo"),
+            "Gizmo",
+            dir.path().join("Gizmo"),
+        );
+
+        let mut pids = Vec::new();
+        run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |pid| pids.push(pid),
+        )
+        .unwrap();
+
+        // The pid must reach persistence while the CLI is alive, so a crash
+        // mid-install leaves something to reap at the next boot.
+        assert_eq!(pids.len(), 1, "one CLI, one pid");
+        assert!(pids[0] > 0);
     }
 
     #[test]
@@ -1138,7 +1375,15 @@ mod tests {
         )
         .as_update();
 
-        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
         assert!(error.contains("epic update verify failed"), "{error}");
         assert!(error.contains("3 file(s) corrupted"), "{error}");
     }
@@ -1170,7 +1415,15 @@ mod tests {
         )
         .as_update();
 
-        let error = run(&backends, &job, &options(), &InstallControl::new(), |_| {}).unwrap_err();
+        let error = run(
+            &backends,
+            &job,
+            &options(),
+            &InstallControl::new(),
+            |_| {},
+            |_| {},
+        )
+        .unwrap_err();
         assert!(error.contains("gog update verify failed"), "{error}");
     }
 
@@ -1194,7 +1447,7 @@ mod tests {
         let control = InstallControl::new();
         control.cancel();
 
-        let run = run(&backends, &job, &options(), &control, |_| {}).unwrap();
+        let run = run(&backends, &job, &options(), &control, |_| {}, |_| {}).unwrap();
         assert!(run.cancelled);
         assert!(run.verify.is_none(), "nothing ran, so nothing verified");
         assert!(!marker.exists());

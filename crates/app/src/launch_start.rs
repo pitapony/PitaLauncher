@@ -87,6 +87,7 @@ pub(crate) fn start_install(
     libraries: &[PathBuf],
     mut notice: Signal<String>,
     mut session: Signal<crate::session::Session>,
+    db: Option<pitagames_db::Db>,
 ) {
     notice.set(String::new());
 
@@ -96,6 +97,17 @@ pub(crate) fn start_install(
                 if let Err(error) = installs.write().enqueue(plan.job()) {
                     notice.set(error.to_string());
                     return;
+                }
+                // Persist the queue as soon as the job is added, before any
+                // worker report: a job queued behind another must survive a
+                // crash too, and the running job's own writes may not name it.
+                if let Some(db) = db {
+                    let rows = installs.read().stored();
+                    spawn(async move {
+                        if let Err(error) = persist::save_queue(&db, &rows).await {
+                            eprintln!("[pitagames] {error}");
+                        }
+                    });
                 }
                 pump_installs(installs, install_events, notice);
                 session.write().set_view(View::Downloads);

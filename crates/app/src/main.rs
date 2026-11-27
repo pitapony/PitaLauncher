@@ -634,6 +634,7 @@ fn App() -> Element {
         downloads_focus,
         installs,
         install_events,
+        db_state,
         session,
         notice,
     );
@@ -696,6 +697,7 @@ fn App() -> Element {
     pumps::bootstrap(
         install_channel.clone(),
         play_channel.clone(),
+        installs,
         proton_state,
         db_state,
         account_state,
@@ -917,6 +919,7 @@ fn App() -> Element {
                                 button {
                                     onclick: move |_| {
                                         installs.write().clear_finished();
+                                        pumps::persist_queue(db_state, installs);
                                     },
                                     style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
                                     {t("action.clear_finished")}
@@ -993,6 +996,7 @@ fn App() -> Element {
                                         button {
                                             onclick: move |_| {
                                                 installs.write().cancel(index);
+                                                pumps::persist_queue(db_state, installs);
                                             },
                                             style: "margin-left:auto;padding:5px 10px;border-radius:7px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
                                             {t("action.cancel")}
@@ -1048,16 +1052,31 @@ fn App() -> Element {
                                         button {
                                             onclick: move |_| {
                                                 if installs.write().retry(index) {
+                                                    pumps::persist_queue(db_state, installs);
                                                     launch_start::pump_installs(installs, install_events, notice);
                                                 }
                                             },
                                             style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
                                             {t("action.retry")}
                                         }
+                                        button {
+                                            onclick: move |_| {
+                                                // The store's own check over what an
+                                                // interrupted install left, with no
+                                                // second download and no deletion.
+                                                if installs.write().verify(index) {
+                                                    pumps::persist_queue(db_state, installs);
+                                                    launch_start::pump_installs(installs, install_events, notice);
+                                                }
+                                            },
+                                            style: "padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#243024;color:#d8e8d0;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
+                                            {t("action.verify")}
+                                        }
                                     }
                                     button {
                                         onclick: move |_| {
                                             installs.write().remove(index);
+                                            pumps::persist_queue(db_state, installs);
                                         },
                                         style: "padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);margin-left:auto;",
                                         {t("action.remove")}
@@ -1912,6 +1931,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                     .is_some_and(|row| !row.state.is_finished());
 
                                 let play_db = db_handle.clone();
+                                let install_db = db_handle.clone();
                                 let play_game = entry.game.clone();
                                 let install_game = entry.game.clone();
                                 let card_key = format!("{}-{app_id}", entry.store().as_str());
@@ -2031,6 +2051,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                             &install_libraries,
                                                             notice,
                                                             session,
+                                                            install_db.clone(),
                                                         );
                                                     },
                                                     style: button_style(install_enabled, "#243024", "#d8e8d0"),

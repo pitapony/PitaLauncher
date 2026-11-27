@@ -35,10 +35,11 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt as _;
 use futures_util::lock::Mutex as AsyncMutex;
 use pitagames_core::GameId;
+use pitagames_db::StoredJob;
 use pitagames_stores::cli::CliOptions;
 use pitagames_stores::installer::{self, InstallControl, InstallRun};
 use pitagames_stores::queue::{
-    InstallJob, InstallQueue, JobProgress, JobState, QueueError, StartOutcome,
+    InstallJob, InstallQueue, Interrupted, JobKind, JobProgress, JobState, QueueError, StartOutcome,
 };
 use pitagames_stores::sync::Backends;
 
@@ -57,6 +58,9 @@ pub enum InstallOutcome {
 /// One report from a running install worker.
 #[derive(Debug, Clone, PartialEq)]
 pub enum InstallEvent {
+    /// The CLI is up: its process-group id, reported while it is alive so the
+    /// queue can persist it before a crash orphans the process.
+    Started { id: GameId, pid: u32 },
     /// The backend printed something new: a percentage, a stage line, both.
     Progress { id: GameId, progress: JobProgress },
     /// The run finished; the queue row moves to its final state.
@@ -116,6 +120,49 @@ pub struct Installs {
 }
 
 impl Installs {
+    /// Rebuild the board from persisted jobs (a previous launcher run's queue).
+    ///
+    /// Controls and the cancelling set are fresh: no process from the previous
+    /// run is a child of this one, so there is nothing to cancel yet.
+    #[must_use]
+    pub fn restore(jobs: Vec<InstallJob>) -> Self {
+        Self {
+            queue: InstallQueue::from_jobs(jobs),
+            controls: BTreeMap::new(),
+            cancelling: BTreeSet::new(),
+        }
+    }
+
+    /// The persisted rows for the current queue, in order.
+    #[must_use]
+    pub fn stored(&self) -> Vec<StoredJob> {
+        self.queue.jobs().iter().map(stored_job).collect()
+    }
+
+    /// Turn every `Running` job into `Failed` and report what the crashed run
+    /// left behind, so the next boot can reap an orphaned CLI by its pid.
+    ///
+    /// Nothing here touches the filesystem: a partial download is the store's
+    /// to repair (the Verify the reconciled row offers), never the launcher's
+    /// to delete.
+    pub fn reconcile(&mut self, message: &str) -> Vec<Interrupted> {
+        let interrupted = self.queue.reconcile_running(message);
+        for entry in &interrupted {
+            // No worker of this run owns these ids; drop any stale token.
+            self.controls.remove(&entry.id);
+            self.cancelling.remove(&entry.id);
+        }
+        interrupted
+    }
+
+    /// Record the running CLI's process-group id, for crash recovery.
+    pub fn started(&mut self, id: &GameId, pid: u32) -> bool {
+        let Some(index) = self.index_of(id) else {
+            return false;
+        };
+        self.queue.set_pid(index, pid)
+    }
+
     /// Add a game unless it is already queued or running.
     pub fn enqueue(&mut self, job: InstallJob) -> Result<usize, QueueError> {
         self.queue.enqueue(job)
@@ -154,6 +201,9 @@ impl Installs {
     /// ignored by the queue itself, which is why this cannot resurrect a row.
     pub fn apply(&mut self, event: &InstallEvent) {
         match event {
+            InstallEvent::Started { id, pid } => {
+                self.started(id, *pid);
+            }
             InstallEvent::Progress { id, progress } => {
                 if let Some(index) = self.index_of(id) {
                     self.queue
@@ -237,6 +287,14 @@ impl Installs {
         self.queue.retry(index)
     }
 
+    /// Turn a finished job into a verify-only repair and queue it.
+    ///
+    /// This is the "Verify" a crashed install's row offers: the store's own
+    /// check over the files the interruption left, with no second download.
+    pub fn verify(&mut self, index: usize) -> bool {
+        self.queue.verify(index)
+    }
+
     /// Cancel the job at `index`.
     ///
     /// A queued job is cancelled outright. A running one keeps its `Running`
@@ -282,6 +340,80 @@ fn free_space(path: &Path) -> Option<u64> {
         .map(|space| space.available)
 }
 
+/// The persisted row for a job.
+///
+/// The kind and state travel as their stable wire tokens; the failure message,
+/// the size and the recorded pid sit in their own columns. Progress is stored
+/// too, so a restored row shows the bar it had reached before the crash.
+#[must_use]
+pub fn stored_job(job: &InstallJob) -> StoredJob {
+    let (state, message) = match &job.state {
+        JobState::Failed { message } => ("failed", Some(message.clone())),
+        other => (other.wire(), None),
+    };
+    StoredJob {
+        id: job.id.clone(),
+        title: job.title.clone(),
+        target: job.target.clone(),
+        size: job.size,
+        kind: job.kind.wire().to_string(),
+        state: state.to_string(),
+        message,
+        pid: job.pid,
+        percent: job.progress.percent,
+        stage: job.progress.stage.clone(),
+    }
+}
+
+/// A job rebuilt from its stored row.
+///
+/// `None` when the row names a kind or state this build does not know (a
+/// downgrade after an upgrade persisted a newer token): an unknown row is
+/// skipped rather than guessed, so a stale database cannot resurrect a job the
+/// current binary cannot run.
+#[must_use]
+pub fn install_job(row: &StoredJob) -> Option<InstallJob> {
+    let kind = JobKind::from_wire(&row.kind)?;
+    let state = JobState::from_wire(&row.state, row.message.clone())?;
+    let mut job = InstallJob::new(row.id.clone(), row.title.clone(), row.target.clone());
+    job.size = row.size;
+    job.kind = kind;
+    job.state = state;
+    job.progress = JobProgress {
+        percent: row.percent,
+        stage: row.stage.clone(),
+    };
+    job.pid = row.pid;
+    Some(job)
+}
+
+/// Reap the install CLIs a crashed launcher left behind.
+///
+/// The decision (signal only a pid that is still the store's CLI) lives in
+/// `stores::recovery`; here we hand it the real `/proc` table and the same
+/// `SIGTERM`→`SIGKILL` escalation a Stop button uses. A pid that is gone, or
+/// that now belongs to another program, is left alone.
+pub fn reap_orphans(orphans: &[Interrupted]) {
+    let list = pitagames_stores::recovery::Orphan::from_interrupted(orphans);
+    for outcome in pitagames_stores::recovery::reap_all(
+        &list,
+        pitagames_stores::recovery::system_cmdline,
+        |pid| {
+            pitagames_platform::launch::terminate(pid, pitagames_platform::launch::DEFAULT_GRACE);
+        },
+    ) {
+        match outcome {
+            pitagames_stores::recovery::OrphanOutcome::Signalled { pid, program } => {
+                eprintln!("[pitagames] reaped an orphaned {program} install (pid {pid})");
+            }
+            pitagames_stores::recovery::OrphanOutcome::Foreign { pid, command } => {
+                eprintln!("[pitagames] left pid {pid} ({command}) alone; it is not a store CLI");
+            }
+            pitagames_stores::recovery::OrphanOutcome::Gone { .. } => {}
+        }
+    }
+}
+
 /// Run one job on its own thread, reporting progress to `sender`.
 ///
 /// The thread owns nothing but the job and the control: the queue stays on the
@@ -299,12 +431,27 @@ pub fn spawn(job: InstallJob, sender: UnboundedSender<InstallEvent>, control: In
         let backends = Backends::new();
 
         let report_id = id.clone();
-        let result = installer::run(&backends, &job, &options, &control, |progress| {
-            let _ = sender.unbounded_send(InstallEvent::Progress {
-                id: report_id.clone(),
-                progress,
-            });
-        });
+        let started_id = id.clone();
+        let result = installer::run(
+            &backends,
+            &job,
+            &options,
+            &control,
+            |progress| {
+                let _ = sender.unbounded_send(InstallEvent::Progress {
+                    id: report_id.clone(),
+                    progress,
+                });
+            },
+            |pid| {
+                // The pid reaches the UI (and SQLite) while the CLI is alive, so
+                // a launcher crash leaves the orphan recoverable.
+                let _ = sender.unbounded_send(InstallEvent::Started {
+                    id: started_id.clone(),
+                    pid,
+                });
+            },
+        );
 
         let outcome = match result {
             Ok(InstallRun {
@@ -569,5 +716,110 @@ mod tests {
             },
         });
         assert_eq!(installs.job(0).unwrap().progress.percent, Some(50.0));
+    }
+
+    // -- crash recovery: persistence, reconciliation and Verify --------------
+
+    #[test]
+    fn a_job_round_trips_through_its_persisted_row() {
+        let original = job("Gizmo").as_update().with_size(42).with_pid(9);
+        let row = stored_job(&original);
+        assert_eq!(row.kind, "update");
+        assert_eq!(row.state, "queued");
+        assert_eq!(row.size, Some(42));
+        assert_eq!(row.pid, Some(9));
+        assert_eq!(
+            install_job(&row).unwrap(),
+            original,
+            "a persisted job rebuilds field-for-field"
+        );
+    }
+
+    #[test]
+    fn a_failed_job_keeps_its_message_across_a_round_trip() {
+        let failed = job("Gizmo").with_state(JobState::Failed {
+            message: "legendary exited 1".into(),
+        });
+        let row = stored_job(&failed);
+        assert_eq!(row.state, "failed");
+        assert_eq!(row.message.as_deref(), Some("legendary exited 1"));
+        assert_eq!(install_job(&row).unwrap(), failed);
+    }
+
+    #[test]
+    fn an_unknown_persisted_token_is_skipped_not_guessed() {
+        let mut row = stored_job(&job("Gizmo"));
+        row.kind = "teleport".into();
+        assert!(install_job(&row).is_none());
+    }
+
+    #[test]
+    fn a_restored_running_job_surfaces_as_failed_and_reports_its_pid() {
+        let mut installs = Installs::restore(vec![
+            job("Gizmo").with_state(JobState::Running).with_pid(4242),
+            job("Later").with_state(JobState::Queued),
+        ]);
+
+        let interrupted = installs.reconcile("an earlier launcher run was interrupted");
+
+        assert_eq!(interrupted.len(), 1);
+        assert_eq!(interrupted[0].pid, Some(4242));
+        assert_eq!(
+            installs.job(0).unwrap().state,
+            JobState::Failed {
+                message: "an earlier launcher run was interrupted".into()
+            }
+        );
+        assert_eq!(installs.job(0).unwrap().pid, None);
+        assert_eq!(
+            installs.job(1).unwrap().state,
+            JobState::Queued,
+            "a job that never started survives the restart"
+        );
+
+        // The reconciled failure is what the next boot persists and renders.
+        let stored = installs.stored();
+        assert_eq!(stored[0].state, "failed");
+        assert_eq!(stored[0].pid, None);
+    }
+
+    #[test]
+    fn verify_requeues_a_failed_row_as_a_verify_only_job() {
+        let mut installs = Installs::restore(vec![job("Gizmo").with_state(JobState::Failed {
+            message: "interrupted".into(),
+        })]);
+
+        assert!(installs.verify(0));
+        assert_eq!(installs.job(0).unwrap().kind, JobKind::Verify);
+        assert_eq!(installs.job(0).unwrap().state, JobState::Queued);
+        assert_eq!(
+            installs.job(0).unwrap().target,
+            std::path::PathBuf::from("/games/epic/Gizmo"),
+            "the verify checks the directory the user saw"
+        );
+    }
+
+    #[test]
+    fn a_started_event_attaches_the_pid_to_the_running_job() {
+        let mut installs = Installs::default();
+        installs.enqueue(job("Gizmo")).unwrap();
+        installs.start_next();
+
+        installs.apply(&InstallEvent::Started {
+            id: game("Gizmo"),
+            pid: 77,
+        });
+        assert_eq!(installs.job(0).unwrap().pid, Some(77));
+
+        // A stale pid for a job that already finished is not attached.
+        installs.apply(&InstallEvent::Finished {
+            id: game("Gizmo"),
+            outcome: InstallOutcome::Done,
+        });
+        installs.apply(&InstallEvent::Started {
+            id: game("Gizmo"),
+            pid: 88,
+        });
+        assert_eq!(installs.job(0).unwrap().pid, None);
     }
 }

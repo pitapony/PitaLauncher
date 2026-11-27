@@ -10,7 +10,7 @@ use pitagames_core::i18n::t;
 use pitagames_core::{Game, GameId, OwnedGame, Profile, Store};
 use pitagames_db::{
     Db, GameRepository, HistoryRepository, LaunchRecord, MetadataRepository, OwnedRepository,
-    ProfileRepository, StoredLaunch, StoredMetadata, StoredProfile,
+    ProfileRepository, QueueRepository, StoredJob, StoredLaunch, StoredMetadata, StoredProfile,
 };
 use time::OffsetDateTime;
 
@@ -188,4 +188,24 @@ pub async fn recent_launches(db: &Db, limit: usize) -> Result<Vec<StoredLaunch>,
     db.launches(limit)
         .await
         .map_err(|error| format!("could not read the launch history: {error}"))
+}
+
+/// The persisted install queue, in order.
+///
+/// The rows are raw: the queue layer decides what an unknown kind or state
+/// means (`store_installs::install_job` skips it).
+pub async fn load_queue(db: &Db) -> Result<Vec<StoredJob>, String> {
+    db.stored_queue()
+        .await
+        .map_err(|error| format!("could not read the install queue: {error}"))
+}
+
+/// Replace the persisted install queue with `jobs`, in order.
+///
+/// A full replace is deliberate: the table is a snapshot of the live queue, so
+/// order, deletes and edits are one transaction and cannot drift apart.
+pub async fn save_queue(db: &Db, jobs: &[StoredJob]) -> Result<usize, String> {
+    db.replace_queue(jobs)
+        .await
+        .map_err(|error| format!("could not save the install queue: {error}"))
 }

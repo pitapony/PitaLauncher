@@ -54,7 +54,7 @@ use pitagames_stores::gog::{self, Gog};
 use pitagames_stores::import::{ImportReport, Importer, SourceReport};
 use pitagames_stores::install::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallSample};
 use pitagames_stores::installer;
-use pitagames_stores::queue::{InstallQueue, StartOutcome};
+use pitagames_stores::queue::{InstallQueue, JobKind, StartOutcome};
 use pitagames_stores::status::{self, RowState, SessionState, StoreStatusReport, UpdateAvailable};
 use pitagames_stores::steam::{self, ScanReport};
 use pitagames_stores::steam_config::{
@@ -6312,7 +6312,7 @@ fn stores(args: &[String]) -> Result<()> {
     }
 
     if let Some(name) = parsed.subcommand.as_deref()
-        && !matches!(name, "status" | "updates" | "sync" | "update")
+        && !matches!(name, "status" | "updates" | "sync" | "update" | "verify")
     {
         bail!(
             "unknown subcommand `{name}` for `stores`\n\n{}",
@@ -6324,6 +6324,7 @@ fn stores(args: &[String]) -> Result<()> {
         Some("updates") => stores_updates(&parsed),
         Some("sync") => stores_sync(&parsed),
         Some("update") => stores_update(&parsed),
+        Some("verify") => stores_verify(&parsed),
         _ => stores_status(&parsed),
     }
 }
@@ -6338,55 +6339,93 @@ fn stores(args: &[String]) -> Result<()> {
 /// verdict therefore cannot drift from an install — this is the headless half
 /// of the Updates chip.
 fn stores_update(parsed: &StoresArgs) -> Result<()> {
+    reject_status_only(parsed, "stores update")?;
+    let (store, id, title) = one_store_and_id(parsed, "stores update")?;
+
+    let mut game = Game::new(GameId::new(store, id), title);
+    game.installed = true;
+    game.install_dir = parsed.dir.clone();
+    run_store_plan(parsed, installer::update_plan(&game)?)
+}
+
+/// Repair an installed game with the store's own verify, without fetching.
+///
+/// This is the CLI's headless half of the reconciled row's **Verify**: after an
+/// interrupted install, the store's `verify`/`repair` checks the files that are
+/// there. The launcher never deletes a partial download itself — this is what
+/// reconciles it.
+fn stores_verify(parsed: &StoresArgs) -> Result<()> {
+    reject_status_only(parsed, "stores verify")?;
+    let (store, id, title) = one_store_and_id(parsed, "stores verify")?;
+
+    let mut game = Game::new(GameId::new(store, id), title);
+    game.installed = true;
+    game.install_dir = parsed.dir.clone();
+    run_store_plan(parsed, installer::verify_plan(&game)?)
+}
+
+/// Reject the flags that only mean something to `stores` (status)/`updates`.
+fn reject_status_only(parsed: &StoresArgs, command: &str) -> Result<()> {
     if parsed.list || parsed.with_stores || parsed.steam_root.is_some() || parsed.db.is_some() {
         bail!(
-            "--list, --with-stores, --steam-root and --db do not belong to `stores update`\n\n{}",
+            "--list, --with-stores, --steam-root and --db do not belong to `{command}`\n\n{}",
             stores_usage()
         );
     }
+    Ok(())
+}
 
+/// The one `--store` and one id a run command needs, plus its title.
+fn one_store_and_id(parsed: &StoresArgs, command: &str) -> Result<(Store, String, String)> {
     let filters = store_filters(&parsed.filters)?;
     if filters.len() != 1 {
         bail!(
-            "`stores update` needs exactly one --store\n\n{}",
+            "`{command}` needs exactly one --store\n\n{}",
             stores_usage()
         );
     }
     let store = filters[0];
 
-    let id = parsed.extra.first().cloned().with_context(|| {
-        format!(
-            "`stores update <store> <id>` needs an id\n\n{}",
-            stores_usage()
-        )
-    })?;
+    let id =
+        parsed.extra.first().cloned().with_context(|| {
+            format!("`{command} <store> <id>` needs an id\n\n{}", stores_usage())
+        })?;
     if let Some(extra) = parsed.extra.get(1) {
         bail!(
-            "unexpected argument `{extra}` for `stores update`\n\n{}",
+            "unexpected argument `{extra}` for `{command}`\n\n{}",
             stores_usage()
         );
     }
     let title = parsed.title.clone().unwrap_or_else(|| id.clone());
+    Ok((store, id, title))
+}
 
-    let mut game = Game::new(GameId::new(store, id.clone()), title.clone());
-    game.installed = true;
-    game.install_dir = parsed.dir.clone();
-    let plan = installer::update_plan(&game)?;
+/// Run one planned job through the same serial queue and worker an install uses.
+fn run_store_plan(parsed: &StoresArgs, plan: installer::InstallPlan) -> Result<()> {
+    let store = plan.id.store;
+    let id = plan.id.store_id.clone();
+    let title = plan.title.clone();
     let job = plan.job();
 
     let backends = sync_backends(parsed);
     let options = stores_options(parsed);
 
     if parsed.dry_run {
-        let install = plan.command();
+        if plan.kind.installs() {
+            let install = plan.command();
+            print_planned(
+                plan.program,
+                store_spec(&backends, store, &install),
+                &install,
+            );
+        }
         let verify = verify_command_for(&plan);
-        print_planned(
-            plan.program,
-            store_spec(&backends, store, &install),
-            &install,
-        );
         print_planned(plan.program, store_spec(&backends, store, &verify), &verify);
-        println!("update {store} {id} -> {}", plan.target.display());
+        println!(
+            "{} {store} {id} -> {}",
+            plan.kind.label(),
+            plan.target.display()
+        );
         return Ok(());
     }
 
@@ -6401,11 +6440,18 @@ fn stores_update(parsed: &StoresArgs) -> Result<()> {
     debug_assert!(matches!(started, StartOutcome::Started { .. }));
 
     let control = installer::InstallControl::new();
-    let result = installer::run(&backends, &job, &options, &control, |progress| {
-        if let Some(stage) = progress.stage {
-            eprintln!("  {stage}");
-        }
-    });
+    let result = installer::run(
+        &backends,
+        &job,
+        &options,
+        &control,
+        |progress| {
+            if let Some(stage) = progress.stage {
+                eprintln!("  {stage}");
+            }
+        },
+        |_| {},
+    );
     queue.finish(index, result.as_ref().map(|_| ()).map_err(Clone::clone));
 
     let run = result.map_err(|message| anyhow::anyhow!(message))?;
@@ -6425,8 +6471,13 @@ fn stores_update(parsed: &StoresArgs) -> Result<()> {
         return Ok(());
     }
 
+    let verb = match plan.kind {
+        JobKind::Verify => "Verified",
+        JobKind::Update => "Updated",
+        JobKind::Install => "Installed",
+    };
     println!(
-        "Updated {title} ({store} {id}) via {} into {}",
+        "{verb} {title} ({store} {id}) via {} into {}",
         run.program,
         run.target.display()
     );
@@ -6949,9 +7000,12 @@ fn parse_stores_args(args: &[String]) -> Result<StoresArgs> {
         index += 1;
     }
 
-    // Only `update` takes a positional after the subcommand (`<id>`); the other
-    // subcommands take none, so a stray word is a mistake, not an ignored value.
-    if !parsed.extra.is_empty() && parsed.subcommand.as_deref() != Some("update") {
+    // Only `update` and `verify` take a positional after the subcommand
+    // (`<id>`); the other subcommands take none, so a stray word is a mistake,
+    // not an ignored value.
+    if !parsed.extra.is_empty()
+        && !matches!(parsed.subcommand.as_deref(), Some("update" | "verify"))
+    {
         bail!(
             "unexpected argument `{}` for `stores`\n\n{}",
             parsed.extra[0],
@@ -9384,14 +9438,16 @@ fn stores_usage() -> String {
     "USAGE:\n    pitagames-cli stores [status] [--store <name>] [--list] [--json]\n\
      \x20                 pitagames-cli stores updates [--steam-root <dir>] [--with-stores] [--json]\n\
      \x20                 pitagames-cli stores sync [--store <name>] [--db <path>] [--dry-run] [--json]\n\
-     \x20                 pitagames-cli stores update --store <name> <id> [--title <t>] [--dir <dir>] [--dry-run] [--json]\n\n\
+     \x20                 pitagames-cli stores update --store <name> <id> [--title <t>] [--dir <dir>] [--dry-run] [--json]\n\
+      \x20                 pitagames-cli stores verify --store <name> <id> [--title <t>] [--dir <dir>] [--dry-run] [--json]\n\n\
      SUBCOMMANDS:\n    \
      status                 Each CLI store's row (default)\n    \
      updates                The unified 'update available' list\n    \
      sync                   Cache each CLI store's library in the database\n    \
-     update                 Apply one store game's update through the install queue\n\n\
+     update                 Apply one store game's update through the install queue\n    \
+      verify                 Repair an install with the store's own verify (no download)\n\n\
      OPTIONS:\n    \
-     --store <name>         Limit to epic, amazon or gog (repeatable; status, sync, update)\n    \
+     --store <name>         Limit to epic, amazon or gog (repeatable; status, sync, update, verify)\n    \
      --list                 Also fetch owned/installed counts (status only)\n    \
      --program <path>       Override the CLI to probe (one --store; GOG: the library CLI)\n    \
      --game-program <path>  Override GOG's gogdl program\n    \
@@ -11376,6 +11432,49 @@ mod tests {
         let mut json = args();
         json.push("--json".to_string());
         stores(&json).unwrap();
+    }
+
+    #[test]
+    fn stores_verify_repairs_without_installing() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("installed");
+        let verified = dir.path().join("verified");
+        let program = fake_game(
+            dir.path(),
+            "legendary",
+            &format!(
+                "#!/bin/sh\n\
+                 case \"$1\" in\n\
+                 install) : > '{installed}'; exit 0 ;;\n\
+                 verify) : > '{verified}'; \
+                 echo 'Verification finished successfully.'; exit 0 ;;\n\
+                 *) echo \"unexpected: $*\" >&2; exit 2 ;;\n\
+                 esac\n",
+                installed = installed.display(),
+                verified = verified.display(),
+            ),
+        );
+        let target = dir.path().join("Gizmo");
+        let args = || -> Vec<String> {
+            vec![
+                "verify".to_string(),
+                "--store".to_string(),
+                "epic".to_string(),
+                "Gizmo".to_string(),
+                "--title".to_string(),
+                "Gizmo".to_string(),
+                "--dir".to_string(),
+                target.display().to_string(),
+                "--program".to_string(),
+                program.display().to_string(),
+                "--log-dir".to_string(),
+                dir.path().join("logs").display().to_string(),
+            ]
+        };
+
+        stores(&args()).unwrap();
+        assert!(!installed.exists(), "a verify never installs");
+        assert!(verified.exists(), "the store's own verify ran");
     }
 
     /// A fake `legendary` answering both listings from the checked-in fixtures.

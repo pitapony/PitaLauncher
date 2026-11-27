@@ -36,6 +36,23 @@ use crate::store_installs;
 use crate::store_installs::{InstallEvent, InstallOutcome, Installs};
 use crate::{View, activation, art, launch_start, persist, runtime, shell, steam_account};
 
+/// Write the whole install queue to SQLite, best-effort.
+///
+/// A missing or failed database costs the crash-recovery row, never the
+/// install: the queue keeps running in memory. The write is a full replace, so
+/// the stored queue equals the live one (order, deletes and edits included).
+pub(crate) fn persist_queue(db: Signal<Option<pitagames_db::Db>>, installs: Signal<Installs>) {
+    let Some(db) = (*db.read()).clone() else {
+        return;
+    };
+    let rows = installs.read().stored();
+    spawn(async move {
+        if let Err(error) = persist::save_queue(&db, &rows).await {
+            eprintln!("[pitagames] {error}");
+        }
+    });
+}
+
 /// Come to the front when a second launch asks this instance to.
 pub(crate) fn activation_requests(requests: Option<activation::Requests>) {
     use_future(move || {
@@ -60,6 +77,7 @@ pub(crate) fn downloads_actions(
     downloads_focus: focus::ScreenFocus,
     installs: Signal<Installs>,
     install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    db_state: Signal<Option<pitagames_db::Db>>,
     session: Signal<Session>,
     notice: Signal<String>,
 ) {
@@ -75,6 +93,7 @@ pub(crate) fn downloads_actions(
                     downloads_focus,
                     installs,
                     install_events,
+                    db_state,
                     session,
                     notice,
                 );
@@ -98,10 +117,20 @@ pub(crate) fn install_events(
             while let Some(event) = channel.next().await {
                 let finished = match &event {
                     InstallEvent::Finished { id, outcome } => Some((id.clone(), outcome.clone())),
-                    InstallEvent::Progress { .. } => None,
+                    InstallEvent::Started { .. } | InstallEvent::Progress { .. } => None,
                 };
 
                 installs.write().apply(&event);
+                // Persist the crash-critical transitions, not every progress
+                // tick: `Started` records the running CLI's pid before a crash
+                // could orphan it, and `Finished` clears it. Progress is not
+                // worth a database write per percent.
+                if matches!(
+                    &event,
+                    InstallEvent::Started { .. } | InstallEvent::Finished { .. }
+                ) {
+                    persist_queue(db_state, installs);
+                }
 
                 if let Some((id, outcome)) = finished {
                     let job = installs.read().job_by_id(&id).cloned();
@@ -285,6 +314,7 @@ fn handle_downloads_action(
     focus: focus::ScreenFocus,
     mut installs: Signal<Installs>,
     install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
+    db_state: Signal<Option<pitagames_db::Db>>,
     mut session: Signal<crate::session::Session>,
     notice: Signal<String>,
 ) {
@@ -320,6 +350,7 @@ fn handle_downloads_action(
     };
     if clear_cell == 1 && index == 0 {
         installs.write().clear_finished();
+        persist_queue(db_state, installs);
         return;
     }
 
@@ -331,6 +362,7 @@ fn handle_downloads_action(
         };
         if let Some(row_index) = row_index {
             installs.write().cancel(row_index);
+            persist_queue(db_state, installs);
         }
         return;
     }
@@ -359,10 +391,12 @@ fn handle_downloads_action(
     };
     if retry {
         if installs.write().retry(row_index) {
+            persist_queue(db_state, installs);
             launch_start::pump_installs(installs, install_events, notice);
         }
     } else {
         installs.write().remove(row_index);
+        persist_queue(db_state, installs);
     }
 }
 
@@ -545,6 +579,7 @@ pub(crate) fn gamepad_actions(
 pub(crate) fn bootstrap(
     channel: store_installs::InstallChannel,
     play_channel: crate::play::PlayChannel,
+    mut installs: Signal<Installs>,
     mut proton_state: Signal<Option<pitagames_platform::proton::DiscoveryReport>>,
     mut db_state: Signal<Option<pitagames_db::Db>>,
     mut account_state: Signal<Option<crate::steam_account::Account>>,
@@ -600,6 +635,29 @@ pub(crate) fn bootstrap(
                     match persist::load_store_rows(&db).await {
                         Ok(rows) => library.apply_store_rows(&rows),
                         Err(error) => library.metadata_warnings.push(error),
+                    }
+                    // The install queue from a previous launcher run. A `running`
+                    // job's CLI is not a child of this process any more, so it
+                    // surfaces as a failure with Retry/Verify — and its recorded
+                    // pid is reaped (identity-checked) before anything else uses
+                    // the store session. A partial download is left exactly where
+                    // the store put it, for that row's Verify to reconcile.
+                    match persist::load_queue(&db).await {
+                        Ok(rows) => {
+                            let jobs: Vec<InstallJob> = rows
+                                .iter()
+                                .filter_map(store_installs::install_job)
+                                .collect();
+                            let mut restored = Installs::restore(jobs);
+                            let interrupted =
+                                restored.reconcile("an earlier launcher run was interrupted");
+                            store_installs::reap_orphans(&interrupted);
+                            // Persist the reconciled queue so a *second* restart
+                            // sees failures, never phantom running jobs.
+                            let _ = persist::save_queue(&db, &restored.stored()).await;
+                            installs.set(restored);
+                        }
+                        Err(error) => library.warnings.push(error),
                     }
                     metadata_db = Some(db.clone());
                     db_state.set(Some(db));

@@ -32,6 +32,11 @@ pub enum JobKind {
     Install,
     /// Install an existing game, then verify the files it just wrote.
     Update,
+    /// Re-check the files an interrupted install left behind, without
+    /// re-downloading: the store's own `verify` (legendary/nile) or `repair`
+    /// (gogdl). This is the "Verify" a reconciled row offers, and it is the
+    /// store's to run — the launcher never deletes a partial download itself.
+    Verify,
 }
 
 impl JobKind {
@@ -40,12 +45,34 @@ impl JobKind {
         match self {
             Self::Install => "install",
             Self::Update => "update",
+            Self::Verify => "verify",
         }
     }
 
-    /// Whether the run follows the install with a verify.
+    /// The token persisted with the queue; stable across releases.
+    pub const fn wire(self) -> &'static str {
+        self.label()
+    }
+
+    /// The kind a persisted token names, or `None` for an unknown token.
+    #[must_use]
+    pub fn from_wire(token: &str) -> Option<Self> {
+        match token {
+            "install" => Some(Self::Install),
+            "update" => Some(Self::Update),
+            "verify" => Some(Self::Verify),
+            _ => None,
+        }
+    }
+
+    /// Whether the run lays files down before (or instead of) verifying.
+    pub const fn installs(self) -> bool {
+        matches!(self, Self::Install | Self::Update)
+    }
+
+    /// Whether the run checks the files after (or instead of) the install.
     pub const fn verifies(self) -> bool {
-        matches!(self, Self::Update)
+        matches!(self, Self::Update | Self::Verify)
     }
 }
 
@@ -58,10 +85,16 @@ pub struct InstallJob {
     pub target: PathBuf,
     /// The size the store reports for the game, when it reports one.
     pub size: Option<u64>,
-    /// Whether this is a fresh install or an install-then-verify update.
+    /// Whether this is a fresh install, an install-then-verify update, or a
+    /// verify-only repair.
     pub kind: JobKind,
     pub state: JobState,
     pub progress: JobProgress,
+    /// The store CLI's process-group id while the job runs.
+    ///
+    /// Recorded so a launcher that crashes mid-install can reap the orphaned
+    /// CLI at its next boot; cleared when the job stops running.
+    pub pid: Option<u32>,
 }
 
 impl InstallJob {
@@ -75,6 +108,7 @@ impl InstallJob {
             kind: JobKind::Install,
             state: JobState::Queued,
             progress: JobProgress::default(),
+            pid: None,
         }
     }
 
@@ -82,6 +116,34 @@ impl InstallJob {
     #[must_use]
     pub fn with_size(mut self, size: u64) -> Self {
         self.size = Some(size);
+        self
+    }
+
+    /// The same, with the CLI's process-group id (a restored or running job).
+    #[must_use]
+    pub fn with_pid(mut self, pid: u32) -> Self {
+        self.pid = Some(pid);
+        self
+    }
+
+    /// The same, with an explicit kind (a restored job).
+    #[must_use]
+    pub fn with_kind(mut self, kind: JobKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    /// The same, with an explicit state (a restored job).
+    #[must_use]
+    pub fn with_state(mut self, state: JobState) -> Self {
+        self.state = state;
+        self
+    }
+
+    /// The same, with progress already reported (a restored job).
+    #[must_use]
+    pub fn with_progress(mut self, progress: JobProgress) -> Self {
+        self.progress = progress;
         self
     }
 
@@ -150,6 +212,36 @@ impl JobState {
             Self::Cancelled => "cancelled",
         }
     }
+
+    /// The token persisted with the queue: the state *kind*, without a failure
+    /// message (that travels in its own column).
+    pub const fn wire(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Failed { .. } => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// The state a persisted token names, with the stored failure message.
+    ///
+    /// An unknown token is `None`; a `failed` token without a message gets a
+    /// placeholder so the row still renders.
+    #[must_use]
+    pub fn from_wire(token: &str, message: Option<String>) -> Option<Self> {
+        match token {
+            "queued" => Some(Self::Queued),
+            "running" => Some(Self::Running),
+            "done" => Some(Self::Done),
+            "failed" => Some(Self::Failed {
+                message: message.unwrap_or_else(|| "the install failed".to_string()),
+            }),
+            "cancelled" => Some(Self::Cancelled),
+            _ => None,
+        }
+    }
 }
 
 /// The latest progress reported for a running job.
@@ -202,6 +294,17 @@ pub enum StartOutcome {
     },
 }
 
+/// An install the launcher stopped owning when it crashed or was closed.
+///
+/// Reported by [`InstallQueue::reconcile_running`] so the next boot can reap the
+/// store CLI the interrupted run left behind. `pid` is `None` when the run had
+/// not recorded one yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Interrupted {
+    pub id: GameId,
+    pub pid: Option<u32>,
+}
+
 /// The queued installs, in the order they were added.
 #[derive(Debug, Default, Clone)]
 pub struct InstallQueue {
@@ -212,6 +315,52 @@ impl InstallQueue {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Rebuild a queue from persisted jobs, keeping their order.
+    ///
+    /// No validation: the rows were written from a live queue, so the
+    /// no-duplicate-active-id invariant already held. Callers that want to be
+    /// sure run [`reconcile_running`](Self::reconcile_running) first.
+    #[must_use]
+    pub fn from_jobs(jobs: Vec<InstallJob>) -> Self {
+        Self { jobs }
+    }
+
+    /// A copy of every job, for persistence.
+    #[must_use]
+    pub fn snapshot(&self) -> Vec<InstallJob> {
+        self.jobs.clone()
+    }
+
+    /// Turn every `Running` job into `Failed { message }` and report what it
+    /// left behind.
+    ///
+    /// A `Running` job's process does not belong to this launcher any more (the
+    /// one that spawned it is gone), so it can never complete: it surfaces as a
+    /// failure with Retry and Verify offered. A `Queued` job never started, so
+    /// it stays queued — a restart must not lose it. A finished job is
+    /// untouched.
+    ///
+    /// Nothing here touches the filesystem. Whatever the interrupted store had
+    /// already written is left for the store's own repair (the Verify job), not
+    /// deleted: a partial download is the store's to reconcile.
+    pub fn reconcile_running(&mut self, message: &str) -> Vec<Interrupted> {
+        let mut interrupted = Vec::new();
+        for job in &mut self.jobs {
+            if job.state != JobState::Running {
+                continue;
+            }
+            job.state = JobState::Failed {
+                message: message.to_string(),
+            };
+            job.progress.clear();
+            interrupted.push(Interrupted {
+                id: job.id.clone(),
+                pid: job.pid.take(),
+            });
+        }
+        interrupted
     }
 
     /// Add a job, unless the same game is already queued or running.
@@ -304,7 +453,25 @@ impl InstallQueue {
 
         self.jobs[index].state = JobState::Running;
         self.jobs[index].progress.clear();
+        // A fresh run has no pid yet; the worker records its own once the CLI
+        // is up (`set_pid`).
+        self.jobs[index].pid = None;
         StartOutcome::Started { index }
+    }
+
+    /// Record the CLI's process-group id for a running job.
+    ///
+    /// Returns `false` for a job that is not running, so a late report from a
+    /// worker whose job already finished cannot attach a stale pid.
+    pub fn set_pid(&mut self, index: usize, pid: u32) -> bool {
+        let Some(job) = self.jobs.get_mut(index) else {
+            return false;
+        };
+        if job.state != JobState::Running {
+            return false;
+        }
+        job.pid = Some(pid);
+        true
     }
 
     /// Record the outcome of the running job at `index`.
@@ -319,6 +486,7 @@ impl InstallQueue {
             return false;
         }
         job.progress.clear();
+        job.pid = None;
         job.state = match result {
             Ok(()) => JobState::Done,
             Err(message) => JobState::Failed { message },
@@ -353,6 +521,8 @@ impl InstallQueue {
             return false;
         }
         job.progress.clear();
+        // The caller stops the backend it started; the pid is no longer ours.
+        job.pid = None;
         job.state = JobState::Cancelled;
         true
     }
@@ -367,6 +537,28 @@ impl InstallQueue {
         }
         job.state = JobState::Queued;
         job.progress.clear();
+        job.pid = None;
+        true
+    }
+
+    /// Turn a finished job into a **verify-only** repair and queue it.
+    ///
+    /// This is the "Verify" a reconciled row offers after a crash: the store's
+    /// own check over whatever the interrupted install left, without fetching
+    /// anything again. The target is kept, so the check runs against the
+    /// directory the user saw — and a partial download is never deleted, only
+    /// repaired by the store. Only a finished job can be re-queued.
+    pub fn verify(&mut self, index: usize) -> bool {
+        let Some(job) = self.jobs.get_mut(index) else {
+            return false;
+        };
+        if !job.state.is_finished() {
+            return false;
+        }
+        job.kind = JobKind::Verify;
+        job.state = JobState::Queued;
+        job.progress.clear();
+        job.pid = None;
         true
     }
 
@@ -653,6 +845,155 @@ mod tests {
         assert!(queue.remove(1), "a queued job can be dropped");
         assert_eq!(queue.len(), 1);
         assert!(!queue.remove(5));
+    }
+
+    // -- crash recovery: a restored queue -------------------------------------
+
+    #[test]
+    fn a_verify_job_checks_without_installing() {
+        let job = job("Gizmo", "Gizmo").with_kind(JobKind::Verify);
+        assert_eq!(job.kind.label(), "verify");
+        assert!(!job.kind.installs());
+        assert!(job.kind.verifies(), "a verify job still verifies");
+
+        // The other two keep their install/verify split.
+        assert!(JobKind::Install.installs() && !JobKind::Install.verifies());
+        assert!(JobKind::Update.installs() && JobKind::Update.verifies());
+    }
+
+    #[test]
+    fn the_kind_and_state_wire_tokens_round_trip() {
+        for kind in [JobKind::Install, JobKind::Update, JobKind::Verify] {
+            assert_eq!(JobKind::from_wire(kind.wire()), Some(kind));
+        }
+        assert_eq!(JobKind::from_wire("bogus"), None);
+
+        for state in [
+            JobState::Queued,
+            JobState::Running,
+            JobState::Done,
+            JobState::Cancelled,
+        ] {
+            assert_eq!(JobState::from_wire(state.wire(), None), Some(state));
+        }
+        assert_eq!(
+            JobState::from_wire("failed", Some("boom".into())),
+            Some(JobState::Failed {
+                message: "boom".into()
+            })
+        );
+        assert!(matches!(
+            JobState::from_wire("failed", None),
+            Some(JobState::Failed { .. })
+        ));
+        assert_eq!(JobState::from_wire("bogus", None), None);
+    }
+
+    #[test]
+    fn a_restored_queue_keeps_its_order_and_shape() {
+        let persisted = vec![
+            job("A", "A").with_state(JobState::Queued),
+            job("B", "B").with_state(JobState::Done),
+            job("C", "C").with_state(JobState::Queued),
+        ];
+        let queue = InstallQueue::from_jobs(persisted.clone());
+        assert_eq!(queue.snapshot(), persisted);
+        assert_eq!(queue.len(), 3);
+    }
+
+    #[test]
+    fn reconcile_turns_a_running_job_into_a_failed_one_and_reports_its_pid() {
+        let mut queue = InstallQueue::from_jobs(vec![
+            job("Gizmo", "Gizmo")
+                .with_state(JobState::Running)
+                .with_pid(4242),
+            job("Later", "Later").with_state(JobState::Queued),
+            job("Gone", "Gone").with_state(JobState::Done),
+        ]);
+
+        let interrupted = queue.reconcile_running("interrupted by a launcher restart");
+
+        assert_eq!(
+            interrupted,
+            vec![Interrupted {
+                id: GameId::new(Store::Epic, "Gizmo"),
+                pid: Some(4242),
+            }]
+        );
+        assert_eq!(
+            queue.jobs()[0].state,
+            JobState::Failed {
+                message: "interrupted by a launcher restart".into()
+            }
+        );
+        assert_eq!(queue.jobs()[0].pid, None, "the orphan pid is handed back");
+        // A queued job survives a restart; a finished one is untouched.
+        assert_eq!(queue.jobs()[1].state, JobState::Queued);
+        assert_eq!(queue.jobs()[2].state, JobState::Done);
+    }
+
+    #[test]
+    fn reconcile_reports_a_running_job_that_had_no_pid() {
+        let mut queue =
+            InstallQueue::from_jobs(vec![job("Gizmo", "Gizmo").with_state(JobState::Running)]);
+        let interrupted = queue.reconcile_running("interrupted");
+        assert_eq!(
+            interrupted,
+            vec![Interrupted {
+                id: GameId::new(Store::Epic, "Gizmo"),
+                pid: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn set_pid_attaches_only_to_a_running_job() {
+        let mut queue = InstallQueue::new();
+        queue.enqueue(job("A", "A")).unwrap();
+
+        assert!(!queue.set_pid(0, 11), "a queued job has no running CLI");
+        queue.start_next(free(GIB));
+        assert!(queue.set_pid(0, 11));
+        assert_eq!(queue.jobs()[0].pid, Some(11));
+
+        queue.finish(0, Ok(()));
+        assert!(!queue.set_pid(0, 22), "a finished job has no running CLI");
+    }
+
+    #[test]
+    fn starting_a_job_clears_a_stale_pid() {
+        let mut queue = InstallQueue::from_jobs(vec![
+            job("A", "A").with_state(JobState::Queued).with_pid(999),
+        ]);
+        queue.start_next(free(GIB));
+        assert_eq!(queue.jobs()[0].pid, None);
+    }
+
+    #[test]
+    fn verify_requeues_a_finished_job_as_a_verify_only_repair() {
+        let mut queue = InstallQueue::new();
+        queue.enqueue(job("Gizmo", "Gizmo")).unwrap();
+        queue.start_next(free(GIB));
+        queue.finish(0, Err("interrupted by a launcher restart".into()));
+
+        assert!(queue.verify(0));
+        let job = &queue.jobs()[0];
+        assert_eq!(job.kind, JobKind::Verify, "the re-queued job only verifies");
+        assert_eq!(job.state, JobState::Queued);
+        assert!(job.state.is_active());
+        assert_eq!(
+            job.target,
+            PathBuf::from("/games/epic/Gizmo"),
+            "a verify runs against the directory the user saw"
+        );
+        assert_eq!(job.pid, None, "no orphan pid is carried into the verify");
+
+        // Only a finished job can be re-queued as a verify.
+        queue.start_next(free(GIB));
+        assert!(
+            !queue.verify(0),
+            "a running job must finish before it can be verified"
+        );
     }
 
     #[test]
