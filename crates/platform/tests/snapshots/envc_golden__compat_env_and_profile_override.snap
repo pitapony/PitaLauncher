@@ -1,0 +1,11 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  DXVK_FRAME_RATE=60
+  DXVK_HDR=1
+  DXVK_HDR=0
+wrappers:
+ini:
+warnings:

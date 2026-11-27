@@ -1,0 +1,9 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  WINEDLLOVERRIDES=winmm=n,b
+wrappers:
+ini:
+warnings:

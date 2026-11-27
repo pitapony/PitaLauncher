@@ -1,0 +1,11 @@
+---
+source: crates/platform/tests/envc_golden.rs
+expression: render(&compiled)
+---
+env:
+  PROTON_USE_OPTISCALER=1
+  PROTON_XESS_UPGRADE=1
+  PROTON_OPTISCALER_CONFIG=Upscalers.Dx12Upscaler=xess
+wrappers:
+ini:
+warnings:
