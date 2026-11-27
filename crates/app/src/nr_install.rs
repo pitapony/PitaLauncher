@@ -13,10 +13,13 @@
 
 use std::sync::{Arc, Mutex};
 
+use std::path::PathBuf;
+
 use futures_channel::mpsc::UnboundedSender;
 use pitagames_core::paths;
 use pitagames_mods::CapturedEnv;
 use pitagames_platform::nr_install::InstallPlan;
+use pitagames_platform::nr_uninstall::RemovePlan;
 use pitagames_stores::cli::CliOptions;
 use pitagames_stores::mod_install::{InstallRun, InstallStep};
 
@@ -103,15 +106,50 @@ pub fn install_options(cwd: std::path::PathBuf) -> CliOptions {
 /// [`Started::inputs`], so a closed sheet stops the installer instead of leaving
 /// it waiting for an answer nobody can type.
 pub fn spawn(run: u64, plan: InstallPlan, events: UnboundedSender<TerminalEvent>) -> Started {
+    spawn_command(
+        run,
+        "pitagames-nr-install",
+        plan.program,
+        plan.args,
+        plan.cwd,
+        events,
+    )
+}
+
+/// Start upstream's `remove` route on the shared terminal, reporting to `events`.
+///
+/// The uninstall runs on the same PTY relay and sheet as the install: it can ask
+/// for an answer and it can be cancelled, exactly like `bash install.sh … remove`
+/// would in a shell.
+pub fn spawn_remove(run: u64, plan: RemovePlan, events: UnboundedSender<TerminalEvent>) -> Started {
+    spawn_command(
+        run,
+        "pitagames-nr-uninstall",
+        plan.program,
+        plan.args,
+        plan.cwd,
+        events,
+    )
+}
+
+/// The shared body of [`spawn`] and [`spawn_remove`].
+fn spawn_command(
+    run: u64,
+    thread: &str,
+    program: String,
+    args: Vec<String>,
+    cwd: PathBuf,
+    events: UnboundedSender<TerminalEvent>,
+) -> Started {
     let captured = Arc::new(Mutex::new(None));
     let driver_captured = Arc::clone(&captured);
     let inputs = terminal::spawn(
         run,
-        "pitagames-nr-install".to_string(),
+        thread.to_string(),
         move || {
-            let options = install_options(plan.cwd.clone());
-            let run = InstallRun::start(&plan.program, &plan.args, &options)
-                .map_err(|error| error.to_string())?;
+            let options = install_options(cwd);
+            let run =
+                InstallRun::start(&program, &args, &options).map_err(|error| error.to_string())?;
             let driver: Box<dyn TerminalDriver> = Box::new(InstallDriver {
                 run,
                 captured: driver_captured,
@@ -126,6 +164,11 @@ pub fn spawn(run: u64, plan: InstallPlan, events: UnboundedSender<TerminalEvent>
 /// The default label for an install's terminal sheet.
 pub fn title(game: &str) -> String {
     format!("DLSSNR install — {game}")
+}
+
+/// The default label for an uninstall's terminal sheet.
+pub fn uninstall_title(game: &str) -> String {
+    format!("DLSSNR uninstall — {game}")
 }
 
 #[cfg(test)]
@@ -200,6 +243,59 @@ mod tests {
             captured.env.get("WINEDLLOVERRIDES").map(String::as_str),
             Some("dxgi=n,b"),
             "the installer's %command% line fed mods::capture"
+        );
+    }
+
+    #[test]
+    fn an_upstream_remove_runs_on_the_shared_terminal() {
+        let dir = tempfile::tempdir().unwrap();
+        // A fake upstream `install.sh` whose `remove` route deletes the ledger
+        // `$1` is the game directory, as the real one's argv has it.
+        let package = dir.path().join("pkg");
+        fs::create_dir_all(&package).unwrap();
+        fs::write(
+            package.join("install.sh"),
+            "#!/bin/sh\nrm -f \"$1/dlssnr-amd-install.txt\"\necho \"Uninstalled from $1.\"\n",
+        )
+        .unwrap();
+        let game = dir.path().join("Game");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("dlssnr-amd-install.txt"), b"dxgi.dll\n").unwrap();
+
+        let plan = pitagames_platform::nr_uninstall::remove_plan(&package, &game).unwrap();
+        let (events, mut receiver) = futures_channel::mpsc::unbounded();
+        let run = terminal::next_run();
+        let _started = spawn_remove(run, plan, events);
+
+        let mut terminal = Terminal::new(run, "DLSSNR uninstall — Test");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "the remove never finished");
+            match receiver.try_recv() {
+                Ok(event) => {
+                    let finished = event.is_finished();
+                    terminal.apply(&event);
+                    if finished {
+                        break;
+                    }
+                }
+                Err(TryRecvError::Empty) => thread::sleep(Duration::from_millis(5)),
+                Err(TryRecvError::Closed) => panic!("closed before the verdict"),
+            }
+        }
+
+        assert_eq!(terminal.status(), &TerminalStatus::Succeeded);
+        assert!(
+            !game.join("dlssnr-amd-install.txt").exists(),
+            "upstream's own remove deleted by its ledger"
+        );
+        assert!(
+            terminal
+                .lines()
+                .iter()
+                .any(|line| line.contains("Uninstalled")),
+            "the installer's own line streamed through: {:?}",
+            terminal.lines()
         );
     }
 }
