@@ -84,6 +84,11 @@ unrecognised card (`GpuArch::Unknown`); everything else is hidden there.
 
 ## The gates, in order
 
+0. **Anti-cheat** (plan §6, `platform::anticheat`). A game known to use Easy
+   Anti-Cheat or BattlEye, or curated `eac_v2`, hides every injection field
+   (`ANTICHEAT_GATE`) until the profile records `injection_confirmed`. It runs
+   first so the safety-critical reason is never masked, and `envc` consumes the
+   same verdict to refuse injection env. `Unknown` never gates.
 1. **Architecture** (plan §6). The table above; `Native` and `System FSR` skip
    this gate because they depend on no detected architecture.
 2. **The single injection slot** (ADR-0023). While DLSSNR is enabled, every
@@ -151,6 +156,7 @@ asserts each appears verbatim in this table.
 | `NR_MESA_UNKNOWN` | DLSSNR needs Mesa 26.2 or newer, but the Mesa version could not be detected |
 | `NR_OWNS_SLOT` | DLSSNR owns the injection slot |
 | `UPSCALER_OWNS_SLOT` | an injected upscaler owns the injection slot |
+| `ANTICHEAT_GATE` | injection is off for an anti-cheat-protected game until you confirm the risk |
 | `NR_32BIT` | DLSSNR ships x86_64 only; 32-bit games are unsupported in v1 |
 
 ## CLI diagnostic

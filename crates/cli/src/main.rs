@@ -2888,6 +2888,7 @@ fn mods(args: &[String]) -> Result<()> {
         Some("capture") => mods_capture(&args[1..]),
         Some("tierb") => mods_tierb(&args[1..]),
         Some("explain") => mods_explain(&args[1..]),
+        Some("conflict") => mods_conflict(&args[1..]),
         _ => mods_manifest(args),
     }
 }
@@ -2999,6 +3000,62 @@ fn mods_manifest(args: &[String]) -> Result<()> {
             }
         }
     }
+}
+
+/// The pre-flight conflict scan for a game's injection files.
+///
+/// This is the diagnostic for `mods::conflict`: it resolves the game's
+/// executable directory (Unreal included), lists every known injection file it
+/// finds with its mechanism and its manifest owner, and reports whether more
+/// than one mechanism is present. Read-only; it writes nothing.
+fn mods_conflict(args: &[String]) -> Result<()> {
+    let mut dir: Option<PathBuf> = None;
+    let mut json = false;
+    let mut help = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json = true,
+            "-h" | "--help" => help = true,
+            other if !other.starts_with('-') => {
+                if dir.replace(PathBuf::from(other)).is_some() {
+                    bail!("`mods conflict` takes one directory\n\n{}", mods_usage());
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `mods conflict`\n\n{}",
+                mods_usage()
+            ),
+        }
+    }
+    if help {
+        println!("{}", mods_usage());
+        return Ok(());
+    }
+    let dir = dir.with_context(|| format!("expected a game directory\n\n{}", mods_usage()))?;
+
+    let scan = pitagames_mods::conflict::scan(&dir);
+    if json {
+        println!("{}", serde_json::to_string_pretty(&scan)?);
+        return Ok(());
+    }
+    if scan.is_empty() {
+        println!("No known injection files in {}", dir.display());
+    } else {
+        println!("Injection files in {}", dir.display());
+        if let Some(name) = &scan.installed_mod {
+            println!("  installed mod  {name}");
+        }
+        for line in scan.summary() {
+            println!("  {line}");
+        }
+        if scan.has_conflict() {
+            println!("  conflict       files from more than one mechanism are present");
+        }
+    }
+    if let Some(warning) = &scan.warning {
+        println!("  warning        {warning}");
+    }
+    Ok(())
 }
 
 /// What `mods` should do with a game directory.
@@ -3152,7 +3209,8 @@ fn mods_usage() -> String {
      pitagames-cli mods capture --run <program> [args...] [--json]\n    \
      pitagames-cli mods tierb <target> --fixture <dir> [--set Section.Key=Value]... [--json]\n    \
      pitagames-cli mods tierb <target> --uninstall [--json]\n    \
-     pitagames-cli mods explain <store> <id> [--dir <path>] [--json]\n\n\
+     pitagames-cli mods explain <store> <id> [--dir <path>] [--json]\n    \
+     pitagames-cli mods conflict <dir> [--json]\n\n\
      ARGS:\n    \
      <dir>                  A game directory a mod was installed into\n\n\
      OPTIONS:\n    \
@@ -3166,7 +3224,8 @@ fn mods_usage() -> String {
      The `release`, `ini` and `capture` subcommands are the shared mod primitives; see\n\
      `pitagames-cli mods release --help`, `mods ini --help` and `mods capture --help`.\n\
      `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`.\n\
-     `mods explain` shows a game's merged launch environment; see `mods explain --help`."
+     `mods explain` shows a game's merged launch environment; see `mods explain --help`.\n\
+     `mods conflict` lists existing injection files and their owners (the pre-flight scan)."
         .to_string()
 }
 
@@ -10545,6 +10604,32 @@ mod tests {
         assert!(mods(&[]).is_err());
         assert!(mods(&["/no/such/dir".to_string()]).is_err());
         mods(&["--help".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn mods_conflict_lists_files_and_owners() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("game");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("dxgi.dll"), b"optiscaler").unwrap();
+        fs::write(root.join("ReShade.ini"), b"reshade").unwrap();
+        let staging = temp.path().join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("OptiScaler.dll"), b"the dll").unwrap();
+        ModManifest::install(
+            &root,
+            "optiscaler",
+            &[ModSource::new("dxgi.dll", staging.join("OptiScaler.dll"))],
+        )
+        .unwrap();
+        let dir = root.display().to_string();
+
+        // Text and JSON both succeed; the scan names the owner and the clash.
+        mods(&["conflict".to_string(), dir.clone()]).unwrap();
+        mods(&["conflict".to_string(), dir.clone(), "--json".to_string()]).unwrap();
+        mods(&["conflict".to_string(), "--help".to_string()]).unwrap();
+        // A missing directory is refused.
+        assert!(mods(&["conflict".to_string()]).is_err());
     }
 
     #[test]

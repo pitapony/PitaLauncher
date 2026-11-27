@@ -312,6 +312,24 @@ pub fn effective(curated: AntiCheat, scan: &AnticheatScan) -> EffectiveAnticheat
     }
 }
 
+/// The anti-cheat value the gate acts on, merging a curated EAC Linux v2 claim.
+///
+/// A game the compat DB marks `eac_v2` is Easy Anti-Cheat even when its
+/// `anticheat` field is unset (Epic's runtime is EAC — the v2 claim only says it
+/// now runs on the CachyOS EAC entry), so a caller passes both and gets a kind
+/// [`AntiCheat::is_protected`] can answer. `Unknown`/`None` stay themselves, so
+/// `Unknown` still never hard-gates.
+#[must_use]
+pub const fn protected_kind(anticheat: AntiCheat, eac_v2: bool) -> AntiCheat {
+    if anticheat.is_protected() {
+        anticheat
+    } else if eac_v2 {
+        AntiCheat::Eac
+    } else {
+        anticheat
+    }
+}
+
 /// What the injection gate decided for one profile and game.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -572,5 +590,23 @@ mod tests {
             assert_eq!(decision, GateDecision::Allowed, "{anticheat:?}");
             assert!(decision.allows());
         }
+    }
+
+    #[test]
+    fn an_eac_v2_claim_reads_as_eac_even_without_the_runtime_field() {
+        // Epic's EAC Linux v2 is EAC; the curated claim alone protects the game.
+        assert_eq!(protected_kind(AntiCheat::None, true), AntiCheat::Eac);
+        assert_eq!(protected_kind(AntiCheat::Unknown, true), AntiCheat::Eac);
+        // A concrete runtime name wins.
+        assert_eq!(
+            protected_kind(AntiCheat::BattlEye, true),
+            AntiCheat::BattlEye
+        );
+        // No claim and no runtime: unchanged, so `Unknown` still never gates.
+        assert_eq!(
+            protected_kind(AntiCheat::Unknown, false),
+            AntiCheat::Unknown
+        );
+        assert_eq!(protected_kind(AntiCheat::None, false), AntiCheat::None);
     }
 }

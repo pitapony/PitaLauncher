@@ -31,6 +31,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use pitagames_core::AntiCheat;
 use pitagames_core::profile::{FrameGen, Injection, NeuralRendering, PkgArch, Profile, Upscaler};
 
 use crate::compat::{CompatEntry, GameApi, HelixsrMode, Version};
@@ -109,6 +110,10 @@ pub mod reason {
     pub const NR_OWNS_SLOT: &str = "DLSSNR owns the injection slot";
     pub const UPSCALER_OWNS_SLOT: &str = "an injected upscaler owns the injection slot";
 
+    // The hard anti-cheat gate (plan §6, `platform::anticheat`).
+    pub const ANTICHEAT_GATE: &str =
+        "injection is off for an anti-cheat-protected game until you confirm the risk";
+
     // 64-bit (the game's own bitness is the neural-rendering backend's check).
     pub const NR_32BIT: &str = "DLSSNR ships x86_64 only; 32-bit games are unsupported in v1";
 }
@@ -145,6 +150,7 @@ pub const REASONS: &[&str] = &[
     reason::NR_MESA_UNKNOWN,
     reason::NR_OWNS_SLOT,
     reason::UPSCALER_OWNS_SLOT,
+    reason::ANTICHEAT_GATE,
     reason::NR_32BIT,
 ];
 
@@ -325,6 +331,15 @@ impl Field {
             && !matches!(self, Self::NeuralRendering)
     }
 
+    /// Whether this field puts code or a DLL into the game's process.
+    ///
+    /// It is the set the hard anti-cheat gate hides: everything except the
+    /// game's own upscaler/API and gamescope's compositor FSR. Unlike
+    /// [`Field::uses_slot`] it includes neural rendering, which injects too.
+    pub const fn is_injection(self) -> bool {
+        !matches!(self, Self::Native | Self::SystemFsr | Self::DlssNative)
+    }
+
     /// Whether the game has to expose the API this field hooks into.
     const fn needs_game_api(self) -> bool {
         matches!(
@@ -384,6 +399,71 @@ impl Availability {
 }
 
 // ---------------------------------------------------------------------------
+// The hard anti-cheat gate
+// ---------------------------------------------------------------------------
+
+/// The anti-cheat state the injection gate acts on, and whether the user has
+/// recorded a confirmation for it.
+///
+/// This is the compiler-level half of `platform::anticheat`'s advisory gate: a
+/// protected game hides every injection field ([`Availability::Hidden`] with
+/// [`reason::ANTICHEAT_GATE`]) until [`Self::confirmed`] is set, so `envc`
+/// refuses to emit injection env for a protected game the same way the graphics
+/// screen hides it. `Unknown` never exits [`Self::protected`], so a game whose
+/// anti-cheat we simply have not catalogued is never hard-gated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InjectionGate {
+    /// The effective anti-cheat: detection merged with the compat DB (the app
+    /// writes the merged value onto the entry it passes in), or the curated
+    /// value when only curation is available.
+    pub anticheat: AntiCheat,
+    /// Whether the game is curated as EAC Linux v2, which is Easy Anti-Cheat
+    /// even when the runtime field is unset.
+    pub eac_v2: bool,
+    /// Whether the profile records the user's explicit confirmation.
+    pub confirmed: bool,
+}
+
+impl InjectionGate {
+    /// The gate for an effective anti-cheat value and a recorded confirmation.
+    pub const fn new(anticheat: AntiCheat, eac_v2: bool, confirmed: bool) -> Self {
+        Self {
+            anticheat,
+            eac_v2,
+            confirmed,
+        }
+    }
+
+    /// The gate a compat entry and a recorded confirmation imply.
+    ///
+    /// The entry is the one the caller passes to [`availability`]; a caller that
+    /// has a detected anti-cheat value writes it onto the entry first, so this
+    /// is the effective state, not only the curated one.
+    pub fn from_compat(compat: Option<&CompatEntry>, confirmed: bool) -> Self {
+        Self {
+            anticheat: compat.map(|entry| entry.anticheat).unwrap_or_default(),
+            eac_v2: compat.is_some_and(|entry| entry.eac_v2),
+            confirmed,
+        }
+    }
+
+    /// The anti-cheat value the gate acts on (an `eac_v2` claim reads as EAC).
+    pub fn effective(&self) -> AntiCheat {
+        crate::anticheat::protected_kind(self.anticheat, self.eac_v2)
+    }
+
+    /// Whether the game is protected by a concrete anti-cheat runtime.
+    pub fn protected(&self) -> bool {
+        self.effective().is_protected()
+    }
+
+    /// Whether the gate refuses injection: protected *and* unconfirmed.
+    pub fn refuses(&self) -> bool {
+        self.protected() && !self.confirmed
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The verdict function
 // ---------------------------------------------------------------------------
 
@@ -403,6 +483,17 @@ pub fn availability(
     compat: Option<&CompatEntry>,
     proton: Option<&ProtonInstall>,
 ) -> Availability {
+    // 0. The hard anti-cheat gate. A protected game hides every injection field
+    //    until the profile records a confirmation; `Unknown` never gates. It
+    //    runs first so the reader always sees the safety-critical reason, and
+    //    `envc` consumes the same verdict to refuse injection env.
+    if field.is_injection() {
+        let gate = InjectionGate::from_compat(compat, profile.injection_confirmed);
+        if gate.refuses() {
+            return Availability::hidden(reason::ANTICHEAT_GATE);
+        }
+    }
+
     // 1. The card itself.
     let arch = arch_basis(field, gpu.arch);
     if !arch.is_available() {
@@ -1230,6 +1321,129 @@ title = "Portal 2"
             .reason(),
             Some(reason::NR_32BIT)
         );
+    }
+
+    // -- The hard anti-cheat gate -------------------------------------------
+
+    /// The curated entry with its `anticheat` field replaced, as the app's
+    /// effective entry would read.
+    fn entry_with_anticheat(value: &str) -> CompatEntry {
+        CompatEntry::from_toml(
+            &CYBERPUNK.replace("anticheat = \"none\"", &format!("anticheat = \"{value}\"")),
+        )
+        .unwrap()
+    }
+
+    /// A curated entry claiming EAC.
+    fn protected_entry() -> CompatEntry {
+        entry_with_anticheat("eac")
+    }
+
+    #[test]
+    fn a_protected_game_hides_every_injection_field_until_confirmed() {
+        let entry = protected_entry();
+        let gpu = gpu(GpuArch::Rdna4);
+        let proton = cachyos("11.0-20260516");
+        let unconfirmed = profile();
+
+        // Every injection field is hidden with the gate reason…
+        for field in Field::ALL.iter().copied().filter(|f| f.is_injection()) {
+            let verdict = availability(field, &unconfirmed, &gpu, Some(&entry), Some(&proton));
+            assert_eq!(
+                verdict.reason(),
+                Some(reason::ANTICHEAT_GATE),
+                "{field:?} must be gated"
+            );
+        }
+        // …while the fields that inject nothing are not gated (they may still
+        // be hidden for another reason, e.g. `DlssNative` on an AMD card).
+        for field in [Field::Native, Field::SystemFsr, Field::DlssNative] {
+            assert_ne!(
+                availability(field, &unconfirmed, &gpu, Some(&entry), Some(&proton)).reason(),
+                Some(reason::ANTICHEAT_GATE),
+                "{field:?} injects nothing and must not be gated"
+            );
+        }
+
+        // A recorded confirmation unlocks injection again.
+        let mut confirmed = profile();
+        confirmed.injection_confirmed = true;
+        assert!(
+            availability(
+                Field::TierBInjection,
+                &confirmed,
+                &gpu,
+                Some(&entry),
+                Some(&proton),
+            )
+            .is_available()
+        );
+    }
+
+    #[test]
+    fn an_eac_v2_claim_is_protected_even_without_the_anticheat_field() {
+        // The curated `anticheat` field is left at its default (`none`); the
+        // `eac_v2` claim alone protects the game.
+        let entry = CompatEntry::from_toml(&CYBERPUNK.replace(
+            "anticheat = \"none\"",
+            "anticheat = \"none\"\neac_v2 = true",
+        ))
+        .unwrap();
+        assert_eq!(entry.anticheat, AntiCheat::None);
+        let verdict = availability(
+            Field::TierBInjection,
+            &profile(),
+            &gpu(GpuArch::Rdna4),
+            Some(&entry),
+            Some(&cachyos("11.0-20260516")),
+        );
+        assert_eq!(verdict.reason(), Some(reason::ANTICHEAT_GATE));
+    }
+
+    #[test]
+    fn unknown_anti_cheat_never_hard_gates_injection() {
+        for value in ["unknown", "none"] {
+            let entry = entry_with_anticheat(value);
+            assert!(
+                availability(
+                    Field::TierBInjection,
+                    &profile(),
+                    &gpu(GpuArch::Rdna4),
+                    Some(&entry),
+                    Some(&cachyos("11.0-20260516")),
+                )
+                .is_available(),
+                "{value} must not gate"
+            );
+        }
+        // No compat entry at all is the uncurated case: not protected.
+        assert!(
+            availability(
+                Field::TierBInjection,
+                &profile(),
+                &gpu(GpuArch::Rdna4),
+                None,
+                Some(&cachyos("11.0-20260516")),
+            )
+            .is_available()
+        );
+    }
+
+    #[test]
+    fn the_gate_reads_the_effective_anticheat_the_entry_carries() {
+        // The app writes a detected marker onto the entry it passes, so a game
+        // curated `none` but detected EAC is still gated.
+        let mut entry = CompatEntry::from_toml(CYBERPUNK).unwrap();
+        entry.anticheat = AntiCheat::BattlEye;
+        let gate = InjectionGate::from_compat(Some(&entry), false);
+        assert!(gate.protected() && gate.refuses());
+        assert_eq!(gate.effective(), AntiCheat::BattlEye);
+        // A recorded confirmation clears it.
+        assert!(!InjectionGate::from_compat(Some(&entry), true).refuses());
+        // And EAC Linux v2 is EAC for the gate's purposes.
+        let eac_v2 = InjectionGate::new(AntiCheat::None, true, false);
+        assert_eq!(eac_v2.effective(), AntiCheat::Eac);
+        assert!(eac_v2.refuses());
     }
 
     fn pkg_arch_x86_64() -> PkgArch {

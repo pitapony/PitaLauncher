@@ -38,6 +38,17 @@ pub struct Profile {
     pub injection_dll: InjectionDll,
     #[serde(default)]
     pub neural_rendering: NeuralRendering,
+    /// Whether the user has explicitly acknowledged injecting into a game the
+    /// launcher knows uses Easy Anti-Cheat or BattlEye (or is curated as EAC
+    /// Linux v2).
+    ///
+    /// This is the **recorded confirmation** the compiler checks: an
+    /// anti-cheat-protected game hides injection and `platform::envc` refuses to
+    /// emit injection env until this is `true`, and `Unknown` never hard-gates.
+    /// Because it lives on the profile it is recorded, persisted and reversible
+    /// (the editor's undo and reset both clear it).
+    #[serde(default)]
+    pub injection_confirmed: bool,
     /// Line-preserving ini overrides, e.g. `Upscalers.Dx12Upscaler -> fsr4`.
     #[serde(default)]
     pub ini_overrides: BTreeMap<String, String>,
@@ -61,6 +72,7 @@ impl Profile {
             injection: Injection::default(),
             injection_dll: InjectionDll::default(),
             neural_rendering: NeuralRendering::default(),
+            injection_confirmed: false,
             ini_overrides: BTreeMap::new(),
             env: BTreeMap::new(),
             diagnostics: Diagnostics::default(),
@@ -82,6 +94,63 @@ impl Profile {
                 self.injection,
                 Injection::EnvOnly | Injection::Manual | Injection::HelixSr | Injection::DlssNr
             )
+    }
+
+    /// Every injection mechanism this profile asks for, in a stable order:
+    /// Tier A, Tier B, HelixSR, DLSSNR.
+    ///
+    /// The profile carries the slot owner across several fields (the `injection`
+    /// choice, the upscaler, frame generation and neural rendering), so this is
+    /// the one place that folds them into the slot vocabulary. The compiler
+    /// ([`crate::profile`]'s consumer in `platform::envc`) refuses a profile with
+    /// more than one, and the graphics screen shows the same answer, so the two
+    /// cannot disagree about who owns the single injection slot (ADR-0023).
+    pub fn slot_owners(&self) -> Vec<SlotOwner> {
+        let mut owners = Vec::new();
+
+        let tier_a = self.injection == Injection::EnvOnly
+            || matches!(
+                self.upscaler,
+                Upscaler::Fsr4Upgrade { .. }
+                    | Upscaler::Fsr4Rdna3 { .. }
+                    | Upscaler::XessUpgrade
+                    | Upscaler::Ffx3Upgrade
+                    | Upscaler::Ffx4Upgrade
+                    | Upscaler::DlssToFsr4
+                    | Upscaler::DlssToFsr31
+                    | Upscaler::DlssToXess
+            )
+            || self.frame_gen != FrameGen::Off;
+        if tier_a {
+            owners.push(SlotOwner::TierA);
+        }
+        if self.injection == Injection::Manual {
+            owners.push(SlotOwner::TierB);
+        }
+        if matches!(
+            self.upscaler,
+            Upscaler::HlxDlss | Upscaler::HlxFsr4 | Upscaler::HlxFsr4DropIn
+        ) || self.injection == Injection::HelixSr
+        {
+            owners.push(SlotOwner::HelixSr);
+        }
+        if self.neural_rendering.is_enabled() || self.injection == Injection::DlssNr {
+            owners.push(SlotOwner::DlssNr);
+        }
+
+        owners
+    }
+
+    /// The single mechanism that owns the injection slot, or [`SlotOwner::None`].
+    ///
+    /// When a profile is contradictory ([`Self::validate`] refuses it) this
+    /// returns the first mechanism in [`Self::slot_owners`] order; the conflict
+    /// itself is the compiler's concern, not this display helper's.
+    pub fn slot_owner(&self) -> SlotOwner {
+        self.slot_owners()
+            .first()
+            .copied()
+            .unwrap_or(SlotOwner::None)
     }
 
     /// Reject combinations that would make the env compiler emit contradictory
@@ -328,6 +397,60 @@ impl Injection {
             Self::DlssNr => "DLSSNR injection",
             Self::Off => "no injection",
         }
+    }
+}
+
+/// Who owns the single injection slot (ADR-0023).
+///
+/// The four mechanisms that can inject — Proton's own env hooks (Tier A),
+/// managed OptiScaler (Tier B), HelixSR and DLSSNR — are mutually exclusive.
+/// This is the vocabulary the graphics screen and the compiler share; it is
+/// derived from a profile by [`Profile::slot_owners`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SlotOwner {
+    /// No injection at all.
+    #[default]
+    None,
+    /// Proton's own env hooks: the FSR/FFX/XeSS upgrades, OptiScaler and MLFG.
+    TierA,
+    /// The launcher's managed OptiScaler files.
+    TierB,
+    /// HelixSR, which ships its own OptiScaler.
+    HelixSr,
+    /// DLSSNR-AMD, which ships its own OptiScaler on the `optiscaler` route.
+    DlssNr,
+}
+
+impl SlotOwner {
+    /// The short label the graphics screen shows.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::TierA => "Tier A (Proton env)",
+            Self::TierB => "Tier B (managed OptiScaler)",
+            Self::HelixSr => "HelixSR",
+            Self::DlssNr => "DLSSNR",
+        }
+    }
+
+    /// The label the compiler's slot-conflict error names, keeping the wording
+    /// `envc` already used for its `SlotConflict`.
+    pub const fn conflict_label(self) -> &'static str {
+        match self {
+            Self::None => "no injection",
+            Self::TierA => "Tier A (Proton env injection)",
+            Self::TierB => "Tier B (managed OptiScaler injection)",
+            Self::HelixSr => "HelixSR",
+            Self::DlssNr => "neural rendering",
+        }
+    }
+
+    /// Whether this owner writes files into the game directory (so switching
+    /// away leaves something to uninstall). Tier A is env-only, nothing to
+    /// remove.
+    pub const fn installs_files(self) -> bool {
+        matches!(self, Self::TierB | Self::HelixSr | Self::DlssNr)
     }
 }
 
@@ -824,6 +947,90 @@ mod tests {
         let mut nr_profile = Profile::new(game(), "NR");
         nr_profile.neural_rendering = nr(100);
         assert!(nr_profile.requests_injection());
+    }
+
+    #[test]
+    fn the_slot_owner_folds_the_profile_into_one_vocabulary() {
+        // The defaults own nothing.
+        assert_eq!(
+            Profile::new(game(), "Default").slot_owner(),
+            SlotOwner::None
+        );
+
+        // The `injection` choice.
+        let mut envonly = Profile::new(game(), "A");
+        envonly.injection = Injection::EnvOnly;
+        assert_eq!(envonly.slot_owner(), SlotOwner::TierA);
+
+        let mut manual = Profile::new(game(), "B");
+        manual.injection = Injection::Manual;
+        assert_eq!(manual.slot_owner(), SlotOwner::TierB);
+
+        let mut helix = Profile::new(game(), "C");
+        helix.injection = Injection::HelixSr;
+        assert_eq!(helix.slot_owner(), SlotOwner::HelixSr);
+
+        let mut dlss = Profile::new(game(), "D");
+        dlss.neural_rendering = nr(100);
+        assert_eq!(dlss.slot_owner(), SlotOwner::DlssNr);
+
+        // The upscaler and frame-gen fields own the slot too.
+        let mut upscaler = Profile::new(game(), "E");
+        upscaler.upscaler = Upscaler::DlssToFsr4;
+        assert_eq!(upscaler.slot_owner(), SlotOwner::TierA);
+
+        let mut helix_upscaler = Profile::new(game(), "F");
+        helix_upscaler.upscaler = Upscaler::HlxFsr4;
+        assert_eq!(helix_upscaler.slot_owner(), SlotOwner::HelixSr);
+
+        let mut frame_gen = Profile::new(game(), "G");
+        frame_gen.frame_gen = FrameGen::Fsr3;
+        assert_eq!(frame_gen.slot_owner(), SlotOwner::TierA);
+
+        // Non-injecting choices own nothing.
+        let mut system = Profile::new(game(), "H");
+        system.upscaler = Upscaler::SystemFsr;
+        assert_eq!(system.slot_owner(), SlotOwner::None);
+    }
+
+    #[test]
+    fn the_slot_owners_list_every_contender_in_a_stable_order() {
+        // Neural rendering plus frame generation: two mechanisms, in the
+        // Tier A → DLSSNR order the compiler's conflict names.
+        let mut profile = Profile::new(game(), "Conflicted");
+        profile.neural_rendering = nr(100);
+        profile.frame_gen = FrameGen::Fsr3;
+        assert_eq!(
+            profile.slot_owners(),
+            vec![SlotOwner::TierA, SlotOwner::DlssNr]
+        );
+        assert_eq!(profile.slot_owner(), SlotOwner::TierA);
+
+        // Only the file-writing mechanisms install anything to uninstall.
+        assert!(!SlotOwner::None.installs_files());
+        assert!(!SlotOwner::TierA.installs_files());
+        assert!(SlotOwner::TierB.installs_files());
+        assert!(SlotOwner::HelixSr.installs_files());
+        assert!(SlotOwner::DlssNr.installs_files());
+    }
+
+    #[test]
+    fn the_anti_cheat_confirmation_defaults_off_and_round_trips() {
+        let profile = Profile::new(game(), "Default");
+        assert!(!profile.injection_confirmed);
+
+        let mut confirmed = Profile::new(game(), "Confirmed");
+        confirmed.injection_confirmed = true;
+        let json = serde_json::to_string(&confirmed).unwrap();
+        assert!(json.contains(r#""injection_confirmed":true"#), "{json}");
+        let parsed: Profile = serde_json::from_str(&json).unwrap();
+        assert!(parsed.injection_confirmed);
+
+        // A profile written by an older build (no field) defaults to off.
+        let mut value = serde_json::to_value(Profile::new(game(), "x")).unwrap();
+        value.as_object_mut().unwrap().remove("injection_confirmed");
+        let parsed: Profile = serde_json::from_value(value).unwrap();
+        assert!(!parsed.injection_confirmed);
     }
 
     #[test]

@@ -26,7 +26,9 @@
 use std::path::Path;
 
 use pitagames_core::AntiCheat;
-use pitagames_core::profile::{FrameGen, Injection, NeuralRendering, Profile, ProtonRef, Upscaler};
+use pitagames_core::profile::{
+    FrameGen, Injection, NeuralRendering, Profile, ProtonRef, SlotOwner, Upscaler,
+};
 use pitagames_platform::anticheat::{self, GateDecision};
 use pitagames_platform::capability::{self, Availability, Field};
 use pitagames_platform::compat::CompatEntry;
@@ -433,6 +435,17 @@ impl GraphicsEditor {
         self.commit_edit(next);
     }
 
+    /// Record (or clear) the anti-cheat confirmation as an undoable edit.
+    ///
+    /// The confirmation is the profile's own [`Profile::injection_confirmed`],
+    /// so recording it here is what the compiler reads, and undo/reset reverse
+    /// it like any other edit.
+    pub fn set_injection_confirmed(&mut self, confirmed: bool) {
+        let mut next = self.draft.clone();
+        next.injection_confirmed = confirmed;
+        self.commit_edit(next);
+    }
+
     /// Reset the graphics fields to the safe defaults, keeping the profile's
     /// identity (game, name), its Proton choice and its wrapper chain.
     pub fn reset_to_safe_defaults(&mut self) {
@@ -543,12 +556,104 @@ pub fn controls(rows: usize, can_undo: bool, dirty: bool, has_manifest: bool) ->
 /// The anti-cheat injection gate for a draft profile.
 ///
 /// The screen consults this before Apply: a draft that requests injection on a
-/// game known to use Easy Anti-Cheat or BattlEye needs an explicit
-/// acknowledgement first, and `Unknown` never hard-gates (the plan's rule). The
-/// decision and its message come straight from `platform::anticheat`, so the
-/// warning the screen shows is the gate's own words.
-pub fn injection_gate(profile: &Profile, anticheat: AntiCheat, acknowledged: bool) -> GateDecision {
-    anticheat::gate(anticheat, profile.requests_injection(), acknowledged)
+/// game known to use Easy Anti-Cheat or BattlEye, or curated as EAC Linux v2,
+/// needs an explicit acknowledgement first, and `Unknown` never hard-gates (the
+/// plan's rule). The acknowledgement is the profile's own recorded
+/// [`Profile::injection_confirmed`] — the same field the compiler checks — so
+/// the screen and `platform::envc` cannot disagree. The decision and its message
+/// come straight from `platform::anticheat`, so the warning is the gate's words.
+pub fn injection_gate(profile: &Profile, anticheat: AntiCheat, eac_v2: bool) -> GateDecision {
+    anticheat::gate(
+        anticheat::protected_kind(anticheat, eac_v2),
+        profile.requests_injection(),
+        profile.injection_confirmed,
+    )
+}
+
+/// The warning to show for a protected game, whether or not injection is
+/// currently selected.
+///
+/// Because a protected game *hides* every injection row until the confirmation
+/// is recorded, the screen must offer the confirmation even when the draft
+/// requests no injection yet — otherwise the rows could never be unlocked. This
+/// asks the gate with `requested = true`, so it returns the same wording
+/// [`injection_gate`] would once injection is selected, and `None` when the game
+/// is unprotected or already confirmed.
+pub fn anticheat_warning(anticheat: AntiCheat, eac_v2: bool, confirmed: bool) -> Option<String> {
+    anticheat::gate(
+        anticheat::protected_kind(anticheat, eac_v2),
+        true,
+        confirmed,
+    )
+    .message()
+}
+
+/// A switch of the single injection slot, for the screen's "uninstall the
+/// previous one?" offer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotSwitch {
+    /// The mechanism that owned the slot before the edit.
+    pub from: SlotOwner,
+    /// The mechanism that owns it now.
+    pub to: SlotOwner,
+    /// The mod manifest's name when the previous owner installed files the
+    /// launcher can uninstall; `None` when there is nothing to remove (Tier A
+    /// is env-only, or no manifest is present).
+    pub uninstall: Option<String>,
+}
+
+impl SlotSwitch {
+    /// The one-line offer the screen shows, or `None` when nothing is left to
+    /// uninstall.
+    pub fn offer(&self) -> Option<String> {
+        self.uninstall.as_ref().map(|name| {
+            format!(
+                "Switched the injection slot from {} to {}. `{}` is still installed in the game \
+                 folder; uninstall it to avoid two copies.",
+                self.from.label(),
+                self.to.label(),
+                name
+            )
+        })
+    }
+}
+
+/// Whether editing `previous` to `next` switches the single injection slot, and
+/// whether the previous owner left files to uninstall.
+///
+/// `installed_mod` is the mod manifest's name for the game directory, when one
+/// is installed (the graphics screen reads it from
+/// [`pitagames_mods::ModManifest`]). A switch *away* from a file-writing owner
+/// with a manifest yields [`SlotSwitch::uninstall`]; a Tier A or `None` previous
+/// owner has nothing on disk.
+pub fn slot_switch(
+    previous: &Profile,
+    next: &Profile,
+    installed_mod: Option<&str>,
+) -> Option<SlotSwitch> {
+    let from = previous.slot_owner();
+    let to = next.slot_owner();
+    if from == to || from == SlotOwner::None {
+        return None;
+    }
+    let uninstall = installed_mod
+        .filter(|_| from.installs_files())
+        .map(str::to_string);
+    Some(SlotSwitch {
+        from,
+        to,
+        uninstall,
+    })
+}
+
+/// The pre-flight conflict scan for a game's injection files.
+///
+/// Delegates to [`pitagames_mods::conflict::scan`], which resolves the game's
+/// executable directory (Unreal included) and names each known injection file
+/// and its manifest owner. Read-only; the screen shows the result before a
+/// slot switch or an install.
+pub fn conflicts(target: &Path) -> pitagames_mods::ConflictScan {
+    pitagames_mods::conflict::scan(target)
 }
 
 /// The durable revert of a Tier B injection: the mod manifest a game directory
@@ -885,6 +990,26 @@ requires_64bit = true
     }
 
     #[test]
+    fn the_confirmation_is_recorded_undoable_and_cleared_by_reset() {
+        let mut injected = profile();
+        injected.upscaler = Upscaler::DlssToFsr4;
+        let mut editor = GraphicsEditor::new(injected);
+
+        editor.set_injection_confirmed(true);
+        assert!(editor.draft().injection_confirmed);
+        assert!(editor.can_undo());
+
+        editor.undo();
+        assert!(!editor.draft().injection_confirmed);
+
+        // A reset returns the whole profile to the safe defaults, which are
+        // unconfirmed.
+        editor.set_injection_confirmed(true);
+        editor.reset_to_safe_defaults();
+        assert!(!editor.draft().injection_confirmed);
+    }
+
+    #[test]
     fn a_press_that_changes_nothing_is_not_recorded() {
         let mut editor = GraphicsEditor::new(profile());
         // `Off` is already the frame-gen default: pressing it is a no-op.
@@ -1061,9 +1186,107 @@ requires_64bit = true
                 anticheat: AntiCheat::Eac
             }
         );
-        assert!(injection_gate(&injected, AntiCheat::Eac, true).allows());
+        // The recorded confirmation is the profile's own field.
+        let mut confirmed = injected.clone();
+        confirmed.injection_confirmed = true;
+        assert!(injection_gate(&confirmed, AntiCheat::Eac, false).allows());
         // `Unknown` never hard-gates.
         assert!(injection_gate(&injected, AntiCheat::Unknown, false).allows());
+        // An EAC Linux v2 game is protected even with no runtime name.
+        assert_eq!(
+            injection_gate(&injected, AntiCheat::None, true),
+            GateDecision::ConfirmationRequired {
+                anticheat: AntiCheat::Eac
+            }
+        );
+    }
+
+    #[test]
+    fn the_anti_cheat_warning_shows_before_injection_is_selected() {
+        // The rows are hidden until confirmed, so the confirmation has to be
+        // offered while the draft still requests nothing.
+        assert!(anticheat_warning(AntiCheat::Eac, false, false).is_some());
+        assert!(anticheat_warning(AntiCheat::BattlEye, false, false).is_some());
+        assert!(anticheat_warning(AntiCheat::None, true, false).is_some());
+        // Confirmed or unprotected: nothing to warn about.
+        assert!(anticheat_warning(AntiCheat::Eac, false, true).is_none());
+        assert!(anticheat_warning(AntiCheat::Unknown, false, false).is_none());
+    }
+
+    // -- The slot switch and the pre-flight scan ---------------------------
+
+    #[test]
+    fn switching_the_slot_offers_to_uninstall_the_previous_owner() {
+        // Tier B → HelixSR with an OptiScaler manifest installed.
+        let mut previous = profile();
+        previous.injection = Injection::Manual;
+        let mut next = profile();
+        next.injection = Injection::HelixSr;
+
+        let switch = slot_switch(&previous, &next, Some("optiscaler")).expect("a switch");
+        assert_eq!(switch.from, SlotOwner::TierB);
+        assert_eq!(switch.to, SlotOwner::HelixSr);
+        assert_eq!(switch.uninstall.as_deref(), Some("optiscaler"));
+        let offer = switch.offer().expect("an offer");
+        assert!(offer.contains("Tier B"), "{offer}");
+        assert!(offer.contains("HelixSR"), "{offer}");
+        assert!(offer.contains("optiscaler"), "{offer}");
+    }
+
+    #[test]
+    fn a_tier_a_or_same_owner_switch_has_nothing_to_uninstall() {
+        // Tier A is env-only: switching away leaves no files.
+        let mut previous = profile();
+        previous.injection = Injection::EnvOnly;
+        let mut next = profile();
+        next.injection = Injection::Manual;
+        let switch = slot_switch(&previous, &next, Some("optiscaler")).expect("a switch");
+        assert_eq!(switch.uninstall, None);
+        assert!(switch.offer().is_none());
+
+        // No change: not a switch at all.
+        assert!(slot_switch(&previous, &previous, Some("optiscaler")).is_none());
+        // A switch from nothing is not an uninstall offer either.
+        let none = profile();
+        let mut helix = profile();
+        helix.injection = Injection::HelixSr;
+        assert!(slot_switch(&none, &helix, Some("optiscaler")).is_none());
+    }
+
+    #[test]
+    fn the_preflight_lists_each_conflicting_file_and_its_owner() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        let game = dir.path().join("game");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("dxgi.dll"), b"optiscaler").unwrap();
+        fs::write(game.join("ReShade.ini"), b"reshade").unwrap();
+        // A manifest records only the OptiScaler file.
+        let src = dir.path().join("dxgi_source.dll");
+        fs::write(&src, b"optiscaler").unwrap();
+        pitagames_mods::ModManifest::install(
+            &game,
+            "optiscaler",
+            &[pitagames_mods::ModSource::new("dxgi.dll", &src)],
+        )
+        .unwrap();
+
+        let scan = conflicts(&game);
+        assert!(scan.has_conflict(), "two mechanisms are present");
+        assert_eq!(scan.files.len(), 2);
+        let lines = scan.summary();
+        assert!(
+            lines.iter().any(|line| line.contains("dxgi.dll")
+                && line.contains("OptiScaler")
+                && line.contains("optiscaler")),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("ReShade.ini") && line.contains("not installed")),
+            "{lines:?}"
+        );
     }
 
     fn nr() -> pitagames_core::profile::NeuralRendering {
