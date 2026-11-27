@@ -16,7 +16,7 @@ use dioxus::prelude::*;
 use std::sync::{Arc, Mutex};
 
 use pitagames_core::paths;
-use pitagames_core::profile::{ModelSource, NrModel, NrProcessing};
+use pitagames_core::profile::{ModelSource, NeuralRendering, NrModel, NrProcessing};
 use pitagames_mods::CapturedEnv;
 use pitagames_platform::nr::NrPlan;
 use pitagames_platform::nr_install::{self, DO_NOT_SHARE, InstallForm, ModelScan};
@@ -32,6 +32,11 @@ pub struct NrInstallProps {
     pub entry: GameEntry,
     /// The resolved backend and pinned release, from `platform::nr::plan`.
     pub plan: NrPlan,
+    /// Called when the installer finishes successfully: the neural-rendering
+    /// value to write into the game's profile, carrying the launch options the
+    /// installer printed (`captured_env`). The Graphics screen folds it into its
+    /// draft; nothing is persisted until the user applies.
+    pub on_installed: EventHandler<NeuralRendering>,
 }
 
 /// The NR install panel.
@@ -39,6 +44,7 @@ pub struct NrInstallProps {
 pub fn NrInstallPanel(props: NrInstallProps) -> Element {
     let entry = props.entry.clone();
     let plan = props.plan.clone();
+    let on_installed = props.on_installed;
 
     let plan_for_form = plan.clone();
     let mut form = use_signal(move || {
@@ -64,8 +70,10 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
     // The terminal drain: fold every report into the sheet, and clear the input
     // handle when the run ends so a stale Send does nothing.
     let drain = channel.clone();
+    let drain_plan = plan.clone();
     use_future(move || {
         let drain = drain.clone();
+        let plan = drain_plan.clone();
         async move {
             while let Some(event) = drain.next().await {
                 let finished = event.is_finished();
@@ -77,15 +85,30 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                     let captured_env = captured
                         .read()
                         .as_ref()
-                        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()));
-                    if let Some(env) = captured_env
-                        && !env.is_empty()
-                    {
-                        let names = env.env.keys().cloned().collect::<Vec<_>>().join(", ");
+                        .and_then(|slot| slot.lock().ok().and_then(|guard| guard.clone()))
+                        .unwrap_or_default();
+                    if captured_env.is_empty() {
+                        status.set("Install finished.".to_string());
+                    } else {
+                        let names = captured_env
+                            .env
+                            .keys()
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         status.set(format!(
-                            "Install finished. Captured launch options: {names}."
+                            "Install finished. Captured launch options: {names}. \
+                             Press Apply & verify to save the NR profile."
                         ));
                     }
+                    // Hand the chosen network, scale and the installer's printed
+                    // launch options to the Graphics screen's draft. Nothing is
+                    // written until the user applies.
+                    let nr = form.read().neural_rendering_with_env(
+                        plan.pin.version.to_string(),
+                        captured_env.env.clone(),
+                    );
+                    on_installed.call(nr);
                 }
                 if finished {
                     inputs.set(None);

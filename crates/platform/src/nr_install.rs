@@ -343,6 +343,21 @@ impl InstallForm {
 
     /// The profile value this form compiles into.
     pub fn neural_rendering(&self, version: impl Into<String>) -> NeuralRendering {
+        self.neural_rendering_with_env(version, std::collections::BTreeMap::new())
+    }
+
+    /// The profile value this form compiles into, carrying the installer's
+    /// captured launch options.
+    ///
+    /// `captured_env` is what `mods::capture` read from the `%command%` lines
+    /// the installer printed (already allowlist-checked); the compiler folds it
+    /// into the launch environment. This is how a finished install becomes a
+    /// profile without a copy-and-paste step.
+    pub fn neural_rendering_with_env(
+        &self,
+        version: impl Into<String>,
+        captured_env: std::collections::BTreeMap<String, String>,
+    ) -> NeuralRendering {
         NeuralRendering::DlssNrAmd {
             backend: self.backend,
             version: version.into(),
@@ -351,7 +366,7 @@ impl InstallForm {
             model_scale: self.model_scale,
             processing: self.processing,
             pkg_arch: pitagames_core::profile::PkgArch::X86_64,
-            captured_env: std::collections::BTreeMap::new(),
+            captured_env,
             model_source: self.source.clone(),
         }
     }
@@ -940,6 +955,29 @@ mod tests {
                 assert_eq!(backend, NrBackend::Rdna4Upstream);
                 assert_eq!(model_scale, 100);
                 assert_eq!(pkg_arch, PkgArch::X86_64);
+            }
+            NeuralRendering::Off => panic!("expected an enabled profile value"),
+        }
+    }
+
+    #[test]
+    fn the_form_carries_the_installers_captured_env() {
+        let form = InstallForm::new(NrBackend::Rdna4Upstream, 75, ModelSource::CachedInPackage);
+        let env = std::collections::BTreeMap::from([(
+            "WINEDLLOVERRIDES".to_string(),
+            "dxgi=n,b".to_string(),
+        )]);
+        let nr = form.neural_rendering_with_env("0.0.9", env.clone());
+        match nr {
+            NeuralRendering::DlssNrAmd {
+                version,
+                model_scale,
+                captured_env,
+                ..
+            } => {
+                assert_eq!(version, "0.0.9");
+                assert_eq!(model_scale, 75);
+                assert_eq!(captured_env, env);
             }
             NeuralRendering::Off => panic!("expected an enabled profile value"),
         }

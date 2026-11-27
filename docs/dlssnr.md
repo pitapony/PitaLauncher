@@ -152,6 +152,40 @@ Model scale: 100 % at 4K (≈12.7 ms, 2.6 GB)
 "cost": … }`. `--fetch <dir>` loads the resolved pin's `release.json` and asset
 from a fixture directory, so the whole fetch → verify → unpack runs offline.
 
+## The ini surface, the Proton choice and the merged env
+
+`platform::nr_ini` is the safe `dlssnr-amd.ini` surface (plan §7). The whole
+allowlist is `IniSurface::dlssnr()` — `[Network] Model`/`model_scale`,
+`[Int4Mixed] Enabled`, `[Preprocess] Enabled`/`Exposure`/`Curve` and
+`[NRControl] MenuKey` — and `settings(model, model_scale)` composes only the keys
+the launcher has a selection for:
+
+| Key | Written from |
+|---|---|
+| `[Network] Model` | the network (`CC_SMALL_FP8`, `CC_SILVER_AARDWOLD`, `CC_SILVER_AARDWOLD_INT4_MIXED`, `CC_SMALL_FP8_EXPERIMENTAL`) |
+| `[Network] model_scale` | the `model_scale` selection (25..=100) |
+| `[Int4Mixed] Enabled` | whether the network is int4 mixed |
+| `[NRControl] MenuKey` | `End`, upstream's default |
+
+`[Preprocess]` is on the surface but is not written by a plain install: it
+changes the picture NR is shown, so it stays in the in-game menu unless the user
+changes it there. `patch` is the shared line-preserving patcher, so comments,
+ordering and CRLF survive and a key the surface does not allow is refused by name.
+
+`envc` folds the captured launch options into the launch environment and always
+emits `PROTON_USE_OPTISCALER=0` for NR, re-asserting it after an advanced env
+override, so the two OptiScaler copies can never meet (ADR-0023). NR profiles
+default to GE-Proton, then Valve's build (`nr::default_proton`); `nr::proton_note`
+adds the "tested with GE/Valve" warning when the resolved build is
+Proton-CachyOS. On the `optiscaler` route DLSSNR owns the upscaler, so the
+Graphics screen shows "Handled by DLSSNR (Insert)" in place of the launcher's
+upscaler rows.
+
+`ShimProfile::explain_lines` is the one renderer behind `pitagames-shim --explain`
+and `pitagames-cli mods explain <store> <id> [--dir <path>] [--json]`: the Proton
+it resolved, the merged environment (which already includes the captured options),
+the captured launch options named separately, and the wrapper chain.
+
 ## Verification
 
 Pure crates (macOS host and CI):
@@ -186,11 +220,16 @@ reason string.
 - **The installer run and the model sourcing ship** (`docs/m3.5-nr-install.md`,
   ticket #29): the pre-flight form, upstream's `install.sh` run in the shared
   terminal with the game's executable directory as cwd, the `%command%` capture,
-  and the model scan / PE-version check / picker. Still later slices: the safe ini
-  surface, the in-game hints, the verify-from-log and the uninstall (#30–#32), and
-  the live fetch (ticket #12). `platform::nr` itself is the registry, the pinning,
-  the gates and the cost data; the route is fixed to `optiscaler` by the profile
-  validation.
+  and the model scan / PE-version check / picker. The safe ini surface, the
+  network/`model_scale`/int4 selection, the GE/Valve Proton default and the
+  merged-env explanation ship with ticket #30 (above). **The verification, the
+  support bundle and the in-game hints ship with ticket #31**
+  (`docs/m3.5-nr-verify.md`): engagement read from `dlssnr-amd.log` with markers
+  as data, an opt-in allowlisted support bundle that never carries the model
+  weights or a secret, and the per-mode in-game key hints with a per-game note
+  override. Still later: the uninstall (#32), and the live fetch (ticket #12).
+  `platform::nr` itself is the registry, the pinning, the gates and the cost
+  data; the route is fixed to `optiscaler` by the profile validation.
 - **32-bit detection reads the game's PE header, not the package's.** A native
   Linux game has no NR path, so `pe_is_64_bit` treats a non-PE file as an error
   rather than guessing.

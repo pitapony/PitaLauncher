@@ -1,0 +1,56 @@
+# Shipped engagement markers (ticket #31).
+#
+# After a launch, the launcher reads the mod's own log to answer "did it actually
+# engage?" without anyone opening the in-game menu (plan §6 item 8, ADR-0024).
+# The answer is read from these markers and nothing else, so an upstream wording
+# change is a one-line edit to this file rather than a code change — the point of
+# "markers as data".
+#
+# Each `[[checks]]` entry names a `check` (the subject the verification panel
+# reports) and the `log` file to read. `engaged` markers prove the mod loaded;
+# `failed` markers explain a "not engaged" verdict. Matching is a case-sensitive
+# substring against one line, and an `engaged` marker anywhere in the log wins
+# over a `failed` one (the network loaded at least once).
+#
+# NOTE: not validated on hardware yet (no target machine reachable). The strings
+# below are the first pass from upstream's own log vocabulary; a wrong one is a
+# data edit, and the panel's "not engaged" is always paired with the failed line
+# it found so a mismatch is visible rather than silent.
+
+[[checks]]
+check = "nr"
+log = "dlssnr-amd.log"
+note = "DLSSNR-AMD writes this beside the game; the network-loaded line is the success marker."
+
+[[checks.engaged]]
+id = "model-load"
+contains = "model loaded"
+
+[[checks.engaged]]
+id = "nr-initialized"
+contains = "neural rendering initialized"
+
+[[checks.failed]]
+id = "model-missing"
+contains = "model not found"
+
+[[checks.failed]]
+id = "device-unsupported"
+contains = "unsupported device"
+
+# The upscaler check shares the one panel; its markers land beside the M3
+# "Apply & verify" launch check (plan §6 item 9) when the OptiScaler wording is
+# validated on hardware. It is shipped now so the panel and the CLI report both
+# subjects through one engine.
+[[checks]]
+check = "upscaler"
+log = "OptiScaler.log"
+note = "OptiScaler's own log; its active/upscaler-selected lines are the markers."
+
+[[checks.engaged]]
+id = "upscaler-active"
+contains = "Chosen upscaler"
+
+[[checks.failed]]
+id = "upscaler-disabled"
+contains = "Upscaler disabled"

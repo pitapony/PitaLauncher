@@ -3,10 +3,13 @@ source: crates/platform/tests/envc_golden.rs
 expression: render(&compiled)
 ---
 env:
-  PROTON_USE_OPTISCALER=0
   WINEDLLOVERRIDES=dxgi=n,b
+  PROTON_USE_OPTISCALER=0
 wrappers:
 ini:
+  Network.Model=CC_SMALL_FP8
   Network.model_scale=75
+  Int4Mixed.Enabled=false
+  NRControl.MenuKey=End
 warnings:
   neural rendering is tested with GE-Proton or Valve Proton; Proton-CachyOS runs with its OptiScaler injection disabled

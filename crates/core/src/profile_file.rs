@@ -25,6 +25,7 @@
 //! missing or corrupt file is not fatal — the shim falls back to running the
 //! game unchanged and logs a warning.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
@@ -58,6 +59,13 @@ pub struct ShimProfile {
     /// Environment additions, in application order.
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// The launch-option environment a mod installer printed and `mods::capture`
+    /// read (the DLSSNR `%command%` line). The compiled `env` already carries
+    /// these at their resolved values — this records *which* keys came from a
+    /// mod, so `--explain` and `mods explain` can name them. Empty for a profile
+    /// with no captured launch options.
+    #[serde(default)]
+    pub captured_env: BTreeMap<String, String>,
     /// Ordered process wrappers, outermost first.
     #[serde(default)]
     pub wrappers: Vec<WrapperStep>,
@@ -78,10 +86,71 @@ impl ShimProfile {
             profile: profile.into(),
             proton: None,
             env: Vec::new(),
+            captured_env: BTreeMap::new(),
             wrappers: Vec::new(),
             log_path: None,
             written_at: Some(OffsetDateTime::now_utc()),
         }
+    }
+
+    /// The body of `pitagames-shim --explain` and `pitagames-cli mods explain`.
+    ///
+    /// `env` is the effective environment the launch applies: the shim passes its
+    /// [`LaunchSpec`](crate::LaunchSpec) env (which adds `PITAGAMES_APPID`), and
+    /// the CLI passes the profile's own [`env`](Self::env). The captured launch
+    /// options and the wrapper chain come from the profile, so the explanation
+    /// shows the *merged* environment and names where the mod's keys came from.
+    ///
+    /// One renderer for both callers: a change here is the shim's explanation and
+    /// the CLI's in the same breath.
+    #[must_use]
+    pub fn explain_lines(&self, env: &[(String, String)]) -> Vec<String> {
+        let mut lines = vec![format!("Profile:      {}", self.profile)];
+
+        match &self.proton {
+            Some(proton) => match &proton.install {
+                Some(install) => lines.push(format!(
+                    "Proton:       {} ({}) {}",
+                    install.name,
+                    install.source,
+                    install.path.display()
+                )),
+                None => lines.push(format!(
+                    "Proton:       Steam decides ({:?})",
+                    proton.reference
+                )),
+            },
+            None => lines.push("Proton:       Steam decides".to_string()),
+        }
+
+        lines.push("Environment:".to_string());
+        if env.is_empty() {
+            lines.push("  (none)".to_string());
+        }
+        for (key, value) in env {
+            lines.push(format!("  {key}={value}"));
+        }
+
+        if !self.captured_env.is_empty() {
+            lines.push("Captured launch options:".to_string());
+            for (key, value) in &self.captured_env {
+                lines.push(format!("  {key}={value}"));
+            }
+        }
+
+        if !self.wrappers.is_empty() {
+            lines.push("Wrappers:".to_string());
+            for step in &self.wrappers {
+                let args = step.args.join(" ");
+                if args.is_empty() {
+                    lines.push(format!("  {}", step.program.display()));
+                } else {
+                    lines.push(format!("  {} {args}", step.program.display()));
+                }
+            }
+        }
+
+        lines
     }
 }
 
@@ -310,6 +379,52 @@ mod tests {
             json.contains(r#""program": "/usr/bin/gamemoderun""#),
             "{json}"
         );
+    }
+
+    #[test]
+    fn the_captured_env_round_trips_and_the_explanation_names_it() {
+        let mut profile = ShimProfile::new(game(), "NR");
+        profile.env = vec![
+            ("PROTON_USE_OPTISCALER".into(), "0".into()),
+            ("WINEDLLOVERRIDES".into(), "dxgi=n,b".into()),
+        ];
+        profile.captured_env = BTreeMap::from([("WINEDLLOVERRIDES".into(), "dxgi=n,b".into())]);
+        profile.wrappers.push(WrapperStep {
+            program: PathBuf::from("gamemoderun"),
+            args: Vec::new(),
+        });
+
+        // The JSON carries the provenance so a later read can name it.
+        let json = serde_json::to_string(&profile).unwrap();
+        assert!(json.contains("\"captured_env\""), "{json}");
+        let parsed: ShimProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, profile);
+
+        // The explanation is the merged env plus the named origin.
+        let lines = profile.explain_lines(&profile.env);
+        assert!(lines.contains(&"Profile:      NR".to_string()));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "  WINEDLLOVERRIDES=dxgi=n,b")
+        );
+        let captured_at = lines
+            .iter()
+            .position(|line| line == "Captured launch options:")
+            .expect("the captured block");
+        assert_eq!(lines[captured_at + 1], "  WINEDLLOVERRIDES=dxgi=n,b");
+        assert!(
+            lines.iter().any(|line| line == "  gamemoderun"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_profile_without_captured_env_omits_the_block() {
+        let profile = ShimProfile::new(game(), "Default");
+        let lines = profile.explain_lines(&[]);
+        assert!(!lines.contains(&"Captured launch options:".to_string()));
+        assert!(lines.contains(&"  (none)".to_string()));
     }
 
     #[test]

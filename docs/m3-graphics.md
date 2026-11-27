@@ -120,7 +120,9 @@ resolved command.
   no AMD card, so the smoke run sees the "card not recognised" matrix.
 - **"Apply & verify" verifies the compile, not engagement.** It validates the
   draft, persists it and writes the shim file; the "launch and report
-  engaged/not" half is the M3.5 verification slice.
+  engaged/not" half is the M3.5 verification slice (`docs/m3.5-nr-verify.md`),
+  which reads the mod's own log and reports the verdict in the panel beside the
+  NR install card.
 - **Tier B install is not wired here.** The screen offers `Injection::Manual` and
   reverts a manifest that exists; the deploy flow itself is the Tier B slice.
 - **The pre-flight conflict scan is not on this screen** (later ticket).
