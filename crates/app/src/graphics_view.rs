@@ -484,6 +484,11 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let dirty = editor_state.is_dirty();
     let status_text = status.read().clone();
     let console = props.shell.read().is_console();
+    let command_hint = if console {
+        t("graphics.command_hint_console")
+    } else {
+        t("graphics.command_hint_desktop")
+    };
     // The injection gate: a draft that injects into an anti-cheat-protected
     // game cannot be applied until the risk is acknowledged.
     let eac_v2 = compat_snapshot.as_ref().is_some_and(|entry| entry.eac_v2);
@@ -729,7 +734,7 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     CopyButton { text: preview_command.clone() }
                     span {
                         style: "font-size:var(--text-micro);color:var(--text-muted);",
-                        if console { t("graphics.command_hint_console") } else { t("graphics.command_hint_desktop") }
+                        "{command_hint}"
                     }
                 }
                 if let Some(message) = preview_error.clone() {

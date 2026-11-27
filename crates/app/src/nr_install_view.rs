@@ -224,6 +224,13 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
     let status_text = status.read().clone();
     let picked_text = picked.read().clone();
     let sheet = terminal.read().clone();
+    let sheet_close_label = sheet.as_ref().map_or("", |sheet| {
+        if sheet.running() {
+            t("action.cancel")
+        } else {
+            t("action.close")
+        }
+    });
     let typed_text = typed.read().clone();
 
     let backend = pitagames_platform::nr::backend_label(plan.backend);
@@ -400,7 +407,7 @@ pub fn NrInstallPanel(props: NrInstallProps) -> Element {
                             button {
                                 onclick: move |_| close_sheet(terminal, inputs, typed),
                                 style: "{button_style(true)}",
-                                if sheet.running() { t("action.cancel") } else { t("action.close") }
+                                "{sheet_close_label}"
                             }
                         }
 

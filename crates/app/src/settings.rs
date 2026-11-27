@@ -771,7 +771,7 @@ fn activate(
     mut session: Signal<Session>,
     status: Signal<String>,
     status_error: Signal<bool>,
-    mut export: Signal<Option<String>>,
+    export: Signal<Option<String>>,
 ) {
     let (mut next, _warnings) = AppConfig::load_default();
     let intent = apply(control, &mut next);
