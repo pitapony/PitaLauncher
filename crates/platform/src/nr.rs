@@ -1469,6 +1469,47 @@ sha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     }
 
     #[test]
+    fn the_reference_doc_names_the_shipped_pins_and_links_the_slices() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("docs/dlssnr.md");
+        let doc = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+
+        // The doc is the reference for the shipped pins: every backend's
+        // project, host and tag must appear, so a re-pin cannot leave the doc
+        // describing a release we no longer fetch.
+        for pin in BackendRegistry::shipped().all() {
+            for field in [&pin.project, &pin.tag, &pin.asset] {
+                assert!(
+                    doc.contains(field.as_str()),
+                    "docs/dlssnr.md is missing `{field}` for {}",
+                    backend_label(pin.backend)
+                );
+            }
+            assert!(
+                doc.contains(pin.source.label()),
+                "docs/dlssnr.md is missing the host `{}`",
+                pin.source.label()
+            );
+        }
+
+        // The reference doc indexes the three M3.5 slices that carry the
+        // install, verify and uninstall detail.
+        for slice in [
+            "docs/m3.5-nr-install.md",
+            "docs/m3.5-nr-verify.md",
+            "docs/m3.5-nr-uninstall.md",
+        ] {
+            assert!(
+                doc.contains(slice),
+                "docs/dlssnr.md does not link `{slice}`"
+            );
+        }
+    }
+
+    #[test]
     fn a_verdict_round_trips_through_json_for_the_cli() {
         let verdict = NrVerdict::Hidden {
             reason: reason::PIN_BEHIND.to_string(),
