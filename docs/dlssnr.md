@@ -186,11 +186,14 @@ reason string.
 - **The installer run and the model sourcing ship** (`docs/m3.5-nr-install.md`,
   ticket #29): the pre-flight form, upstream's `install.sh` run in the shared
   terminal with the game's executable directory as cwd, the `%command%` capture,
-  and the model scan / PE-version check / picker. Still later slices: the safe ini
-  surface, the in-game hints, the verify-from-log and the uninstall (#30–#32), and
-  the live fetch (ticket #12). `platform::nr` itself is the registry, the pinning,
-  the gates and the cost data; the route is fixed to `optiscaler` by the profile
-  validation.
+  and the model scan / PE-version check / picker. **The verification, the support
+  bundle and the in-game hints ship too** (`docs/m3.5-nr-verify.md`, ticket #31):
+  engagement read from `dlssnr-amd.log` with markers as data, an opt-in
+  allowlisted support bundle, and the per-mode in-game key hints with a per-game
+  note override. Still later slices: the safe ini surface (#30) and the uninstall
+  (#32), and the live fetch (ticket #12). `platform::nr` itself is the registry,
+  the pinning, the gates and the cost data; the route is fixed to `optiscaler` by
+  the profile validation.
 - **32-bit detection reads the game's PE header, not the package's.** A native
   Linux game has no NR path, so `pe_is_64_bit` treats a non-PE file as an error
   rather than guessing.

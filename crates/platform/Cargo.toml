@@ -17,6 +17,9 @@ goblin.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+# `support` writes the opt-in support bundle as a zip; `mods::release` owns the
+# read side, this is the one write.
+zip.workspace = true
 
 # `power` speaks logind over D-Bus. Only Linux has logind, so `zbus` is built
 # there alone; the trait seam and its fake keep the crate building and testing
