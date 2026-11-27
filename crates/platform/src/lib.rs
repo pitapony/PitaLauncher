@@ -26,6 +26,7 @@ pub mod envc;
 pub mod gpu;
 pub mod launch;
 pub mod logs;
+pub mod nr;
 pub mod prefix;
 pub mod proton;
 pub mod proton_update;
@@ -53,6 +54,10 @@ pub use launch::{
     UMU_RUN, prepare, start, terminate,
 };
 pub use logs::{LogFile, LogKind, TAIL_BYTES, Tail};
+pub use nr::{
+    BackendPin, BackendRegistry, Cost, NrError, NrPlan, NrRequest, NrVerdict, Resolution,
+    backend_for, default_scale, is_experimental, model_scale_preset, pe_is_64_bit,
+};
 pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{
     DiscoveryReport, ProtonError, ProtonInstall, ProtonKind, ProtonRoot, ProtonSource,

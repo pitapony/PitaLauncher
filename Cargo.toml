@@ -81,4 +81,8 @@ futures-util = "0.3"
 # No inline snapshots: the matrix is committed as files under `tests/snapshots`.
 insta = "1"
 
+# `goblin` reads a game's PE header so the neural-rendering backends can refuse a
+# 32-bit game (ticket #28); only the PE half is enabled.
+goblin = { version = "0.10", default-features = false, features = ["std", "pe32", "pe64"] }
+
 tempfile = "3.15"

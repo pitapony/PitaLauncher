@@ -12,6 +12,8 @@ pitagames-core.workspace = true
 # `proton_update` reuses the shared release fetch/verify/unpack (ticket #12)
 # instead of inventing a second download path.
 pitagames-mods.workspace = true
+# `nr` reads a game's PE header to refuse a 32-bit DLSSNR package (ticket #28).
+goblin.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
