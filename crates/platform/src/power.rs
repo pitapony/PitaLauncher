@@ -34,13 +34,21 @@ pub enum PowerAction {
 }
 
 impl PowerAction {
-    /// Every action, in the order the overlay lists them.
+    /// Every action this module can ask for.
     pub const ALL: [PowerAction; 4] = [
         Self::Suspend,
         Self::Restart,
         Self::Shutdown,
         Self::TerminateSession,
     ];
+
+    /// The actions the console overlay offers, in menu order.
+    ///
+    /// [`TerminateSession`](Self::TerminateSession) is the session unit's
+    /// exit-to-desktop action (it lands with the gamescope session, see
+    /// `docs/v1.1-power.md`), so it is reachable through the API but has no menu
+    /// row yet.
+    pub const MENU: [PowerAction; 3] = [Self::Suspend, Self::Restart, Self::Shutdown];
 
     /// A short human label, for a message or a log line.
     pub const fn label(self) -> &'static str {
@@ -228,7 +236,7 @@ mod tests {
     }
 
     #[test]
-    fn the_action_set_is_the_power_menu() {
+    fn every_action_is_listed_once() {
         assert_eq!(
             PowerAction::ALL,
             [
@@ -237,6 +245,25 @@ mod tests {
                 PowerAction::Shutdown,
                 PowerAction::TerminateSession,
             ]
+        );
+    }
+
+    #[test]
+    fn the_menu_is_the_three_overlay_rows() {
+        assert_eq!(
+            PowerAction::MENU,
+            [
+                PowerAction::Suspend,
+                PowerAction::Restart,
+                PowerAction::Shutdown,
+            ]
+        );
+        for action in PowerAction::MENU {
+            assert!(PowerAction::ALL.contains(&action), "{action} is not in ALL");
+        }
+        assert!(
+            !PowerAction::MENU.contains(&PowerAction::TerminateSession),
+            "the session's exit-to-desktop action has no menu row yet"
         );
     }
 
@@ -256,5 +283,25 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("shut down"), "{message}");
         assert!(message.contains("Not authorized"), "{message}");
+    }
+
+    #[test]
+    fn power_never_spawns_a_process() {
+        // The action is a D-Bus method call, not a process: a shell-out would be
+        // a second privileged path with its own argument-injection surface, so
+        // the ticket forbids it outright. There is no global way to forbid
+        // `Command`, so this guard reads the module's own source and refuses a
+        // process constructor (the doc comment's "no `loginctl`" prose is fine,
+        // which is why the needles are code shapes, not command names).
+        let source = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/power.rs");
+        let text = std::fs::read_to_string(&source).expect("read power.rs");
+        // Production code only: this test names the forbidden tokens to assert on.
+        let text = text.split("#[cfg(test)]").next().unwrap_or(&text);
+        for needle in ["Command::new", "process::Command", "sh -c"] {
+            assert!(
+                !text.contains(needle),
+                "power must ask logind over D-Bus, not spawn a process ({needle})"
+            );
+        }
     }
 }

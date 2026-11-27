@@ -145,7 +145,7 @@ impl Overlay {
         // Power is the console session's (v1.1, over logind). It is offered only
         // where it can work; off the session the rows stay visible but disabled,
         // so a desktop user sees the shape without a press that cannot land.
-        for action in [PowerAction::Suspend, PowerAction::Restart, PowerAction::Shutdown] {
+        for action in PowerAction::MENU {
             if context.session {
                 entries.push(OverlayEntry::enabled(
                     OverlayChoice::Power(action),
@@ -371,11 +371,21 @@ mod tests {
     #[test]
     fn the_power_rows_are_enabled_in_the_session() {
         let overlay = Overlay::build(&session());
-        for action in [
-            PowerAction::Suspend,
-            PowerAction::Restart,
-            PowerAction::Shutdown,
-        ] {
+        let power: Vec<Option<OverlayChoice>> = overlay
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry.choice, Some(OverlayChoice::Power(_))))
+            .map(|entry| entry.choice)
+            .collect();
+        assert_eq!(
+            power,
+            PowerAction::MENU
+                .iter()
+                .map(|action| Some(OverlayChoice::Power(*action)))
+                .collect::<Vec<_>>(),
+            "the menu carries every power action, in order"
+        );
+        for action in PowerAction::MENU {
             let row = overlay
                 .entries()
                 .iter()
@@ -389,13 +399,15 @@ mod tests {
     #[test]
     fn the_power_rows_are_disabled_off_the_session() {
         let overlay = Overlay::build(&console());
-        for label in ["Suspend", "Restart", "Shut down"] {
+        for action in PowerAction::MENU {
+            let label = super::power_label(action);
             let row = overlay
                 .entries()
                 .iter()
                 .find(|entry| entry.label == label)
                 .unwrap_or_else(|| panic!("{label} is missing"));
             assert!(!row.is_enabled(), "{label} must not run off the session");
+            assert!(row.choice.is_none(), "{label} must offer no choice");
             assert_eq!(row.detail, "available in the console session");
             assert!(
                 !row.detail.contains("arrives with the console session"),

@@ -2232,7 +2232,7 @@ pub(crate) fn apply_overlay(
         .as_ref()
         .and_then(|model| model.focused_choice());
     let Some(choice) = choice else {
-        // A disabled row (a power placeholder): keep the menu open.
+        // A disabled row (an off-session power row): keep the menu open.
         return;
     };
     apply_overlay_choice(choice, overlay, shell, session, notice, play);
