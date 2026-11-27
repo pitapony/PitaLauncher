@@ -78,6 +78,7 @@ mod pumps;
 mod runtime;
 mod safe_mode;
 mod session;
+mod session_entry;
 mod shell;
 mod steam_account;
 mod store_installs;
@@ -97,6 +98,16 @@ fn main() {
     if args.version {
         println!("pitagames {}", env!("CARGO_PKG_VERSION"));
         return;
+    }
+
+    // `--session` marks the console session. The flag is turned into the
+    // environment variable the launch path reads (`PITAGAMES_SESSION`), before
+    // any worker thread exists, so the GUI child and every launch composition
+    // see it. The session file's unit sets the same variable.
+    if args.session {
+        // SAFETY: this runs before the supervisor spawns the GUI child and before
+        // any thread is started, so nothing else reads the environment here.
+        unsafe { std::env::set_var(pitagames_core::session::SESSION_ENV, "1") };
     }
 
     // The GUI child the supervisor spawned owns the window; it must not take
@@ -145,7 +156,7 @@ fn run_gui(args: &shell::ShellArgs) {
     // animations and blur for the run. `--safe-mode`, `config.toml` and the
     // supervisor's retry (the environment) all resolve here.
     let safe = safe_mode::enabled(args.safe_mode, preferences.ui.safe_mode);
-    let shell = preferences.ui.resolve_start(args.shell);
+    let shell = args.start_shell(&preferences.ui);
     let mut display = preferences.ui.display;
     if safe {
         safe_mode::apply_webkit_env();
@@ -166,6 +177,9 @@ fn run_gui(args: &shell::ShellArgs) {
     activation::start();
     // A checkout has no packaged menu entry; write one that points here.
     desktop_entry::ensure();
+    // The console session's login entry + unit, generated from the display
+    // config, so a checkout can boot the 10-foot session without a package.
+    session_entry::ensure(&display);
 
     // The window is built for the resolved shell: frameless and windowed for
     // the desktop, undecorated and fullscreen for the console.

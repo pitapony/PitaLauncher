@@ -19,6 +19,7 @@ pub mod paths;
 pub mod perf;
 pub mod profile;
 pub mod profile_file;
+pub mod session;
 pub mod store;
 pub mod ui;
 
@@ -50,8 +51,13 @@ pub use profile_file::{
     load_shim_profile, read_shim_profile, remove_shim_profile, save_shim_profile,
     shim_profile_path,
 };
+pub use session::{
+    CONSOLE_FLAG, GAMESCOPE_PROGRAM, LAUNCHER_PROGRAM, SESSION_ENV, SESSION_FLAG, SessionEntry,
+    SessionError, SystemdUnit, UNIT_NAME, gamescope_arguments, launcher_argv,
+    packaged_entry as packaged_session_entry, packaged_unit as packaged_session_unit, session_exec,
+};
 pub use store::{AntiCheat, Game, GameId, OwnedGame, Store, UnknownAntiCheat, UnknownStore};
 pub use ui::{
-    AppConfig, ConfigError, DisplayConfig, Shell, StartMode, UiConfig, UnknownShell,
-    UnknownStartMode,
+    AppConfig, ConfigError, DisplayConfig, SessionDisplay, SessionResolution, Shell, StartMode,
+    UiConfig, UnknownShell, UnknownStartMode,
 };

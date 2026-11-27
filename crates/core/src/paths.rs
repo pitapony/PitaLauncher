@@ -132,6 +132,19 @@ pub fn desktop_entry_file() -> Option<PathBuf> {
     data_home().map(|base| base.join("applications").join("pitagames.desktop"))
 }
 
+/// The systemd **user** unit directories, most specific first.
+///
+/// A user unit the launcher owns goes in `$XDG_CONFIG_HOME/systemd/user`
+/// ([`session_unit_file`]); these are where a package installs the same unit, so
+/// the launcher can tell whether the package owns it.
+pub fn systemd_user_unit_dirs() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/etc/systemd/user"),
+        PathBuf::from("/usr/local/lib/systemd/user"),
+        PathBuf::from("/usr/lib/systemd/user"),
+    ]
+}
+
 /// The XDG data search path (`XDG_DATA_DIRS`, default
 /// `/usr/local/share:/usr/share`).
 ///
@@ -169,6 +182,32 @@ pub fn input_maps_file() -> Option<PathBuf> {
 /// the shipped defaults; the app writes it when the player changes a preference.
 pub fn config_file() -> Option<PathBuf> {
     config_dir().map(|base| base.join("config.toml"))
+}
+
+/// `<XDG_DATA_HOME>/wayland-sessions/pitagames.desktop`: the generated console
+/// session entry.
+///
+/// Display managers read `wayland-sessions` from the XDG data directories; a
+/// checkout writes here so its generated session is found without root. The
+/// package ships the same file to `/usr/share/wayland-sessions`.
+pub fn session_entry_file() -> Option<PathBuf> {
+    data_home().map(|base| {
+        base.join("wayland-sessions")
+            .join(crate::session::ENTRY_FILE_NAME)
+    })
+}
+
+/// `<XDG_CONFIG_HOME>/systemd/user/pitagames-session.service`: the generated
+/// systemd user unit.
+///
+/// A user unit the launcher owns; the package ships the same file to
+/// `/usr/lib/systemd/user`.
+pub fn session_unit_file() -> Option<PathBuf> {
+    config_home().map(|base| {
+        base.join("systemd")
+            .join("user")
+            .join(crate::session::UNIT_NAME)
+    })
 }
 
 /// `<XDG_CONFIG_HOME>/pitagames/compat`: user overrides of the shipped compat DB.
@@ -349,6 +388,32 @@ mod tests {
         assert_eq!(
             maps,
             Some(PathBuf::from("/tmp/xdg-input/pitagames/input.toml"))
+        );
+    }
+
+    #[test]
+    fn the_session_files_live_where_the_display_manager_and_systemd_look() {
+        let guard = ENV_LOCK.lock().unwrap();
+
+        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-session-data") };
+        unsafe { std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-session-conf") };
+        let entry = session_entry_file();
+        let unit = session_unit_file();
+        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        unsafe { std::env::remove_var("XDG_CONFIG_HOME") };
+        drop(guard);
+
+        assert_eq!(
+            entry,
+            Some(PathBuf::from(
+                "/tmp/xdg-session-data/wayland-sessions/pitagames.desktop"
+            ))
+        );
+        assert_eq!(
+            unit,
+            Some(PathBuf::from(
+                "/tmp/xdg-session-conf/systemd/user/pitagames-session.service"
+            ))
         );
     }
 

@@ -158,6 +158,18 @@ impl Overlay {
             }
         }
 
+        // Exit to desktop is the session's own action (`loginctl
+        // terminate-session`): it ends the gamescope session, and the next login
+        // returns to it. It only exists in the session, because off it there is
+        // nothing to exit.
+        if context.session {
+            entries.push(OverlayEntry::enabled(
+                OverlayChoice::Power(PowerAction::TerminateSession),
+                t("overlay.exit_to_desktop"),
+                t("overlay.exit_to_desktop_detail"),
+            ));
+        }
+
         let focus = (!entries.is_empty()).then_some(0);
         Self { entries, focus }
     }
@@ -383,11 +395,11 @@ mod tests {
             .collect();
         assert_eq!(
             power,
-            PowerAction::MENU
+            PowerAction::ALL
                 .iter()
                 .map(|action| Some(OverlayChoice::Power(*action)))
                 .collect::<Vec<_>>(),
-            "the menu carries every power action, in order"
+            "the session carries every power action, plus exit-to-desktop"
         );
         for (action, label, detail) in power_rows() {
             let row = overlay
@@ -399,6 +411,30 @@ mod tests {
             assert_eq!(row.label, label);
             assert_eq!(row.detail, detail);
         }
+    }
+
+    #[test]
+    fn the_session_offers_exit_to_desktop() {
+        let overlay = Overlay::build(&session());
+        let row = overlay
+            .entries()
+            .iter()
+            .find(|entry| entry.choice == Some(OverlayChoice::Power(PowerAction::TerminateSession)))
+            .expect("the session has an exit-to-desktop row");
+        assert!(row.is_enabled());
+        assert_eq!(row.label, t("overlay.exit_to_desktop"));
+        assert_eq!(row.detail, t("overlay.exit_to_desktop_detail"));
+
+        // Off the session there is nothing to exit, so the row is absent.
+        let console = Overlay::build(&console());
+        assert!(
+            console
+                .entries()
+                .iter()
+                .all(|entry| entry.choice
+                    != Some(OverlayChoice::Power(PowerAction::TerminateSession))),
+            "exit-to-desktop is the session's own action"
+        );
     }
 
     #[test]

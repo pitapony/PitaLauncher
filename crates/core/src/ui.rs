@@ -160,6 +160,39 @@ impl FromStr for StartMode {
 #[error("unknown start mode {0:?}; expected \"desktop\", \"console\" or \"remember\"")]
 pub struct UnknownStartMode(pub String);
 
+/// A display mode the console session pins gamescope's output to.
+///
+/// Typed rather than a `"1920x1080"` string so a malformed value is a config
+/// error, not a gamescope argument. The session file only emits `-w`/`-h`/`-r`
+/// when this is set; with no mode the output's preferred mode is used, so the
+/// shipped session never hardcodes a resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionResolution {
+    /// The output width in pixels.
+    pub width: u32,
+    /// The output height in pixels.
+    pub height: u32,
+    /// The refresh rate in Hz; `None` leaves the mode's default.
+    pub refresh_hz: Option<u32>,
+}
+
+/// The console session's own display preferences.
+///
+/// The wayland-sessions entry runs `gamescope`, so these numbers become its
+/// arguments (see [`crate::session`]). They are separate from the shell's
+/// [`DisplayConfig`] numbers because they configure the *compositor*, not the
+/// launcher's window.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionDisplay {
+    /// The mode to pin the output to; `None` uses the output's preferred mode.
+    pub resolution: Option<SessionResolution>,
+    /// Whether to ask gamescope for HDR (`--hdr-enabled`).
+    pub hdr: bool,
+    /// Whether to ask gamescope for adaptive sync / VRR (`--adaptive-sync`).
+    pub vrr: bool,
+}
+
 /// How the shells lay themselves out.
 ///
 /// The numbers are CSS values (a percentage, a multiplier, a duration), so a
@@ -183,6 +216,9 @@ pub struct DisplayConfig {
     pub hide_cursor_ms: u64,
     /// Whether to drop animations and blur (the accessibility switch).
     pub reduce_animations: bool,
+    /// The console session's output: the gamescope session file is generated
+    /// from these numbers, so a couch user's TV mode is configured once.
+    pub session: SessionDisplay,
 }
 
 impl Default for DisplayConfig {
@@ -194,6 +230,7 @@ impl Default for DisplayConfig {
             safe_area_pct: DEFAULT_SAFE_AREA_PCT,
             hide_cursor_ms: DEFAULT_HIDE_CURSOR_MS,
             reduce_animations: false,
+            session: SessionDisplay::default(),
         }
     }
 }
@@ -474,6 +511,28 @@ impl AppConfig {
             display.hide_cursor_ms = MAX_HIDE_CURSOR_MS;
         }
 
+        // A mode the compositor cannot use is dropped rather than passed to
+        // gamescope: a zero dimension is not a resolution, and a refresh of zero
+        // is not a rate.
+        if let Some(mode) = display.session.resolution {
+            if mode.width == 0 || mode.height == 0 {
+                warnings.push(format!(
+                    "session resolution {}x{} is not a mode; using the output default",
+                    mode.width, mode.height
+                ));
+                display.session.resolution = None;
+            } else if mode.refresh_hz == Some(0) {
+                warnings.push(
+                    "session resolution refresh 0 is not a rate; using the mode default"
+                        .to_string(),
+                );
+                display.session.resolution = Some(SessionResolution {
+                    refresh_hz: None,
+                    ..mode
+                });
+            }
+        }
+
         if display
             .monitor
             .as_deref()
@@ -709,6 +768,64 @@ mod tests {
         assert_eq!(monitor.center(1280, 800), (100, 50));
         // An exact fit is the origin too.
         assert_eq!(monitor.center(800, 600), (100, 50));
+    }
+
+    #[test]
+    fn the_default_session_pins_nothing() {
+        // The shipped console session must never force a resolution: with no
+        // session section, gamescope runs the output's preferred mode.
+        let display = DisplayConfig::default();
+        assert_eq!(display.session.resolution, None);
+        assert!(!display.session.hdr);
+        assert!(!display.session.vrr);
+    }
+
+    #[test]
+    fn the_session_section_round_trips_through_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[ui.display.session]\nhdr = true\nvrr = true\nresolution = { width = 2560, height = 1440, refresh_hz = 120 }\n",
+        )
+        .unwrap();
+        let (config, warnings) = AppConfig::load(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(
+            config.ui.display.session.resolution,
+            Some(SessionResolution {
+                width: 2560,
+                height: 1440,
+                refresh_hz: Some(120),
+            })
+        );
+        assert!(config.ui.display.session.hdr);
+        assert!(config.ui.display.session.vrr);
+
+        // Saving writes the section back, so a generated session file survives
+        // a reload.
+        let saved = dir.path().join("again.toml");
+        config.save(&saved).unwrap();
+        let (reloaded, warnings) = AppConfig::load(&saved);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(reloaded, config);
+    }
+
+    #[test]
+    fn a_zero_session_resolution_is_dropped_with_a_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[ui.display.session]\nresolution = { width = 0, height = 1440, refresh_hz = 0 }\n",
+        )
+        .unwrap();
+        let (config, warnings) = AppConfig::load(&path);
+        // A dimension of zero is not a mode; the whole pin is dropped instead of
+        // asking gamescope for an impossible resolution.
+        assert_eq!(config.ui.display.session.resolution, None);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("resolution"), "{warnings:?}");
     }
 
     #[test]
