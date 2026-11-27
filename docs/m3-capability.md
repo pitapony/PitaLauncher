@@ -102,12 +102,13 @@ unrecognised card (`GpuArch::Unknown`); everything else is hidden there.
 5. **Mesa**. Neural rendering needs Mesa 26.2 or newer (`NR_NEEDS_MESA`); an
    unreadable version (`vulkaninfo` absent) is `NR_MESA_UNKNOWN` — never guessed.
 6. **Proton** (plan §6, ADR-0023). Tier A needs the Proton-CachyOS hooks
-   (`TIER_A_NEEDS_CACHYOS`, or `TIER_A_STEAM_DEFAULT` when Steam decides); the
-   FFX upgrade hooks need the same build (`FFX_NEEDS_CACHYOS`). Neural rendering
-   (`NR_NEEDS_RECENT_PROTON`, `NR_STEAM_DEFAULT_PROTON`) and HelixSR
-   (`HLX_NEEDS_RECENT_PROTON`) need a recent build. "Recent" is Proton-CachyOS
-   ≥ 11.0-20260506, GE-Proton ≥ 10, Valve/Experimental/umu-Proton ≥ 9; an
-   unclassifiable directory is never claimed to be recent.
+   (`TIER_A_NEEDS_CACHYOS`, or `TIER_A_STEAM_DEFAULT` when Steam decides; an
+   unreadable build version is `TIER_A_VERSION_UNREADABLE` — never assumed new
+   enough); the FFX upgrade hooks need the same build (`FFX_NEEDS_CACHYOS`).
+   Neural rendering (`NR_NEEDS_RECENT_PROTON`, `NR_STEAM_DEFAULT_PROTON`) and
+   HelixSR (`HLX_NEEDS_RECENT_PROTON`) need a recent build. "Recent" is
+   Proton-CachyOS ≥ 11.0-20260506, GE-Proton ≥ 10, Valve/Experimental/umu-Proton
+   ≥ 9; an unclassifiable directory is never claimed to be recent.
 
 The matrix follows the detected hardware: a newer Mesa or Proton unlocks options.
 A field is hidden the moment one gate fails, so the reason the user sees is the
@@ -140,6 +141,7 @@ asserts each appears verbatim in this table.
 | `GAME_NO_HELIXSR_DROPIN` | this game does not ship an FSR 3.1 DLL for the HelixSR drop-in |
 | `GAME_NO_NR` | neural rendering is not curated for this game |
 | `TIER_A_NEEDS_CACHYOS` | Tier A needs Proton-CachyOS 11.0-20260506 or newer |
+| `TIER_A_VERSION_UNREADABLE` | Tier A needs Proton-CachyOS 11.0-20260506 or newer, but the build version could not be read |
 | `TIER_A_STEAM_DEFAULT` | Steam's default Proton cannot deploy OptiScaler; choose Proton-CachyOS |
 | `FFX_NEEDS_CACHYOS` | the FFX upgrade hooks need Proton-CachyOS 11.0-20260506 or newer |
 | `NR_NEEDS_RECENT_PROTON` | neural rendering needs a recent Proton or GE build |

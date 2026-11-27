@@ -1,0 +1,133 @@
+name: Bug report
+description: Something in PitaGames is broken — the GUI, the CLI, the shim, or the console shell.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing PitaGames. PitaGames runs only on **CachyOS/Arch Linux**,
+        x86_64 — Windows, macOS and Flatpak Steam are explicit non-goals, so a report
+        from one of those will be closed as unsupported.
+
+        The more of this you fill in, the faster it can be reproduced. Running the
+        program is a **human task**: only you are at the machine, so the diagnostics
+        below are the only view we get.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear, short description of the problem.
+      placeholder: "The window came up black on Wayland; the CLI still scans fine."
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact sequence, starting from a known state.
+      placeholder: |
+        1. Launch `pitagames --console`
+        2. Press the pad's Start
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What you expected instead, and why.
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Which part?
+      multiple: true
+      options:
+        - Desktop (windowed) shell
+        - Console shell
+        - CLI (`pitagames-cli`)
+        - Shim (`pitagames-shim`)
+        - Store backend (Epic / Amazon / GOG)
+        - Installer / packaging
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: build
+    attributes:
+      label: Build
+      description: "The output of `pitagames --version` (or `pitagames-cli --version`)."
+      placeholder: "pitagames 0.1.0 (or the package version from `pacman -Q pitagames-git`)"
+    validations:
+      required: true
+  - type: dropdown
+    id: install-method
+    attributes:
+      label: How did you install it?
+      options:
+        - "`packaging/PKGBUILD` (`makepkg -si`)"
+        - AUR package
+        - Prebuilt binaries from a dist archive
+        - "`cargo run` from a checkout"
+        - Other / not sure
+    validations:
+      required: true
+  - type: dropdown
+    id: gpu
+    attributes:
+      label: GPU
+      description: Only the RX 9070 and RX 5700 XT paths are validated; anything else ships as "not tested by us".
+      options:
+        - RX 9070 (RDNA 4)
+        - RX 5700 XT (RDNA 1)
+        - Other AMD (RDNA 3 / 2)
+        - NVIDIA
+        - Intel
+        - Other / not sure
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Distro and version, kernel, session type (Wayland/X11), Mesa version, and the Proton build in use.
+      placeholder: "CachyOS 2026.11, 6.18.1-cachyos, Wayland, Mesa 26.2.0, proton-cachyos 11.0-20260506"
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        Paste the relevant command output. All of these are read-only:
+        - `pitagames-cli scan --json`
+        - `pitagames-cli proton`
+        - `pitagames-cli stores`
+        - for a console/pad problem, whether the Controls screen showed the controller-permission line
+        - the terminal output (stderr) if the GUI was started from a shell
+      render: shell
+    validations:
+      required: false
+  - type: textarea
+    id: transcripts
+    attributes:
+      label: Transcripts and screenshots
+      description: |
+        Store/install runs write a raw transcript under
+        `~/.local/share/pitagames/logs/` (`cli-<program>-<command>-<nanos>-<pid>.log`);
+        a supervised launch writes `<store>-<id>-<nanos>.log`. Attach the one for the
+        failing run, plus a screenshot of the GUI if it helps. Note that an auth
+        transcript can contain the pasted store URL/code — skim it before attaching.
+    validations:
+      required: false
+  - type: checkboxes
+    id: secrets
+    attributes:
+      label: Before you submit
+      options:
+        - label: I have not pasted a Steam Web API key, a store token, or an auth URL/code into this report.
+          required: true
+        - label: I am on CachyOS/Arch Linux with native (non-Flatpak) Steam, or I have said otherwise above.
+          required: true
