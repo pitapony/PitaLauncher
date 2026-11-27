@@ -305,6 +305,21 @@ fn rdna4_valve_tier_b_manual_injection() {
 }
 
 #[test]
+fn rdna4_cachyos_tier_a_env_only() {
+    // Tier A: Proton deploys the DLLs, we inject env only. The DLL name comes
+    // from the compat entry (`dbghelp.dll` here); nothing is written to disk.
+    let mut profile = profile();
+    profile.injection = Injection::EnvOnly;
+    let compiled = run(
+        &profile,
+        &gpu(GpuArch::Rdna4),
+        Some(&cyberpunk()),
+        Some(&cachyos("11.0-20260516")),
+    );
+    insta::assert_snapshot!("rdna4_cachyos_tier_a_env_only", render(&compiled));
+}
+
+#[test]
 fn an_unknown_card_compiles_the_empty_default() {
     let profile = profile();
     let compiled = run(&profile, &gpu(GpuArch::Unknown), None, None);
