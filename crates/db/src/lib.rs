@@ -44,6 +44,10 @@ impl Db {
             })?;
         }
 
+        // Whether a database is already here decides if a pre-migration backup
+        // is owed: a first open creates the file and has nothing to lose.
+        let existing = std::fs::metadata(path).is_ok_and(|meta| meta.len() > 0);
+
         let options = SqliteConnectOptions::new()
             .filename(path)
             .create_if_missing(true)
@@ -58,6 +62,12 @@ impl Db {
             .await?;
 
         let db = Self { pool };
+        // A migration can rewrite the schema; when one is pending and this is an
+        // existing database, take a consistent snapshot first so an interrupted
+        // upgrade is never the end of the user's library.
+        if existing {
+            db.backup_before_migration(path).await?;
+        }
         db.migrate().await?;
         Ok(db)
     }
@@ -108,6 +118,120 @@ impl Db {
     /// Escape hatch for components that need SQL the repositories do not cover.
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
+    }
+
+    /// Run SQLite's `PRAGMA integrity_check`, reading every page and index.
+    ///
+    /// The repair path uses this to tell an intact library from a damaged one
+    /// without guessing: SQLite answers `ok` on a healthy database and one row
+    /// per problem otherwise. Read-only — it fixes nothing.
+    pub async fn integrity_check(&self) -> Result<IntegrityReport> {
+        let messages: Vec<String> = sqlx::query_scalar("PRAGMA integrity_check")
+            .fetch_all(&self.pool)
+            .await?;
+        let ok = messages.len() == 1 && messages[0].eq_ignore_ascii_case("ok");
+        Ok(IntegrityReport { ok, messages })
+    }
+
+    /// The highest migration version SQLite has recorded, or `None` when the
+    /// `_sqlx_migrations` table does not exist yet.
+    async fn applied_migration_version(&self) -> Option<i64> {
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&self.pool)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Copy `path` to a timestamped sibling when migrations are pending.
+    ///
+    /// Returns the backup path when one was written and `None` when the schema
+    /// is already current. The copy is `VACUUM INTO`, SQLite's own consistent
+    /// snapshot: safe under WAL and never a torn file, which a plain byte copy
+    /// of a live `-wal` database is not.
+    pub async fn backup_before_migration(&self, path: &Path) -> Result<Option<PathBuf>> {
+        let latest = MIGRATOR.iter().map(|migration| migration.version).max();
+        let Some(latest) = latest else {
+            return Ok(None);
+        };
+        if self.applied_migration_version().await.unwrap_or(0) >= latest {
+            return Ok(None);
+        }
+
+        let name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("pitagames.db");
+        let stamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
+        let file = format!("{name}-pre-migrate-{stamp}.bak");
+        let dest = match path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            Some(dir) => dir.join(file),
+            None => PathBuf::from(file),
+        };
+        let Some(dest_text) = dest.to_str() else {
+            return Err(Error::Data {
+                column: "backup path",
+                message: format!("{} is not valid UTF-8", dest.display()),
+            });
+        };
+
+        sqlx::query("VACUUM INTO ?")
+            .bind(dest_text)
+            .execute(&self.pool)
+            .await?;
+        Ok(Some(dest))
+    }
+
+    /// The newest pre-migration backup beside `path`, if one was ever written.
+    ///
+    /// Newest by the timestamp embedded in the name, not by mtime, so it is the
+    /// file the last migration wrote even if a copy restored the mtime.
+    pub fn latest_backup(path: &Path) -> Option<PathBuf> {
+        let dir = path.parent().filter(|dir| !dir.as_os_str().is_empty())?;
+        let name = path.file_name()?.to_str()?;
+        let prefix = format!("{name}-pre-migrate-");
+        let mut best: Option<(i128, PathBuf)> = None;
+        for entry in std::fs::read_dir(dir).ok()?.flatten() {
+            let filename = entry.file_name();
+            let Some(filename) = filename.to_str() else {
+                continue;
+            };
+            let Some(stamp) = filename
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".bak"))
+                .and_then(|digits| digits.parse::<i128>().ok())
+            else {
+                continue;
+            };
+            if best.as_ref().is_none_or(|(seen, _)| stamp > *seen) {
+                best = Some((stamp, entry.path()));
+            }
+        }
+        best.map(|(_, path)| path)
+    }
+}
+
+/// What [`Db::integrity_check`] found.
+///
+/// `ok` is SQLite's verdict; `messages` keeps its exact rows (one `ok`, or one
+/// line per problem) so a report can quote the database rather than summarise
+/// it away.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct IntegrityReport {
+    /// Whether SQLite reported the database as intact.
+    pub ok: bool,
+    /// The raw `PRAGMA integrity_check` rows.
+    pub messages: Vec<String>,
+}
+
+impl IntegrityReport {
+    /// A one-line verdict for a panel or a CLI row.
+    pub fn summary(&self) -> String {
+        if self.ok {
+            "ok — no page or index damage found".to_string()
+        } else {
+            format!("{} problem(s) reported", self.messages.len())
+        }
     }
 }
 
@@ -1846,5 +1970,88 @@ mod tests {
             matches!(error, Error::Data { column, .. } if column == "launch_history.duration_secs"),
             "{error}"
         );
+    }
+
+    // -- Integrity and the pre-migration backup -----------------------------
+
+    #[tokio::test]
+    async fn integrity_check_reports_a_healthy_database() {
+        let db = Db::open_in_memory().await.unwrap();
+        let report = db.integrity_check().await.unwrap();
+        assert!(report.ok, "{report:?}");
+        assert_eq!(report.messages, ["ok"]);
+        assert!(report.summary().contains("ok"));
+    }
+
+    #[tokio::test]
+    async fn integrity_check_reports_damage() {
+        // A database whose recorded schema no longer parses: SQLite's
+        // `integrity_check` answers with a problem rather than `ok`. Writing the
+        // schema directly is the supported way to build such a fixture.
+        let db = Db::open_in_memory().await.unwrap();
+        sqlx::query("PRAGMA writable_schema = ON")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE sqlite_master SET sql = 'CREATE TABLE games (x' WHERE name = 'games'")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        sqlx::query("PRAGMA schema_version = 9999")
+            .execute(db.pool())
+            .await
+            .unwrap();
+
+        let report = db.integrity_check().await.unwrap();
+        assert!(!report.ok, "{report:?}");
+        assert!(!report.messages.is_empty());
+        assert!(report.summary().contains("problem"));
+    }
+
+    #[tokio::test]
+    async fn a_pending_migration_takes_a_pre_migration_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pitagames.db");
+        {
+            let db = Db::open(&path).await.unwrap();
+            let game = steam_game("620", "Portal 2");
+            db.upsert_game(&game).await.unwrap();
+        }
+        assert!(
+            Db::latest_backup(&path).is_none(),
+            "a first open owes no backup"
+        );
+
+        // Simulate an older install: forget the last migration and drop what it
+        // created, so reopening sees one migration pending.
+        {
+            let db = Db::open(&path).await.unwrap();
+            sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
+                .execute(db.pool())
+                .await
+                .unwrap();
+            sqlx::query("DROP TABLE launch_history")
+                .execute(db.pool())
+                .await
+                .unwrap();
+        }
+
+        let db = Db::open(&path).await.unwrap();
+        let backup = Db::latest_backup(&path).expect("a pending migration leaves a backup");
+        assert!(backup.is_file(), "{backup:?}");
+        // The backup is a real, readable database that carries the game row.
+        let restored = Db::open(&backup).await.unwrap();
+        assert_eq!(restored.games().await.unwrap().len(), 1);
+        // And the migration actually ran on the live database.
+        assert_eq!(db.games().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_up_to_date_database_takes_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pitagames.db");
+        let _ = Db::open(&path).await.unwrap();
+        let _ = Db::open(&path).await.unwrap();
+        assert!(Db::latest_backup(&path).is_none());
     }
 }

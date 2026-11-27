@@ -1277,6 +1277,10 @@ fn App() -> Element {
                         style: "display:flex;align-items:center;gap:6px;margin-left:12px;",
                         button {
                             title: "Minimize",
+                            // Icon-only: the glyph is the whole label, so a
+                            // screen reader needs the name spelled out. A
+                            // custom attribute is spelled as a string literal.
+                            "aria-label": t("action.minimize"),
                             onmousedown: move |event| event.stop_propagation(),
                             onclick: move |_| dioxus::desktop::window().window.set_minimized(true),
                             style: shell::window_control_style(),
@@ -1284,6 +1288,7 @@ fn App() -> Element {
                         }
                         button {
                             title: "Close",
+                            "aria-label": t("action.close"),
                             onmousedown: move |event| event.stop_propagation(),
                             onclick: move |_| dioxus::desktop::window().close(),
                             style: shell::window_control_style(),
@@ -1908,8 +1913,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
 
                                 let play_db = db_handle.clone();
                                 let play_game = entry.game.clone();
-                                let install_game = game_id.clone();
-                                let install_title = title.clone();
+                                let install_game = entry.game.clone();
                                 let card_key = format!("{}-{app_id}", entry.store().as_str());
                                 // The Steam install path needs the downloads
                                 // channel; the CLI stores need the install queue's.
@@ -2020,7 +2024,6 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                         event.stop_propagation();
                                                         launch_start::start_install(
                                                             &install_game,
-                                                            &install_title,
                                                             installs,
                                                             install_events,
                                                             events,

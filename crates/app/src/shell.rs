@@ -484,6 +484,11 @@ pub const HIT_FLOOR: &str = "min-height:var(--hit-min);min-width:var(--hit-min);
 /// The desktop window has no decoration, so these are the only way to minimize
 /// or close it. They carry the shell's hit floor, so a pointer cannot miss the
 /// one control that stops the window being trapped.
+///
+/// They are **icon-only**: the glyph (`–`, `✕`) is the entire visible label, so
+/// each control also carries an `aria-label` a screen reader can announce.
+/// `pitagames_core::a11y::every_icon_only_control_carries_a_label` fails if a
+/// glyph-only button loses it.
 pub fn window_control_style() -> String {
     format!(
         "display:inline-flex;align-items:center;justify-content:center;padding:0 12px;border:1px solid #2c2c38;border-radius:8px;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;{HIT_FLOOR}"

@@ -49,6 +49,7 @@
 "action.details" = "Details"
 "action.cancel" = "Cancel"
 "action.close" = "Close"
+"action.minimize" = "Minimize"
 "action.retry" = "Retry"
 "action.remove" = "Remove"
 "action.save" = "Save"

@@ -256,9 +256,8 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         let open_id = entry.game.id.clone();
         let play_game = entry.game.clone();
         let play_time = entry.playtime();
-        let install_id = entry.game.id.clone();
+        let install_game = entry.game.clone();
         let detail_id = entry.game.id.clone();
-        let install_title = title.clone();
         let install_libraries = libraries.clone();
         let install_db = db_handle.clone();
         let is_play = matches!(primary, Primary::Play);
@@ -346,8 +345,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                 onclick: move |event| {
                                     event.stop_propagation();
                                     crate::launch_start::start_install(
-                                        &install_id,
-                                        &install_title,
+                                        &install_game,
                                         installs,
                                         install_events,
                                         events,
@@ -681,8 +679,7 @@ fn perform_home_action(
                     db.read().clone(),
                 ),
                 Primary::Install => crate::launch_start::start_install(
-                    &entry.game.id,
-                    entry.title(),
+                    &entry.game,
                     installs,
                     install_events,
                     events,

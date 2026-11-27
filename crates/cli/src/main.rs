@@ -44,6 +44,7 @@ use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoo
 use pitagames_platform::proton_update::{self, ProtonPin, Registry};
 use pitagames_platform::support::{self, BundleRequest};
 use pitagames_platform::verify::{self, Check as VerifyCheck, MarkerData};
+use pitagames_repair::{self, RepairRequest, SteamRepair};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::amazon::{self, Amazon};
 use pitagames_stores::auth::{AuthRun, AuthStep};
@@ -107,6 +108,7 @@ fn run() -> Result<()> {
         "disk" => disk(&args.collect::<Vec<_>>()),
         "perf" => perf(&args.collect::<Vec<_>>()),
         "mods" => mods(&args.collect::<Vec<_>>()),
+        "repair" => repair(&args.collect::<Vec<_>>()),
         "history" => history(&args.collect::<Vec<_>>()),
         "launch" => launch(&args.collect::<Vec<_>>()),
         "stores" => stores(&args.collect::<Vec<_>>()),
@@ -8930,11 +8932,318 @@ fn human_bytes(bytes: u64) -> String {
     disk::human_bytes(bytes)
 }
 
+// -- repair -----------------------------------------------------------------
+
+/// Repair the installation, or export the local settings.
+///
+/// `repair` re-checks every mod manifest under the game roots, restores Steam
+/// config from the journals the launcher wrote, and opens the database (taking a
+/// pre-migration backup first) to run SQLite's `PRAGMA integrity_check`.
+/// `repair export` renders the no-endpoint local settings export instead.
+fn repair(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("export") => repair_export(&args[1..]),
+        _ => repair_run(args),
+    }
+}
+
+fn repair_run(args: &[String]) -> Result<()> {
+    let mut game_dirs: Vec<PathBuf> = Vec::new();
+    let mut steam_backup: Option<PathBuf> = None;
+    let mut steam_root: Option<PathBuf> = None;
+    let mut db_path: Option<PathBuf> = None;
+    let mut force = false;
+    let mut apply = false;
+    let mut json = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--game-dir" => {
+                index += 1;
+                game_dirs.push(PathBuf::from(
+                    args.get(index)
+                        .with_context(|| "--game-dir requires a path")?,
+                ));
+            }
+            "--steam-backup" => {
+                index += 1;
+                steam_backup = Some(PathBuf::from(
+                    args.get(index)
+                        .with_context(|| "--steam-backup requires a path")?,
+                ));
+            }
+            "--steam-root" => {
+                index += 1;
+                steam_root = Some(PathBuf::from(
+                    args.get(index)
+                        .with_context(|| "--steam-root requires a path")?,
+                ));
+            }
+            "--db" => {
+                index += 1;
+                db_path = Some(PathBuf::from(
+                    args.get(index).with_context(|| "--db requires a path")?,
+                ));
+            }
+            "--force" => force = true,
+            "--apply" => apply = true,
+            "--json" => json = true,
+            "-h" | "--help" => {
+                println!("{}", repair_usage());
+                return Ok(());
+            }
+            other if other.starts_with("--game-dir=") => {
+                game_dirs.push(PathBuf::from(&other["--game-dir=".len()..]));
+            }
+            other if other.starts_with("--steam-backup=") => {
+                steam_backup = Some(PathBuf::from(&other["--steam-backup=".len()..]));
+            }
+            other if other.starts_with("--steam-root=") => {
+                steam_root = Some(PathBuf::from(&other["--steam-root=".len()..]));
+            }
+            other if other.starts_with("--db=") => {
+                db_path = Some(PathBuf::from(&other["--db=".len()..]));
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `repair`\n\n{}",
+                repair_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    // Start from this machine's defaults, then let the flags override what they
+    // name — the same request a Settings screen builds with `for_this_machine`.
+    let mut request = RepairRequest::for_this_machine(apply);
+    if !game_dirs.is_empty() {
+        request.mod_roots = game_dirs;
+    }
+    if let Some(dir) = steam_backup {
+        request.steam_backup = Some(dir);
+    }
+    if let Some(root) = &steam_root {
+        request.steam_state = steam_config::detect_steam_process(root);
+    }
+    if force {
+        request.allow_running = true;
+    }
+    if let Some(path) = db_path {
+        request.db_path = Some(path);
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("could not start the async runtime")?;
+    let report = runtime
+        .block_on(pitagames_repair::run(&request))
+        .context("repair failed")?;
+
+    if json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        for line in repair_lines(&report) {
+            println!("{line}");
+        }
+    }
+
+    let tampered = report.tampered_mods().count();
+    if tampered > 0 {
+        bail!("{tampered} mod tree(s) no longer match their manifest; re-apply them");
+    }
+    if report.db.as_ref().is_some_and(|db| !db.integrity.ok) {
+        bail!("the database failed its integrity check; see the report above");
+    }
+    Ok(())
+}
+
+/// The human-readable repair report.
+fn repair_lines(report: &pitagames_repair::RepairReport) -> Vec<String> {
+    let mut lines = Vec::new();
+
+    lines.push("Mod trees".to_string());
+    if report.mods.is_empty() {
+        lines.push("  no mod manifests found".to_string());
+    }
+    for finding in &report.mods {
+        let name = finding.mod_name.as_deref().unwrap_or("(unreadable)");
+        match &finding.state {
+            pitagames_repair::ModState::Clean => {
+                lines.push(format!("  {}: {name} — OK", finding.dir.display()));
+            }
+            pitagames_repair::ModState::Tampered { issues } => {
+                lines.push(format!(
+                    "  {}: {name} — TAMPERED ({} issue(s)); re-apply it",
+                    finding.dir.display(),
+                    issues.len()
+                ));
+                for issue in issues {
+                    lines.push(format!("    -> {issue}"));
+                }
+            }
+            pitagames_repair::ModState::Unreadable { message } => {
+                lines.push(format!("  {}: {message}", finding.dir.display()));
+            }
+        }
+    }
+
+    lines.push("Steam config".to_string());
+    match &report.steam {
+        SteamRepair::NotConfigured => lines.push("  no backup directory configured".to_string()),
+        SteamRepair::Pending(rows) if rows.is_empty() => {
+            lines.push("  no restore points; nothing to put back".to_string());
+        }
+        SteamRepair::Pending(rows) => {
+            lines.push(format!(
+                "  {} restore point(s) available (--apply)",
+                rows.len()
+            ));
+            for row in rows {
+                lines.push(format!(
+                    "  {} for app {} ({})",
+                    row.kind.label(),
+                    row.app_id,
+                    row.config.display()
+                ));
+            }
+        }
+        SteamRepair::Restored(rows) => {
+            lines.push(format!("  {} restore point(s) applied", rows.len()));
+            for row in rows {
+                let how = if row.exact {
+                    "byte-for-byte"
+                } else {
+                    "merged around Steam's changes"
+                };
+                lines.push(format!(
+                    "  {} for app {}: {how}",
+                    row.kind.label(),
+                    row.app_id
+                ));
+            }
+        }
+    }
+
+    lines.push("Database".to_string());
+    match &report.db {
+        None => lines.push("  not checked (no database)".to_string()),
+        Some(db) => {
+            lines.push(format!(
+                "  {}: integrity {}",
+                db.path.display(),
+                db.integrity.summary()
+            ));
+            match &db.backup {
+                Some(path) => lines.push(format!("  pre-migration backup: {}", path.display())),
+                None => lines.push("  no pre-migration backup needed".to_string()),
+            }
+        }
+    }
+
+    lines
+}
+
+/// The no-endpoint local settings export: GPU, Proton and one game's env.
+fn repair_export(args: &[String]) -> Result<()> {
+    let mut game: Option<GameId> = None;
+    let mut dir: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut json = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--dir" => {
+                index += 1;
+                dir = Some(PathBuf::from(
+                    args.get(index).with_context(|| "--dir requires a path")?,
+                ));
+            }
+            "--out" => {
+                index += 1;
+                out = Some(PathBuf::from(
+                    args.get(index).with_context(|| "--out requires a path")?,
+                ));
+            }
+            "--json" => json = true,
+            "-h" | "--help" => {
+                println!("{}", repair_usage());
+                return Ok(());
+            }
+            other if other.starts_with("--dir=") => {
+                dir = Some(PathBuf::from(&other["--dir=".len()..]));
+            }
+            other if other.starts_with("--out=") => {
+                out = Some(PathBuf::from(&other["--out=".len()..]));
+            }
+            other if !other.starts_with('-') => {
+                let store = Store::from_str(other).with_context(|| {
+                    format!("`{other}` is not a store (steam, epic, amazon, gog, local)")
+                })?;
+                index += 1;
+                let id = args
+                    .get(index)
+                    .with_context(|| format!("expected `<store> <id>`\n\n{}", repair_usage()))?;
+                if game.replace(GameId::new(store, id.clone())).is_some() {
+                    bail!("expected one `<store> <id>`\n\n{}", repair_usage());
+                }
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `repair export`\n\n{}",
+                repair_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let export = pitagames_repair::export::for_machine(game.as_ref(), dir.as_deref());
+
+    if let Some(path) = out {
+        fs::write(&path, export.text())
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!("Wrote the settings export to {}", path.display());
+    } else if json {
+        let payload = serde_json::json!({ "text": export.text() });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        print!("{}", export.text());
+    }
+    Ok(())
+}
+
+fn repair_usage() -> String {
+    "USAGE:\n    pitagames-cli repair [--game-dir <dir>]... [--steam-backup <dir>] [--steam-root <dir>]\n\
+     \x20                    [--db <path>] [--force] [--apply] [--json]\n\
+     \x20   pitagames-cli repair export [<store> <id>] [--dir <profiles>] [--out <file>] [--json]\n\n\
+     ACTIONS (default: check):\n    \
+     --apply                Write the Steam config restore points (default: list them)\n\n\
+     OPTIONS:\n    \
+     --game-dir <dir>       Scan this root for mod manifests (repeatable; default: games/)\n    \
+     --steam-backup <dir>   Steam config journal/backup directory (default: the XDG one)\n    \
+     --steam-root <dir>     Detect a running Steam client under this root (refuses to write)\n    \
+     --db <path>            Database to check (default: the XDG one)\n    \
+     --force                Restore Steam config even while Steam is running\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     One repair: it re-hashes every mod manifest and reports a tampered tree (a\n\
+     re-apply restores and reinstalls it), lists or applies the Steam launch-option\n\
+     and compatibility-tool restores from the journals the launcher wrote, and\n\
+     opens the database — which is copied to a pre-migration backup when a\n\
+     migration is pending — to run `PRAGMA integrity_check`.\n\n\
+     `repair export` renders the local settings export instead: the detected GPU,\n\
+     the discovered Proton builds and one game's resolved environment. It is local\n\
+     only — no endpoint, no account data — and is printed, or saved with --out."
+        .to_string()
+}
+
 fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    nr         Resolve the neural-rendering backend, its pin and cost preset\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    eac        Report EAC Linux v2 readiness and the game's verdict\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    perf       Check a performance measurement against the plan's budgets\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    session    Print, install or remove the console session entry + unit\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n         Run `pitagames-cli <command> --help` for command options."
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    nr         Resolve the neural-rendering backend, its pin and cost preset\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    eac        Report EAC Linux v2 readiness and the game's verdict\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    perf       Check a performance measurement against the plan's budgets\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    repair     Re-check mod trees, restore Steam config and check the database\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    session    Print, install or remove the console session entry + unit\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n         Run `pitagames-cli <command> --help` for command options."
     )
 }
 

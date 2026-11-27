@@ -7,6 +7,7 @@
 //! desktop-integration files the launcher owns: the generated
 //! [`desktop`] entry and the [`activation`] socket a second launch talks to.
 
+pub mod a11y;
 #[cfg(unix)]
 pub mod activation;
 pub mod design;
@@ -19,6 +20,7 @@ pub mod paths;
 pub mod perf;
 pub mod profile;
 pub mod profile_file;
+pub mod release;
 pub mod session;
 pub mod store;
 pub mod ui;
@@ -50,6 +52,9 @@ pub use profile_file::{
     ProfileFileError, SHIM_PROFILE_SCHEMA, ShimProfile, ShimProton, ShimProtonInstall,
     load_shim_profile, read_shim_profile, remove_shim_profile, save_shim_profile,
     shim_profile_path,
+};
+pub use release::{
+    DEV_PACKAGE, INSTALL_PATHS, PACKAGE, SHA256_PLACEHOLDER, TAG_PREFIX, tag as release_tag,
 };
 pub use session::{
     CONSOLE_FLAG, GAMESCOPE_PROGRAM, LAUNCHER_PROGRAM, SESSION_ENV, SESSION_FLAG, SessionEntry,

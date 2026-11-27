@@ -324,6 +324,31 @@ mod tests {
     }
 
     #[test]
+    fn a_store_flagged_cli_row_offers_update_on_the_console_page() {
+        // The console Updates chip keeps the stored-flagged rows; opening one
+        // shows an Update badge and its one press is Update, both derived from
+        // the same fact the queue plans an update from.
+        use pitagames_stores::status::UPDATE_TAG;
+
+        let mut game = Game::new(GameId::new(Store::Epic, "gizmo"), "Gizmo");
+        game.installed = true;
+        game.tags = vec![UPDATE_TAG.to_string()];
+        let entry = GameEntry {
+            game,
+            phase: InstallPhase::Installed,
+            metadata: None,
+            owned: false,
+        };
+
+        let badges = badges(&entry, AntiCheat::Unknown, None);
+        assert_eq!(badges[1].label, "Update");
+        assert_eq!(badges[1].tone, BadgeTone::Warning);
+
+        assert_eq!(primary_action(&entry), Primary::Install);
+        assert_eq!(primary_label(&entry, Primary::Install), "Update");
+    }
+
+    #[test]
     fn an_install_primary_needs_a_store_that_can_install() {
         // A `Local`/imported row has no installer (`stores::installer::plan`
         // rejects it), so offering Install would only produce an error. The

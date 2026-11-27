@@ -3,10 +3,12 @@
 Status: `stores::installer`'s update path, `platform::proton_update` and the
 `pitagames-cli stores update` / `pitagames-cli proton update` diagnostics are
 implemented and unit-tested against fake CLIs and fixture archives on macOS.
-**Not driven against a real store CLI or a real GE-Proton download** — no target
-machine has been reachable, and the live HTTP `Fetcher` is the shared open item
-from ticket #12. The GUI's Update button wiring is deliberately **not** in this
-slice (see *Known limits*).
+The GUI offers the same update: a CLI row the store flags as needing one shows
+**Update** on its grid card, the home hero and the game page, and enqueues
+`installer::update_plan(&game)` on the same queue (see *The GUI offers the
+update too*). **Not driven against a real store CLI or a real GE-Proton
+download** — no target machine has been reachable, and the live HTTP `Fetcher`
+is the shared open item from ticket #12.
 
 ## Why this slice exists
 
@@ -88,6 +90,37 @@ and the verdict cannot drift from an install. `--dry-run` prints the two planned
 commands (install, verify) with the shared `render_shell_command` and runs
 nothing.
 
+### The GUI offers the update too
+
+The window does not have a second button or a second worker. A CLI row that is
+installed **and** carries `stores::status::UPDATE_TAG` reads as an update through
+the one install fact:
+
+| Item | Role |
+|---|---|
+| `library::GameEntry::update_available` | the row's update fact: Steam reads its phase, a CLI row its `UPDATE_TAG` |
+| `library::GameEntry::install_state` / `install_status` / `install_action` | the badge word ("Update") and the button verb ("Update"), both from that one fact |
+| `library::GameEntry::offers_install` / `can_install` | the button gate: a flagged installed CLI row offers it; a plain install does not |
+| `library::install_plan(&Game)` | a fresh `installer::plan`, or `installer::update_plan` for an installed row |
+| `launch_start::start_install(&Game, …)` | one path for the grid card, the home hero and the game page |
+| `library::Library::apply_install` | clears the flag when the verified files have landed |
+
+The grid card, the home hero and the console game page all derive their button
+from `library::GameEntry`, so the **Updates** chip's filtered grid offers the
+same Update as the row's own card. `start_install` reads the whole `Game`, not a
+title: an installed row goes to `installer::update_plan`, which fills the
+directory the game already occupies (and falls back to the store's default only
+when the row does not know it), so an update can never move to a fresh directory.
+`InstallPlan::job()` marks the queue entry `JobKind::Update` and the same
+`pump_installs` worker runs the install **then** the backend's verify — the
+`Installs` board, the Disk pre-check and the Cancel button are unchanged.
+
+It stays honest where a store reports nothing: Amazon and GOG never set
+`UPDATE_TAG`, so an installed row there offers nothing and the card reads
+"installed", not a made-up update. And an update that finishes clears the flag
+in memory (`apply_install`), so the card flips off "Update" instead of offering
+to update again before the next sync.
+
 ### Steam updates stay Steam's
 
 A Steam row's update is still `steam://install/<appid>` plus the manifest
@@ -168,6 +201,14 @@ cargo clippy -p pitagames-stores -p pitagames-mods -p pitagames-platform -p pita
 cargo fmt --all -- --check
 ```
 
+The app half (the GUI wiring) is built and tested in the `archlinux:latest`
+container, because `crates/app` cannot be built on the macOS host:
+
+```bash
+CARGO_TARGET_DIR=/target cargo test -p pitagames
+CARGO_TARGET_DIR=/target cargo clippy -p pitagames --all-targets -- -D warnings
+```
+
 - **`stores::installer` (7 update tests, stores 272).** An update plan reuses the
   directory the game is installed in (and the queue entry is an update); it falls
   back to the store's directory when the row does not know one; it refuses a
@@ -197,6 +238,16 @@ cargo fmt --all -- --check
   parser rejects a stray positional, a second `--store` and `--db` on `update`;
   `proton update` lists (plain and JSON) and applies a pinned fixture, refuses a
   mismatched pin, and routes through the `proton` dispatcher.
+- **`pitagames` (6 new, app 317).** `library` (5): a store-flagged installed CLI
+  row reports `update_available`, offers the install action, reads "Update" as
+  its status and action, and `install_plan` returns a `JobKind::Update` plan at
+  the game's own directory; a plain GOG install offers nothing and reads
+  "installed"; a missing CLI game plans a fresh `JobKind::Install`; and
+  `apply_install` clears the stale `UPDATE_TAG` so the card flips off "Update".
+  `game_page` (1): the console page for a flagged CLI row shows an "Update"
+  warning badge and its one press is "Update". The whole app suite passes (317);
+  the wiring reused the shipped `Installs` board and `pump_installs` worker, so
+  no install-queue test changed.
 
 Manually (macOS), with a fake `legendary` on `PATH`:
 `pitagames-cli stores update --store epic Gizmo --title Gizmo --dir <tmp>` ran
@@ -207,21 +258,32 @@ the fake's `install` then `verify` and printed `Updated Gizmo (epic Gizmo)` with
 contained symlink) unpacked it and `pitagames-cli proton --root <dir>` listed it
 as a GE-Proton build.
 
+In the GUI (Xvfb at 1280×800, `archlinux:latest`), with a seeded Epic row whose
+store flag is set (`pitagames-cli stores sync` against a fake `legendary` that
+reports `needs_verification: true`): the grid card read **UPDATE AVAILABLE** and
+carried both **Play** and **Update**; clicking **Update** switched to the
+Downloads board with a store-install row for `Gizmo` and ran the fake's `install`
+**then** `verify` (the two transcripts `cli-legendary-install-*.log` and
+`cli-legendary-verify-*.log`), because the row's plan is `JobKind::Update` — the
+same board, worker and verdict as a fresh install. The fake's empty verify is
+refused, so the row read `failed` with the update-verify message and a **Retry**,
+exactly as a failed install does.
+
 ## Known limits
 
 - **Not driven against a real store CLI or a real GE-Proton download.** The
   store argv/verdicts come from the shipped fixtures; the archive shape and the
   shipped digest come from GE-Proton's own release API (the x86_64 asset's
   published SHA-256), not a completed download.
-- **The GUI does not offer the update yet.** `platform::proton_update`'s `apply`,
-  `stores::queue`'s `JobKind::Update` and the CLI paths all exist, but the
-  app-side wiring is deliberately out of this slice (the app build is serialized
-  and cannot run concurrently). What remains is small and named: a CLI row that
-  is installed **and** carries `stores::status::UPDATE_TAG` should offer
-  **Update**, and its action should enqueue `installer::update_plan(&game).job()`
-  instead of `installer::plan(id, title).job()` — the same `Installs` board and
-  `pump_installs` worker then run it (`InstallRun` already carries the verify).
-  Nothing in `stores` changes to wire it.
+- **The GUI offers the update but is otherwise untested.** A CLI row that is
+  installed **and** carries `stores::UPDATE_TAG` shows **Update** on its grid
+  card, the home hero and the console game page, and its action enqueues
+  `library::install_plan` → `installer::update_plan(&game).job()` on the same
+  `Installs` board and `pump_installs` worker (`InstallRun` already carries the
+  verify) — nothing in `stores` changed. What is *not* covered: no Xvfb run has
+  driven an update end to end, and a fresh install started before a store sync
+  still shows no Update until the next sync sets the tag (the row's `UPDATE_TAG`
+  is the store's answer, not something the launcher infers).
 - **The live HTTP fetch is the shared open item.** `proton update --apply` reads
   a fixture, exactly like `mods release`; a real `Fetcher` is ticket #12's
   production plug-in, not this slice's.

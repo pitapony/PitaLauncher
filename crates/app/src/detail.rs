@@ -494,8 +494,7 @@ pub fn Detail(props: DetailProps) -> Element {
     // owns `play_entry`/`play_db`, so the hero needs its own copies.
     let hero_play_entry = entry.clone();
     let hero_play_db = db.clone();
-    let hero_install_id = game_id.clone();
-    let hero_install_title = title.clone();
+    let hero_install_game = entry.game.clone();
     let hero_libraries = props.libraries.clone();
     // The Graphics screen's own captures (the desktop button and the pad's
     // `Context` action both open it).
@@ -593,8 +592,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                 );
                             }
                             Primary::Install => crate::launch_start::start_install(
-                                &entry.game.id,
-                                entry.title(),
+                                &entry.game,
                                 action_installs,
                                 action_install_events,
                                 action_events,
@@ -735,8 +733,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                             disabled: !install_ready,
                                             onclick: move |_| {
                                                 crate::launch_start::start_install(
-                                                    &hero_install_id,
-                                                    &hero_install_title,
+                                                    &hero_install_game,
                                                     action_installs,
                                                     action_install_events,
                                                     action_events,

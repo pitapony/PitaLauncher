@@ -4375,6 +4375,7 @@ dependencies = [
  "pitagames-metadata",
  "pitagames-mods",
  "pitagames-platform",
+ "pitagames-repair",
  "pitagames-secrets",
  "pitagames-stores",
  "serde_json",
@@ -4404,6 +4405,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "pitagames-core",
+ "serde",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -4475,6 +4477,22 @@ dependencies = [
  "toml",
  "zbus",
  "zip",
+]
+
+[[package]]
+name = "pitagames-repair"
+version = "0.1.0"
+dependencies = [
+ "pitagames-core",
+ "pitagames-db",
+ "pitagames-mods",
+ "pitagames-platform",
+ "pitagames-stores",
+ "serde",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "walkdir",
 ]
 
 [[package]]
