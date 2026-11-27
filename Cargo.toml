@@ -72,6 +72,10 @@ sha2 = "0.10"
 thiserror = "2.0"
 time = { version = "0.3", features = ["serde", "serde-well-known"] }
 tokio = { version = "1", features = ["fs", "macros", "net", "rt-multi-thread"] }
+# `insta` is the pure-model snapshot gate: the layout snapshots at 1080p and 4K
+# render a framework-free model, so they run headlessly on macOS and in the
+# container without a webview.
+insta = "1"
 
 dioxus = { version = "0.7", features = ["desktop"] }
 futures-channel = "0.3"

@@ -231,6 +231,7 @@ CI runs the same commands in `.github/workflows/ci.yml`.
 - [`docs/m2.5-handoff.md`](docs/m2.5-handoff.md) — the launch hand-off: hide the window while a game runs and come back when it ends.
 - [`docs/m2.5-overlay.md`](docs/m2.5-overlay.md) — the console overlay: the `Menu`/`Start` system menu.
 - [`docs/m2.5-safe-mode.md`](docs/m2.5-safe-mode.md) — safe mode and the window watchdog.
+- [`docs/m2.5-testing.md`](docs/m2.5-testing.md) — the focus-graph property tests, replay fixtures and 1080p/4K layout snapshots.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 
 ## License

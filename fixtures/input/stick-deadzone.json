@@ -1,0 +1,22 @@
+{
+  "device": {
+    "id": 0,
+    "name": "Replay Pad",
+    "guid": "replay-pad",
+    "is_gamepad": true
+  },
+  "events": [
+    { "kind": "axis", "axis": "left_stick_x", "value": 0.2 },
+    { "kind": "axis", "axis": "left_stick_y", "value": 0.2 },
+    { "kind": "axis", "axis": "left_stick_x", "value": 0.3 },
+    { "kind": "axis", "axis": "left_stick_y", "value": -0.9 },
+    { "kind": "axis", "axis": "left_stick_y", "value": 0.0 },
+    { "kind": "axis", "axis": "left_stick_x", "value": 0.0 }
+  ],
+  "expected": [
+    { "action": "navigate_right", "kind": "pressed" },
+    { "action": "navigate_right", "kind": "released" },
+    { "action": "navigate_up", "kind": "pressed" },
+    { "action": "navigate_up", "kind": "released" }
+  ]
+}

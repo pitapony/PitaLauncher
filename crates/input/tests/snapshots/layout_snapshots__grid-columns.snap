@@ -1,0 +1,6 @@
+---
+source: crates/input/tests/layout_snapshots.rs
+expression: out
+---
+1080p (1920px): console 5 columns, desktop 7 columns
+4K (3840px): console 11 columns, desktop 16 columns

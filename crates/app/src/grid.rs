@@ -17,19 +17,13 @@
 
 use pitagames_core::ui::Shell;
 
-/// Smallest tile width the windowed (desktop) grid will use, in CSS pixels.
-pub const TILE_MIN_WIDTH: f64 = 220.0;
-/// Smallest tile width the console (10-foot) grid will use, in CSS pixels.
-///
-/// Larger than [`TILE_MIN_WIDTH`] so a couch user gets fewer, bigger tiles at
-/// 1080p rather than the desktop's dense grid (plan §7, *Console mode*).
-pub const TILE_MIN_WIDTH_CONSOLE: f64 = 320.0;
-/// Horizontal gap between tiles.
-pub const COLUMN_GAP: f64 = 16.0;
+/// The grid's shared layout numbers live in `pitagames-input` so the pure
+/// layout model — the column fit and the ragged focus graph — can be tested and
+/// snapshotted headlessly on macOS. Re-exported here so `crate::grid::…` keeps
+/// reading the same names.
+pub use pitagames_input::{COLUMN_GAP, H_PADDING, TILE_MIN_WIDTH, TILE_MIN_WIDTH_CONSOLE};
 /// Vertical gap between rows.
 pub const ROW_GAP: f64 = 16.0;
-/// Horizontal padding inside the scroll area.
-pub const H_PADDING: f64 = 32.0;
 /// Height / width of the capsule art (Steam's 231×87 header art).
 pub const ART_RATIO: f64 = 87.0 / 231.0;
 /// Everything below the art on a desktop card: title, status, meta line,
@@ -91,8 +85,7 @@ impl GridGeometry {
     /// (before the resize observer reports) still shows something.
     pub fn with_floor(viewport_width: f64, min_tile_width: f64, chrome: f64) -> Self {
         let available = (viewport_width - 2.0 * H_PADDING).max(min_tile_width);
-        let columns =
-            (((available + COLUMN_GAP) / (min_tile_width + COLUMN_GAP)).floor() as usize).max(1);
+        let columns = pitagames_input::fit_columns(available, min_tile_width, COLUMN_GAP);
         let tile_width = (available - (columns as f64 - 1.0) * COLUMN_GAP) / columns as f64;
         let row_height = tile_width * ART_RATIO + chrome + ROW_GAP;
         Self {
