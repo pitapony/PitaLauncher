@@ -4474,6 +4474,7 @@ dependencies = [
  "thiserror 2.0.21",
  "toml",
  "zbus",
+ "zip",
 ]
 
 [[package]]
@@ -4501,6 +4502,7 @@ dependencies = [
  "libc",
  "notify",
  "pitagames-core",
+ "pitagames-mods",
  "portable-pty",
  "regex",
  "rusqlite",

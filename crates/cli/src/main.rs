@@ -42,6 +42,8 @@ use pitagames_platform::nr::{self, BackendRegistry, NrRequest, Resolution};
 use pitagames_platform::prefix::{self, Prefix};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_platform::proton_update::{self, ProtonPin, Registry};
+use pitagames_platform::support::{self, BundleRequest};
+use pitagames_platform::verify::{self, Check as VerifyCheck, MarkerData};
 use pitagames_secrets::{SteamApiKey, SteamKeyStore};
 use pitagames_stores::amazon::{self, Amazon};
 use pitagames_stores::auth::{AuthRun, AuthStep};
@@ -94,6 +96,7 @@ fn run() -> Result<()> {
         "gpu" => gpu(&args.collect::<Vec<_>>()),
         "capability" => capability(&args.collect::<Vec<_>>()),
         "nr" => nr(&args.collect::<Vec<_>>()),
+        "support" => support(&args.collect::<Vec<_>>()),
         "compat" => compat(&args.collect::<Vec<_>>()),
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
         "eac" => eac(&args.collect::<Vec<_>>()),
@@ -1601,6 +1604,261 @@ fn nr_usage() -> String {
         .to_string()
 }
 
+/// The M3.5 verification panel and support bundle diagnostics.
+fn support(args: &[String]) -> Result<()> {
+    let Some(sub) = args.first() else {
+        bail!(
+            "support needs a subcommand (verify or bundle)\n\n{}",
+            support_usage()
+        );
+    };
+    match sub.as_str() {
+        "verify" => support_verify(&args[1..]),
+        "bundle" => support_bundle(&args[1..]),
+        "-h" | "--help" | "help" => {
+            println!("{}", support_usage());
+            Ok(())
+        }
+        other => bail!(
+            "unknown support subcommand `{other}` (verify or bundle)\n\n{}",
+            support_usage()
+        ),
+    }
+}
+
+/// `support verify`: read engagement from a mod's own log.
+fn support_verify(args: &[String]) -> Result<()> {
+    let mut log_dir: Option<PathBuf> = None;
+    let mut checks: Vec<VerifyCheck> = Vec::new();
+    let mut json = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => json = true,
+            "--log-dir" | "--check" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                if arg == "--log-dir" {
+                    log_dir = Some(PathBuf::from(value));
+                } else {
+                    checks.extend(parse_check_list(value)?);
+                }
+            }
+            "-h" | "--help" => {
+                println!("{}", support_usage());
+                return Ok(());
+            }
+            _ if arg.starts_with("--log-dir=") => {
+                log_dir = Some(PathBuf::from(&arg["--log-dir=".len()..]));
+            }
+            _ if arg.starts_with("--check=") => {
+                checks.extend(parse_check_list(&arg["--check=".len()..])?);
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `support verify`\n\n{}",
+                support_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let dir = log_dir.context("--log-dir is required")?;
+    if checks.is_empty() {
+        checks = VerifyCheck::ALL.to_vec();
+    }
+    let data = MarkerData::shipped();
+    let rows = verify::panel(&data, &checks, &dir);
+
+    if json {
+        let payload = serde_json::json!({ "log_dir": dir, "rows": rows });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else if rows.is_empty() {
+        println!("No requested verification subject has marker data.");
+    } else {
+        for row in &rows {
+            println!(
+                "{} ({}): {}",
+                row.check.label(),
+                row.log,
+                row.engagement.label()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// `support bundle`: write the opt-in, allowlisted support zip.
+fn support_bundle(args: &[String]) -> Result<()> {
+    let mut game_dir: Option<PathBuf> = None;
+    let mut proton_log: Option<PathBuf> = None;
+    let mut out: Option<PathBuf> = None;
+    let mut root: Option<PathBuf> = None;
+    let mut vulkaninfo: Option<PathBuf> = None;
+    let mut proton_build: Option<PathBuf> = None;
+    let mut json = false;
+
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => json = true,
+            "--game-dir" | "--proton-log" | "--out" | "--root" | "--vulkaninfo" | "--proton" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                set_bundle_arg(
+                    &mut game_dir,
+                    &mut proton_log,
+                    &mut out,
+                    &mut root,
+                    &mut vulkaninfo,
+                    &mut proton_build,
+                    arg,
+                    value,
+                );
+            }
+            "-h" | "--help" => {
+                println!("{}", support_usage());
+                return Ok(());
+            }
+            _ if arg.starts_with("--") && arg.contains('=') => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                set_bundle_arg(
+                    &mut game_dir,
+                    &mut proton_log,
+                    &mut out,
+                    &mut root,
+                    &mut vulkaninfo,
+                    &mut proton_build,
+                    flag,
+                    value,
+                );
+            }
+            other => bail!(
+                "unexpected argument `{other}` for `support bundle`\n\n{}",
+                support_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    let mut probe = match &root {
+        Some(root) => GpuProbe::at(root),
+        None => GpuProbe::host(),
+    };
+    if let Some(file) = &vulkaninfo {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        probe = probe.with_vulkaninfo(text);
+    }
+    let gpu = gpu::detect(&probe);
+
+    let proton = match &proton_build {
+        Some(dir) => Some(
+            ProtonInstall::from_dir(dir, ProtonSource::Explicit)
+                .with_context(|| format!("{} is not a Proton build", dir.display()))?,
+        ),
+        None if root.is_some() => None,
+        None => proton::discover().resolve(&ProtonRef::Auto).ok().flatten(),
+    };
+
+    let versions = support::versions(Some(&gpu), proton.as_ref());
+    let mut request = BundleRequest::new(versions);
+    if let Some(dir) = &game_dir {
+        request = request.with_game_dir(dir);
+    }
+    if let Some(log) = &proton_log {
+        request = request.with_proton_log(log);
+    }
+    let bundle = support::collect(&request);
+
+    let dest = out.unwrap_or_else(|| PathBuf::from(support::suggested_name("latest")));
+    bundle
+        .write_zip(&dest)
+        .with_context(|| format!("cannot write {}", dest.display()))?;
+
+    for warning in &bundle.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if json {
+        let payload = serde_json::json!({
+            "path": dest,
+            "files": bundle.names(),
+            "warnings": bundle.warnings,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("Wrote {} ({} file(s))", dest.display(), bundle.items.len());
+        for item in &bundle.items {
+            println!("  {} — {}", item.name, item.kind.label());
+        }
+    }
+    Ok(())
+}
+
+/// Route one `support bundle` flag to its slot.
+#[allow(clippy::too_many_arguments)]
+fn set_bundle_arg(
+    game_dir: &mut Option<PathBuf>,
+    proton_log: &mut Option<PathBuf>,
+    out: &mut Option<PathBuf>,
+    root: &mut Option<PathBuf>,
+    vulkaninfo: &mut Option<PathBuf>,
+    proton_build: &mut Option<PathBuf>,
+    flag: &str,
+    value: &str,
+) {
+    match flag {
+        "--game-dir" => *game_dir = Some(PathBuf::from(value)),
+        "--proton-log" => *proton_log = Some(PathBuf::from(value)),
+        "--out" => *out = Some(PathBuf::from(value)),
+        "--root" => *root = Some(PathBuf::from(value)),
+        "--vulkaninfo" => *vulkaninfo = Some(PathBuf::from(value)),
+        "--proton" => *proton_build = Some(PathBuf::from(value)),
+        _ => {}
+    }
+}
+
+/// Parse `--check upscaler,nr` into the closed subject set.
+fn parse_check_list(value: &str) -> Result<Vec<VerifyCheck>> {
+    value
+        .split(',')
+        .map(|part| match part.trim() {
+            "upscaler" => Ok(VerifyCheck::Upscaler),
+            "nr" => Ok(VerifyCheck::Nr),
+            other => bail!("`{other}` is not a verification subject (upscaler or nr)"),
+        })
+        .collect()
+}
+
+fn support_usage() -> String {
+    "USAGE:\n    \
+     pitagames-cli support verify --log-dir <dir> [--check <upscaler,nr>] [--json]\n    \
+     pitagames-cli support bundle [--game-dir <dir>] [--proton-log <file>] [--out <file>]\n    \
+     \x20                          [--root <dir>] [--vulkaninfo <file>] [--proton <dir>] [--json]\n\n\
+     VERIFY:\n    \
+     --log-dir <dir>        The game directory the mod logs live in\n    \
+     --check <name>         Report one subject (upscaler or nr); default both; repeatable\n\n\
+     BUNDLE (opt-in, allowlisted):\n    \
+     --game-dir <dir>       Collect the allowlisted mod logs and ini from here\n    \
+     --proton-log <file>    Add one Proton log explicitly (PROTON_LOG=1)\n    \
+     --out <file>           Where to write the zip (default ./pitagames-support-latest.zip)\n    \
+     --root <dir>           Read a fixture sysfs tree for the versions file\n    \
+     --vulkaninfo <file>    Captured `vulkaninfo --summary` output\n    \
+     --proton <dir>         Record this Proton build in the versions file\n\n\
+     The bundle contains only the allowlisted mod logs, the ini, and the GPU/Mesa/\n\
+     Proton versions: the NR model weights (nvngx_dlssnr.dll, dlssnr.bin*) and\n\
+     every secret are excluded by construction. See docs/m3.5-nr-verify.md."
+        .to_string()
+}
+
 /// Show the compiled shim profile the launcher writes for one game.
 ///
 /// The GUI writes `profiles/steam-<appid>.json` on every profile save and
@@ -2627,6 +2885,7 @@ fn mods(args: &[String]) -> Result<()> {
         Some("ini") => mods_ini(&args[1..]),
         Some("capture") => mods_capture(&args[1..]),
         Some("tierb") => mods_tierb(&args[1..]),
+        Some("explain") => mods_explain(&args[1..]),
         _ => mods_manifest(args),
     }
 }
@@ -2890,7 +3149,8 @@ fn mods_usage() -> String {
      pitagames-cli mods capture <file|-> [--json]\n    \
      pitagames-cli mods capture --run <program> [args...] [--json]\n    \
      pitagames-cli mods tierb <target> --fixture <dir> [--set Section.Key=Value]... [--json]\n    \
-     pitagames-cli mods tierb <target> --uninstall [--json]\n\n\
+     pitagames-cli mods tierb <target> --uninstall [--json]\n    \
+     pitagames-cli mods explain <store> <id> [--dir <path>] [--json]\n\n\
      ARGS:\n    \
      <dir>                  A game directory a mod was installed into\n\n\
      OPTIONS:\n    \
@@ -2903,7 +3163,158 @@ fn mods_usage() -> String {
      `--verify` and `--restore` exit non-zero when a file or backup does not match.\n\
      The `release`, `ini` and `capture` subcommands are the shared mod primitives; see\n\
      `pitagames-cli mods release --help`, `mods ini --help` and `mods capture --help`.\n\
-     `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`."
+     `mods tierb` deploys a managed Tier B OptiScaler; see `mods tierb --help`.\n\
+     `mods explain` shows a game's merged launch environment; see `mods explain --help`."
+        .to_string()
+}
+
+// -- mods explain -----------------------------------------------------------
+
+/// Explain the merged environment a game's shim profile applies.
+///
+/// The diagnostic for the shim profile: it reads `profiles/<store>-<id>.json`
+/// (the file `pitagames-shim` reads at launch) and prints the Proton it resolved,
+/// the merged environment, the launch options a mod installer captured and, for
+/// a Steam row, the exact command. It is the CLI half of the shim's `--explain`;
+/// both render through `ShimProfile::explain_lines`, so a capture or a forced
+/// variable shows the same way in each.
+fn mods_explain(args: &[String]) -> Result<()> {
+    let parsed = parse_mods_explain_args(args)?;
+    if parsed.help {
+        println!("{}", mods_explain_usage());
+        return Ok(());
+    }
+
+    let game = parsed
+        .game
+        .clone()
+        .with_context(|| format!("expected `<store> <id>`\n\n{}", mods_explain_usage()))?;
+    let dir = parsed
+        .dir
+        .clone()
+        .or_else(paths::profiles_dir)
+        .context("no profiles directory; pass --dir <path>")?;
+    let path = shim_profile_path(&dir, &game);
+    let profile = read_shim_profile(&path).with_context(|| {
+        format!(
+            "cannot read the profile for {} {} at {}",
+            game.store.as_str(),
+            game.store_id,
+            path.display()
+        )
+    })?;
+
+    let command = steam_command(&game, &profile);
+    if parsed.json {
+        let payload = serde_json::json!({
+            "path": path,
+            "game": { "store": game.store.as_str(), "id": game.store_id },
+            "profile": profile.profile,
+            "proton": profile.proton,
+            "env": profile.env,
+            "captured_env": profile.captured_env,
+            "wrappers": profile.wrappers,
+            "command": command,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "PitaGames profile for {} {} ({})",
+            game.store.as_str(),
+            game.store_id,
+            path.display()
+        );
+        for line in profile.explain_lines(&profile.env) {
+            println!("{line}");
+        }
+        println!();
+        match command {
+            Some(command) => {
+                println!("Command:");
+                println!("  {command}");
+            }
+            None => println!(
+                "Command:      the {} hand-off applies this environment",
+                game.store.as_str()
+            ),
+        }
+    }
+    Ok(())
+}
+
+/// The shim line for a Steam row, or `None` for every other store.
+///
+/// The shim is only what Steam runs; a store row's launch goes through the
+/// umu/store-client hand-off, so the CLI names the environment and stops there.
+fn steam_command(game: &GameId, profile: &ShimProfile) -> Option<String> {
+    if game.store != Store::Steam {
+        return None;
+    }
+    let (program, args) = pitagames_core::flatten_wrappers(
+        &profile.wrappers,
+        pitagames_core::SHIM_PROGRAM,
+        &[game.store_id.clone(), "%command%".to_string()],
+    );
+    Some(pitagames_core::render_shell_command(
+        &profile.env,
+        &program,
+        &args,
+    ))
+}
+
+/// Parsed `mods explain` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct ModsExplainArgs {
+    dir: Option<PathBuf>,
+    game: Option<GameId>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_mods_explain_args(args: &[String]) -> Result<ModsExplainArgs> {
+    let mut parsed = ModsExplainArgs::default();
+    let mut positional: Vec<String> = Vec::new();
+    let mut index = 0;
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--dir" => parsed.dir = Some(PathBuf::from(flag_value(args, &mut index, arg)?)),
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            other if !other.starts_with('-') => positional.push(other.to_string()),
+            other => bail!(
+                "unexpected argument `{other}` for `mods explain`\n\n{}",
+                mods_explain_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    match positional.as_slice() {
+        [] => {}
+        [store, id] => {
+            parsed.game = Some(GameId::new(
+                Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+                id.clone(),
+            ));
+        }
+        _ => bail!("expected `<store> <id>`\n\n{}", mods_explain_usage()),
+    }
+    Ok(parsed)
+}
+
+fn mods_explain_usage() -> String {
+    "USAGE:\n    pitagames-cli mods explain <store> <id> [--dir <path>] [--json]\n\n\
+     ARGS:\n    \
+     <store> <id>           The game whose shim profile to explain, e.g. `steam 1091500`\n\n\
+     OPTIONS:\n    \
+     --dir <path>           The profiles directory (default the XDG data dir)\n    \
+     --json                 Print the profile as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Reads `profiles/<store>-<id>.json` and prints the Proton it resolved, the merged\n\
+     environment the launch applies, the launch options a mod installer captured\n\
+     (`captured_env`) and, for a Steam row, the shim command. The same body the shim's\n\
+     `--explain` shows."
         .to_string()
 }
 
@@ -9740,6 +10151,47 @@ mod tests {
     }
 
     #[test]
+    fn mods_explain_reads_a_shim_profile_and_names_the_captured_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let game = GameId::new(Store::Steam, "1091500");
+        let mut profile = ShimProfile::new(game.clone(), "NR");
+        profile.env = vec![
+            ("PROTON_USE_OPTISCALER".to_string(), "0".to_string()),
+            ("WINEDLLOVERRIDES".to_string(), "dxgi=n,b".to_string()),
+        ];
+        profile.captured_env = std::collections::BTreeMap::from([(
+            "WINEDLLOVERRIDES".to_string(),
+            "dxgi=n,b".to_string(),
+        )]);
+        pitagames_core::save_shim_profile(temp.path(), &profile).unwrap();
+        let dir = temp.path().display().to_string();
+
+        let base = vec![
+            "steam".to_string(),
+            "1091500".to_string(),
+            "--dir".to_string(),
+            dir.clone(),
+        ];
+        mods_explain(&base).unwrap();
+        let mut json = base.clone();
+        json.push("--json".to_string());
+        mods_explain(&json).unwrap();
+
+        // A stored profile is required: an absent one is an error, not a blank.
+        let missing = vec![
+            "steam".to_string(),
+            "1".to_string(),
+            "--dir".to_string(),
+            dir.clone(),
+        ];
+        assert!(mods_explain(&missing).is_err());
+        assert!(mods_explain(&["--help".to_string()]).is_ok());
+
+        // The dispatcher routes the subcommand.
+        assert!(mods(&["explain".to_string(), "--help".to_string()]).is_ok());
+    }
+
+    #[test]
     fn mods_shows_verifies_and_restores_a_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("game");
@@ -11789,6 +12241,72 @@ GPU0:
             "{error}"
         );
     }
+    #[test]
+    fn support_verify_reads_engagement_and_rejects_an_unknown_subject() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("dlssnr-amd.log"), "[NR] NN model loaded\n").unwrap();
+
+        support_verify(&["--log-dir".to_string(), dir.path().display().to_string()]).unwrap();
+        support_verify(&[
+            "--log-dir".to_string(),
+            dir.path().display().to_string(),
+            "--check".to_string(),
+            "nr".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        let error = support_verify(&[
+            "--log-dir".to_string(),
+            dir.path().display().to_string(),
+            "--check".to_string(),
+            "nonsense".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("not a verification subject"), "{error}");
+        assert!(support_verify(&[]).is_err(), "--log-dir is required");
+    }
+
+    #[test]
+    fn support_bundle_writes_only_the_allowlisted_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("dlssnr-amd.log"), "[NR] NN model loaded\n").unwrap();
+        fs::write(dir.path().join("dlssnr-amd.ini"), "[Network]\n").unwrap();
+        fs::write(dir.path().join("nvngx_dlssnr.dll"), "weights").unwrap();
+
+        // An empty sysfs root keeps the versions file off the host.
+        let sys = dir.path().join("sys");
+        fs::create_dir_all(&sys).unwrap();
+        let out = dir.path().join("bundle.zip");
+
+        support_bundle(&[
+            "--game-dir".to_string(),
+            dir.path().display().to_string(),
+            "--root".to_string(),
+            sys.display().to_string(),
+            "--out".to_string(),
+            out.display().to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert!(out.is_file());
+        let bytes = fs::read(&out).unwrap();
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&bytes)).unwrap();
+        let mut names = Vec::new();
+        for index in 0..archive.len() {
+            names.push(archive.by_index(index).unwrap().name().unwrap().to_string());
+        }
+        assert!(names.contains(&"dlssnr-amd.log".to_string()));
+        assert!(names.contains(&"dlssnr-amd.ini".to_string()));
+        assert!(names.contains(&"versions.txt".to_string()));
+        assert!(
+            !names.contains(&"nvngx_dlssnr.dll".to_string()),
+            "the model weights are never bundled"
+        );
+    }
+
     #[test]
     fn perf_metric_list_rejects_unknown_and_empty() {
         assert!(parse_metric_list("nonsense").is_err());

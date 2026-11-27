@@ -15,7 +15,8 @@
 use dioxus::prelude::*;
 
 use pitagames_core::AntiCheat;
-use pitagames_core::profile::Profile;
+use pitagames_core::paths;
+use pitagames_core::profile::{NeuralRendering, Profile, ProtonRef};
 use pitagames_core::ui::Shell;
 use pitagames_input::Action;
 use pitagames_platform::compat::{CompatDb, CompatEntry};
@@ -29,6 +30,7 @@ use crate::detail::DbHandle;
 use crate::focus::{self, ActionChannel};
 use crate::graphics::{self, Control, DurableRevert, GraphicsEditor, OptionRow, Section};
 use crate::library::GameEntry;
+use crate::nr_install_view::NrInstallPanel;
 use crate::persist;
 use crate::runtime;
 use crate::shell;
@@ -68,16 +70,22 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let mut acknowledged = use_signal(|| false);
     let mut manifest = use_signal(|| None::<DurableRevert>);
     let mut status = use_signal(String::new);
+    // The engagement rows (read from the mod's own log) and the support-bundle
+    // result. Both are refreshed on demand, never on a timer.
+    let mut verify_rows = use_signal(Vec::<pitagames_platform::verify::Row>::new);
+    let mut bundle_status = use_signal(String::new);
 
     // Read-only detection and the game's profile, once per mounted game. The
     // parent keys this component by game, so opening another remounts it.
     let load_db = db.clone();
     let load_id = entry.game.id.clone();
     let load_install = entry.game.install_dir.clone();
+    let load_exe = entry.game.exe.clone();
     use_future(move || {
         let db = load_db.clone();
         let id = load_id.clone();
         let install = load_install.clone();
+        let exe = load_exe.clone();
         async move {
             gpu.set(Some(gpu::detect(&GpuProbe::host())));
             let db_compat = CompatDb::load();
@@ -108,9 +116,21 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 },
                 None => None,
             };
-            editor.set(Some(GraphicsEditor::new(
-                profile.unwrap_or_else(|| Profile::new(id.clone(), "Default")),
-            )));
+            let profile = profile.unwrap_or_else(|| Profile::new(id.clone(), "Default"));
+            let checks = pitagames_platform::verify::checks_for(&profile);
+            editor.set(Some(GraphicsEditor::new(profile)));
+
+            // The engagement verdict, read from the mod's own log. The log lives
+            // beside the game executable (the installer's working directory), so
+            // prefer the exe's directory and fall back to the install root.
+            let log_dir = exe
+                .as_deref()
+                .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+                .or(install.clone());
+            if let Some(dir) = log_dir {
+                let data = pitagames_platform::verify::MarkerData::shipped();
+                verify_rows.set(pitagames_platform::verify::panel(&data, &checks, &dir));
+            }
         }
     });
 
@@ -327,6 +347,101 @@ pub fn Graphics(props: GraphicsProps) -> Element {
         .index()
         .and_then(|index| controls.get(index).copied());
 
+    // The neural-rendering backend verdict, for the install panel. It is the
+    // same `platform::nr::plan` the CLI uses, so the panel and the diagnostic
+    // cannot disagree about whether NR is offered.
+    let nr_plan = match (gpu_snapshot.as_ref(), report.as_ref()) {
+        (Some(gpu), Some(report)) => {
+            let draft = editor_state.draft();
+            let proton = report.resolve(&draft.proton).ok().flatten();
+            let registry = pitagames_platform::nr::BackendRegistry::effective(
+                pitagames_platform::nr::default_user_path().as_deref(),
+            )
+            .unwrap_or_default();
+            let game_64bit = entry
+                .game
+                .exe
+                .as_deref()
+                .and_then(|exe| pitagames_platform::nr::pe_is_64_bit(exe).ok());
+            pitagames_platform::nr::plan(pitagames_platform::nr::NrRequest {
+                gpu,
+                profile: draft,
+                registry: &registry,
+                compat: compat_snapshot.as_ref(),
+                proton: proton.as_ref(),
+                game_64bit,
+            })
+            .plan()
+            .cloned()
+        }
+        _ => None,
+    };
+
+    // The engagement rows and the support-bundle actions. The re-check reads the
+    // current draft's mode; the bundle collects the allowlisted files beside the
+    // game and writes a zip into our own data directory.
+    let verify_entry = entry.clone();
+    let recheck = move |_| {
+        let checks = editor
+            .read()
+            .as_ref()
+            .map(|editor| pitagames_platform::verify::checks_for(editor.draft()))
+            .unwrap_or_default();
+        let log_dir = verify_entry
+            .game
+            .exe
+            .as_deref()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| verify_entry.game.install_dir.clone());
+        match log_dir {
+            Some(dir) => {
+                let data = pitagames_platform::verify::MarkerData::shipped();
+                verify_rows.set(pitagames_platform::verify::panel(&data, &checks, &dir));
+            }
+            None => verify_rows.set(Vec::new()),
+        }
+    };
+
+    let bundle_entry = entry.clone();
+    let write_bundle = move |_| {
+        let dir = bundle_entry
+            .game
+            .exe
+            .as_deref()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .or_else(|| bundle_entry.game.install_dir.clone());
+        let Some(dir) = dir else {
+            bundle_status.set("This game has no directory to collect logs from.".to_string());
+            return;
+        };
+        let versions = pitagames_platform::support::versions(gpu.read().as_ref(), None);
+        let request = pitagames_platform::support::BundleRequest::new(versions).with_game_dir(&dir);
+        let bundle = pitagames_platform::support::collect(&request);
+        let out_dir = paths::data_dir().unwrap_or_default().join("support");
+        if let Err(error) = std::fs::create_dir_all(&out_dir) {
+            bundle_status.set(format!("Cannot create {}: {error}", out_dir.display()));
+            return;
+        }
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_secs())
+            .unwrap_or(0);
+        let out = out_dir.join(pitagames_platform::support::suggested_name(
+            &stamp.to_string(),
+        ));
+        match bundle.write_zip(&out) {
+            Ok(()) => bundle_status.set(format!(
+                "Wrote {} ({} file(s)).",
+                out.display(),
+                bundle.items.len()
+            )),
+            Err(error) => bundle_status.set(error.to_string()),
+        }
+    };
+
+    let verify_snapshot = verify_rows.read().clone();
+    let bundle_text = bundle_status.read().clone();
+
     // Group the rows by section so the screen draws the four headings in order.
     let mut sections: Vec<(Section, Vec<(usize, OptionRow)>)> = Section::ALL
         .iter()
@@ -355,6 +470,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     );
     let gate_allows = gate.allows();
     let gate_message = gate.message();
+    // DLSSNR ships its own OptiScaler, so on the NR route the Upscaling section
+    // points at DLSSNR's in-game menu rather than offering launcher upscalers.
+    let nr_upscaler = graphics::nr_upscaler_note(editor_state.draft());
+    // The NR install panel reports its finished value back here; this owns the
+    // report so the default-Proton choice is the NR one (GE, then Valve).
+    let nr_report = report.clone();
 
     rsx! {
         div {
@@ -395,6 +516,21 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                         span {
                             style: "font-size:var(--text-micro);color:var(--text-muted);",
                             "{section.hint()}"
+                        }
+                    }
+                    if section == Section::Upscaling {
+                        if let Some(note) = nr_upscaler {
+                            div {
+                                style: "display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:#1a1e28;border:1px solid #2c3444;",
+                                span {
+                                    style: "font-size:var(--text-caption);font-weight:600;color:#ffffff;",
+                                    "Upscaler"
+                                }
+                                span {
+                                    style: "font-size:var(--text-caption);color:var(--text-secondary);",
+                                    "{note}"
+                                }
+                            }
                         }
                     }
                     div {
@@ -450,6 +586,86 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                             style: "font-size:var(--text-caption);color:var(--text-muted);",
                             "{item.label} — {item.reason}"
                         }
+                    }
+                }
+            }
+
+            if let Some(plan) = nr_plan {
+                NrInstallPanel {
+                    entry: entry.clone(),
+                    plan,
+                    on_installed: move |nr: NeuralRendering| {
+                        let default_proton = nr_report
+                            .as_ref()
+                            .map(pitagames_platform::nr::default_proton)
+                            .unwrap_or(ProtonRef::Auto);
+                        if let Some(editor) = editor.write().as_mut() {
+                            editor.enable_neural_rendering(nr, default_proton);
+                        }
+                        status.set(
+                            "Added the NR profile to the draft — press Apply & verify to save."
+                                .to_string(),
+                        );
+                    },
+                }
+            }
+
+            div {
+                style: "display:flex;flex-direction:column;gap:10px;padding:14px 16px;border-radius:12px;background:#1a1e28;border:1px solid #2c3444;",
+                div {
+                    style: "display:flex;align-items:center;gap:10px;flex-wrap:wrap;",
+                    h3 {
+                        style: "margin:0;font-size:var(--text-heading);font-weight:600;color:#ffffff;",
+                        "Verification"
+                    }
+                    span {
+                        style: "font-size:var(--text-micro);color:var(--text-muted);",
+                        "read from the mod's own log — no in-game menu needed"
+                    }
+                    button {
+                        onclick: recheck,
+                        style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
+                        "Re-check"
+                    }
+                    button {
+                        onclick: write_bundle,
+                        style: "{action_button_style(false, true, \"#2e3a56\", \"#ffffff\")}",
+                        "Write support bundle"
+                    }
+                }
+                if verify_snapshot.is_empty() {
+                    span {
+                        style: "font-size:var(--text-caption);color:var(--text-secondary);",
+                        "Nothing to verify yet — choose an upscaler or install DLSSNR, launch the game once, then Re-check."
+                    }
+                } else {
+                    for (index, row) in verify_snapshot.iter().enumerate() {
+                        div {
+                            key: "verify-{index}",
+                            style: "display:flex;align-items:center;gap:12px;padding:9px 12px;border-radius:9px;background:#151a22;border:1px solid #262e3c;",
+                            span {
+                                style: "font-size:var(--text-caption);color:var(--text);min-width:150px;",
+                                "{row.check.label()}"
+                            }
+                            span {
+                                style: "font-family:monospace;font-size:var(--text-micro);color:var(--text-muted);",
+                                "{row.log}"
+                            }
+                            span {
+                                style: if row.engagement.is_engaged() {
+                                    "margin-left:auto;font-size:var(--text-caption);color:var(--success);"
+                                } else {
+                                    "margin-left:auto;font-size:var(--text-caption);color:#e8c890;"
+                                },
+                                "{row.engagement.label()}"
+                            }
+                        }
+                    }
+                }
+                if !bundle_text.is_empty() {
+                    span {
+                        style: "font-size:var(--text-micro);color:var(--text-secondary);overflow-wrap:anywhere;",
+                        "{bundle_text}"
                     }
                 }
             }

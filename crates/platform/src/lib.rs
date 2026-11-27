@@ -27,15 +27,20 @@ pub mod disk;
 pub mod eac;
 pub mod envc;
 pub mod gpu;
+pub mod hints;
 pub mod launch;
 pub mod logs;
 pub mod nr;
+pub mod nr_ini;
+pub mod nr_install;
 pub mod power;
 pub mod prefix;
 pub mod proton;
 pub mod proton_update;
+pub mod support;
 pub mod tier_a;
 pub mod validation;
+pub mod verify;
 
 pub use anticheat::{
     AnticheatFinding, AnticheatScan, AnticheatSource, EffectiveAnticheat, GateDecision, ScanLimits,
@@ -44,8 +49,8 @@ pub use anticheat::{
 pub use capability::{Availability, Field, REASONS, availability, matrix, reason};
 pub use compat::{
     Arch, CompatDb, CompatEntry, CompatError, CompatWarning, GameApi, HelixsrMode, HelixsrPlan,
-    NeuralRules, NrBackendChoice, PreferredDll, RuntimeRules, UpscalerId, Version, WrapperId,
-    default_shipped_dirs, default_user_dirs,
+    IngameRules, NeuralRules, NrBackendChoice, PreferredDll, RuntimeRules, UpscalerId, Version,
+    WrapperId, default_shipped_dirs, default_user_dirs,
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
 pub use eac::{
@@ -59,6 +64,9 @@ pub use envc::{
 // `detect` stays namespaced (`gpu::detect`) so it cannot collide with
 // `anticheat::detect`.
 pub use gpu::{GpuArch, GpuProbe, GpuProfile, GpuVendor, HdrSupport, arch_for};
+pub use hints::{
+    HintData, HintError, HintSet, InGameHint, InjectionMode, ModeHints, hints_for, mode_of, set_for,
+};
 pub use launch::{
     DEFAULT_GRACE, Handoff, LaunchError, LaunchMode, Outcome, Prepared, RunOptions, Session,
     UMU_RUN, prepare, start, terminate,
@@ -67,6 +75,12 @@ pub use logs::{LogFile, LogKind, TAIL_BYTES, Tail};
 pub use nr::{
     BackendPin, BackendRegistry, Cost, NrError, NrPlan, NrRequest, NrVerdict, Resolution,
     backend_for, default_scale, is_experimental, model_scale_preset, pe_is_64_bit,
+};
+pub use nr_install::{
+    DO_NOT_SHARE, FoundModel, INSTALLER_PROGRAM, INSTALLER_SCRIPT, InstallForm, InstallPlan,
+    MODEL_DLL_NAME, MODEL_VERSIONS, ModelError, ModelScan, PREFERRED_MODEL_VERSION, PlanError,
+    SUPPORTED_MODEL_VERSION, inspect_model, model_arg, model_version, scan, scan_roots,
+    version_supported,
 };
 pub use power::{PowerAction, PowerBackend, PowerError, request};
 pub use prefix::{PREFIX_DIR_ENV, Prefix};
@@ -77,5 +91,13 @@ pub use proton::{
 pub use proton_update::{
     BuildState, ProtonPin, ProtonUpdateError, Registry, RegistryError, UpdateReport,
 };
+pub use support::{
+    ALLOWED_FILES, Bundle, BundleItem, BundleRequest, FORBIDDEN_FILES, ItemKind, SupportError,
+    VERSIONS_FILE, collect, suggested_name, versions,
+};
 pub use tier_a::{TierAGate, dll_name, env as tier_a_env, gate as tier_a_gate};
 pub use validation::{Claim, Machine, ValidationPath};
+pub use verify::{
+    Check, Engagement, Marker, MarkerData, MarkerSet, Row, VerifyError, checks_for, panel,
+    verify_file, verify_text,
+};

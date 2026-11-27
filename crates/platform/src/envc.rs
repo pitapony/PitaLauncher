@@ -54,7 +54,7 @@ use pitagames_mods::ini::{IniSetting, IniSurface};
 use crate::capability::{self, Availability, Field};
 use crate::compat::CompatEntry;
 use crate::gpu::GpuProfile;
-use crate::proton::{ProtonInstall, ProtonKind};
+use crate::proton::ProtonInstall;
 use crate::tier_a;
 
 /// Everything the compiler needs that is not in the profile.
@@ -199,6 +199,13 @@ pub fn compile(
     // The advanced overrides are appended verbatim and last: a later entry wins
     // at launch, and the transparency panel shows the user's own line.
     env.extend(profile.env.iter().map(|(k, v)| (k.clone(), v.clone())));
+
+    // NR owns the single injection slot, and the forced `PROTON_USE_OPTISCALER=0`
+    // must not be defeatable by an advanced env override: re-assert it after the
+    // user's own line so the two OptiScaler copies can never meet (ADR-0023).
+    if profile.neural_rendering.is_enabled() {
+        force_env(&mut env, "PROTON_USE_OPTISCALER", "0");
+    }
 
     Ok(CompiledRuntime {
         env,
@@ -418,12 +425,7 @@ impl Draft<'_> {
         // can never meet (ADR-0023), whichever Proton is selected.
         self.set("PROTON_USE_OPTISCALER", "0");
 
-        let NeuralRendering::DlssNrAmd {
-            model_scale,
-            captured_env,
-            ..
-        } = &self.profile.neural_rendering
-        else {
+        let NeuralRendering::DlssNrAmd { captured_env, .. } = &self.profile.neural_rendering else {
             return Ok(());
         };
 
@@ -443,27 +445,24 @@ impl Draft<'_> {
             self.set(&key, &value);
         }
 
-        // The network resolution is a `dlssnr-amd.ini` setting (the main cost
-        // lever on RDNA 3), validated against the shipped DLSSNR surface.
-        let setting = IniSetting::new("Network", "model_scale", model_scale.to_string());
-        IniSurface::dlssnr()
-            .validate(&setting)
-            .map_err(|error| EnvcError::UnsupportedOption {
-                surface: DLSSNR_INI,
-                option: format!("Network.model_scale={model_scale}"),
-                reason: error.to_string(),
+        // The ini settings the launcher owns: the network, its resolution and
+        // the int4 toggle (plan §7). `nr_ini` composes only the keys the
+        // launcher has a selection for; the rest of the file stays the in-game
+        // menu's. Each is validated against the shipped surface, so a
+        // non-allowlisted key is refused rather than written.
+        for setting in crate::nr_ini::for_profile(&self.profile.neural_rendering) {
+            IniSurface::dlssnr().validate(&setting).map_err(|error| {
+                EnvcError::UnsupportedOption {
+                    surface: DLSSNR_INI,
+                    option: format!("{}.{}={}", setting.section, setting.key, setting.value),
+                    reason: error.to_string(),
+                }
             })?;
-        self.ini.push(setting);
+            self.ini.push(setting);
+        }
 
-        if self
-            .proton
-            .is_some_and(|install| install.kind == ProtonKind::CachyOs)
-        {
-            self.warnings.push(
-                "neural rendering is tested with GE-Proton or Valve Proton; \
-                 Proton-CachyOS runs with its OptiScaler injection disabled"
-                    .to_string(),
-            );
+        if let Some(note) = crate::nr::proton_note(self.proton) {
+            self.warnings.push(note.to_string());
         }
         Ok(())
     }
@@ -634,6 +633,13 @@ pub fn render_wrapper_chain(chain: &WrapperChain, session: bool, command: &str) 
     let steps = wrapper_steps(chain, session);
     let (program, args) = flatten_wrappers(&steps, command, &[]);
     render_command(&program, &args)
+}
+
+/// Force `key=value` as the last word on an env list: every prior entry for the
+/// key is dropped and the canonical value is appended.
+fn force_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    env.retain(|(existing, _)| existing != key);
+    env.push((key.to_string(), value.to_string()));
 }
 
 fn diagnostics_env(diagnostics: &Diagnostics, log_dir: Option<&Path>) -> Vec<(String, String)> {
@@ -1239,5 +1245,85 @@ mod tests {
             captured_env: Default::default(),
             model_source: ModelSource::CachedInPackage,
         }
+    }
+
+    // -- Neural rendering (the safe ini surface and the forced env) ----------
+
+    fn nr_gpu() -> GpuProfile {
+        GpuProfile {
+            mesa: Some(crate::compat::Version::parse("27.0.0").unwrap()),
+            ..rdna4()
+        }
+    }
+
+    fn nr_compat() -> CompatEntry {
+        CompatEntry::from_toml(
+            "[game]\nstore = \"steam\"\nstore_id = \"620\"\ntitle = \"x\"\n\n\
+             [upscaling]\nsupported = [\"dlss\"]\n\n\
+             [neural_rendering]\nbackend = \"auto\"\nroute = \"optiscaler\"\nrequires_64bit = true\n",
+        )
+        .unwrap()
+    }
+
+    fn ge_install() -> ProtonInstall {
+        ProtonInstall {
+            path: PathBuf::from("/steam/compatibilitytools.d/GE-Proton"),
+            name: "GE-Proton".to_string(),
+            kind: crate::proton::ProtonKind::Ge,
+            version: Some("GE-Proton10-1".to_string()),
+            source: crate::proton::ProtonSource::UserCompatibilityTools,
+        }
+    }
+
+    #[test]
+    fn neural_rendering_writes_the_safe_ini_and_forces_the_optiscaler_off() {
+        let mut profile = Profile::new(game(), "NR");
+        profile.neural_rendering = nr();
+        // An advanced override tries to turn OptiScaler back on; the forced
+        // value must win so the two OptiScaler copies never meet.
+        profile
+            .env
+            .insert("PROTON_USE_OPTISCALER".into(), "1".into());
+
+        let compiled = compile(
+            request(&profile, Some(&ge_install())),
+            GraphicsContext::new(&nr_gpu(), Some(&nr_compat())),
+        )
+        .unwrap();
+
+        assert_eq!(
+            compiled.env,
+            vec![("PROTON_USE_OPTISCALER".to_string(), "0".to_string())]
+        );
+        let ini: Vec<String> = compiled
+            .ini
+            .iter()
+            .map(|s| format!("{}.{}={}", s.section, s.key, s.value))
+            .collect();
+        assert_eq!(
+            ini,
+            [
+                "Network.Model=CC_SMALL_FP8",
+                "Network.model_scale=100",
+                "Int4Mixed.Enabled=false",
+                "NRControl.MenuKey=End",
+            ]
+        );
+        assert!(compiled.warnings.is_empty(), "{:?}", compiled.warnings);
+    }
+
+    #[test]
+    fn the_cachyos_note_rides_the_neural_rendering_compile() {
+        let mut profile = Profile::new(game(), "NR");
+        profile.neural_rendering = nr();
+        let compiled = compile(
+            request(&profile, Some(&cachyos("11.0-20260516"))),
+            GraphicsContext::new(&nr_gpu(), Some(&nr_compat())),
+        )
+        .unwrap();
+        assert_eq!(
+            compiled.warnings,
+            vec![crate::nr::CACHYOS_NR_NOTE.to_string()]
+        );
     }
 }

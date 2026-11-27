@@ -405,6 +405,8 @@ pub struct CompatEntry {
     pub upscaling: UpscalingRules,
     pub runtime: RuntimeRules,
     pub neural_rendering: Option<NeuralRules>,
+    /// In-game hint overrides (ticket #31).
+    pub ingame: IngameRules,
 }
 
 impl CompatEntry {
@@ -453,6 +455,17 @@ pub struct RuntimeRules {
     pub wrappers: Vec<WrapperId>,
     pub env: BTreeMap<String, String>,
     pub known_issues: Vec<String>,
+}
+
+/// The in-game hints section (ticket #31).
+///
+/// A game can override the shipped per-mode hint **note** — the one-line caveat
+/// beside the in-game key list — without changing the keys, which are upstream's.
+/// `platform::hints::set_for` reads this as the note override.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct IngameRules {
+    /// The note to show instead of the mode's shipped one.
+    pub notes: Option<String>,
 }
 
 /// The neural-rendering section.
@@ -730,6 +743,7 @@ struct RawEntry {
     upscaling: Option<RawUpscaling>,
     runtime: Option<RawRuntime>,
     neural_rendering: Option<RawNeuralRendering>,
+    ingame: Option<RawIngame>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -781,6 +795,12 @@ struct RawNeuralRendering {
     notes: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawIngame {
+    notes: Option<String>,
+}
+
 /// A raw entry plus the files that contributed to it, for diagnostics.
 #[derive(Debug, Clone)]
 struct RawSlot {
@@ -827,6 +847,7 @@ impl RawEntry {
         merge_opt(&mut self.upscaling, other.upscaling);
         merge_opt(&mut self.runtime, other.runtime);
         merge_opt(&mut self.neural_rendering, other.neural_rendering);
+        merge_opt(&mut self.ingame, other.ingame);
     }
 
     fn into_entry(self) -> Result<CompatEntry, CompatError> {
@@ -858,6 +879,7 @@ impl RawEntry {
                 .neural_rendering
                 .map(RawNeuralRendering::into_rules)
                 .transpose()?,
+            ingame: self.ingame.unwrap_or_default().into_rules(),
         })
     }
 }
@@ -943,6 +965,12 @@ impl RawNeuralRendering {
     }
 }
 
+impl RawIngame {
+    fn into_rules(self) -> IngameRules {
+        IngameRules { notes: self.notes }
+    }
+}
+
 trait MergeField: Sized {
     fn merge(&mut self, other: Self);
 }
@@ -985,6 +1013,12 @@ impl MergeField for RawNeuralRendering {
         set(&mut self.dlssnr_min_version, other.dlssnr_min_version);
         set(&mut self.model_scale_default, other.model_scale_default);
         set(&mut self.requires_64bit, other.requires_64bit);
+        set(&mut self.notes, other.notes);
+    }
+}
+
+impl MergeField for RawIngame {
+    fn merge(&mut self, other: Self) {
         set(&mut self.notes, other.notes);
     }
 }
@@ -1214,6 +1248,64 @@ title = "Portal 2"
         assert!(entry.upscaling.supported.is_empty());
         assert!(entry.neural_rendering.is_none());
         assert!(entry.runtime.known_issues.is_empty());
+        assert_eq!(entry.ingame.notes, None, "no override by default");
+    }
+
+    #[test]
+    fn an_ingame_note_override_is_parsed_and_merges_field_by_field() {
+        let entry = CompatEntry::from_toml(
+            r#"
+[game]
+store = "steam"
+store_id = "1091500"
+title = "Cyberpunk 2077"
+
+[ingame]
+notes = "This game needs the 310.9.16 model."
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            entry.ingame.notes.as_deref(),
+            Some("This game needs the 310.9.16 model.")
+        );
+
+        // A user override sets only the note and keeps the shipped entry.
+        let dir = tempfile::tempdir().unwrap();
+        let shipped = dir.path().join("shipped");
+        let user = dir.path().join("user");
+        std::fs::create_dir_all(&shipped).unwrap();
+        std::fs::create_dir_all(&user).unwrap();
+        write(
+            &shipped,
+            "steam-1091500.toml",
+            r#"
+[game]
+store = "steam"
+store_id = "1091500"
+title = "Cyberpunk 2077"
+
+[ingame]
+notes = "shipped note"
+"#,
+        );
+        write(
+            &user,
+            "steam-1091500.toml",
+            r#"
+[game]
+store = "steam"
+store_id = "1091500"
+
+[ingame]
+notes = "user note"
+"#,
+        );
+        let db = CompatDb::load_from(&[shipped], &[user]);
+        assert!(db.warnings().is_empty(), "{:?}", db.warnings());
+        let entry = db.get(&GameId::new(Store::Steam, "1091500")).unwrap();
+        assert_eq!(entry.title, "Cyberpunk 2077");
+        assert_eq!(entry.ingame.notes.as_deref(), Some("user note"));
     }
 
     #[test]

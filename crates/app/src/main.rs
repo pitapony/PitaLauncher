@@ -68,6 +68,8 @@ mod launch_start;
 mod library;
 mod log_view;
 mod navigation;
+mod nr_install;
+mod nr_install_view;
 mod osk;
 mod overlay;
 mod overlay_view;
