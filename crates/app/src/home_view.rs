@@ -260,6 +260,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
         let detail_id = entry.game.id.clone();
         let install_libraries = libraries.clone();
         let install_db = db_handle.clone();
+        let start_install_db = db_handle.clone();
         let is_play = matches!(primary, Primary::Play);
         let is_install = matches!(primary, Primary::Install);
 
@@ -353,6 +354,7 @@ pub fn HomeView(props: HomeViewProps) -> Element {
                                         &install_libraries,
                                         notice,
                                         session,
+                                        start_install_db.clone(),
                                     );
                                 },
                                 style: "{install_style}",
@@ -687,6 +689,7 @@ fn perform_home_action(
                     &state.libraries,
                     notice,
                     session,
+                    db.read().clone(),
                 ),
                 Primary::Open => {
                     session

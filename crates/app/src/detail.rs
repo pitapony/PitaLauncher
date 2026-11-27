@@ -494,6 +494,7 @@ pub fn Detail(props: DetailProps) -> Element {
     // owns `play_entry`/`play_db`, so the hero needs its own copies.
     let hero_play_entry = entry.clone();
     let hero_play_db = db.clone();
+    let hero_install_db = db.clone();
     let hero_install_game = entry.game.clone();
     let hero_libraries = props.libraries.clone();
     // The Graphics screen's own captures (the desktop button and the pad's
@@ -600,6 +601,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                 &libraries,
                                 error,
                                 session,
+                                db.clone(),
                             ),
                             Primary::Open => {}
                         },
@@ -741,6 +743,7 @@ pub fn Detail(props: DetailProps) -> Element {
                                                     &hero_libraries,
                                                     error,
                                                     session,
+                                                    hero_install_db.clone(),
                                                 );
                                             },
                                             style: "{hero_install_style(install_ready)}{ring}",

@@ -109,6 +109,7 @@
 "action.close" = "Close"
 "action.minimize" = "Minimize"
 "action.retry" = "Retry"
+"action.verify" = "Verify"
 "action.remove" = "Remove"
 "action.save" = "Save"
 "action.refresh" = "Refresh"

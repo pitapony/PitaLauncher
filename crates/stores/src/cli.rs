@@ -776,6 +776,17 @@ impl CliHandle {
         self.lock().log_path.clone()
     }
 
+    /// The child's pid, which is also its process-group id.
+    ///
+    /// The process group is what makes a cancel reach a CLI's workers
+    /// ([`cancel`](Self::cancel) uses it). A caller that persists a running
+    /// job records the same id so the next boot can reap an orphaned CLI by
+    /// its group — see `crate::recovery`.
+    #[must_use]
+    pub fn pid(&self) -> Option<u32> {
+        self.lock().pid.filter(|pid| *pid != 0)
+    }
+
     /// Drains the run to its terminal event and reports the outcome.
     ///
     /// Safe to call after the event stream already ended: the outcome is built

@@ -289,6 +289,27 @@ pub struct StoredLaunch {
     pub record: LaunchRecord,
 }
 
+/// One persisted install-queue row, as `install_queue` stores it.
+///
+/// The kind and state are the queue's own stable wire tokens (kept as strings
+/// here so `pitagames-db` need not depend on `pitagames-stores`); the queue
+/// layer owns their meaning and skips a token it does not recognise.
+#[derive(Debug, Clone, PartialEq)]
+pub struct StoredJob {
+    pub id: GameId,
+    pub title: String,
+    pub target: PathBuf,
+    pub size: Option<u64>,
+    pub kind: String,
+    pub state: String,
+    /// A failed job's reason; `None` for any other state.
+    pub message: Option<String>,
+    /// The running store CLI's process-group id, for crash recovery.
+    pub pid: Option<u32>,
+    pub percent: Option<f32>,
+    pub stage: Option<String>,
+}
+
 /// What one store's row replacement did, for a sync report.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LibraryChange {
@@ -422,6 +443,27 @@ pub trait HistoryRepository {
     /// CLI's `history --clear`, so a user can forget a session without deleting
     /// the database the library lives in.
     async fn clear_launches(&self, game: Option<&GameId>) -> Result<usize>;
+}
+
+/// The persisted install queue: a snapshot, replaced whole on every change.
+///
+/// The queue is user state with a short life, so the table is not a log: each
+/// write names the entire queue. That keeps order, deletes and edits in one
+/// transaction and makes the stored queue equal to the live one by construction.
+#[async_trait]
+pub trait QueueRepository {
+    /// Replace the whole persisted queue with `jobs`, in order, in one
+    /// transaction. Returns the number of rows written.
+    async fn replace_queue(&self, jobs: &[StoredJob]) -> Result<usize>;
+
+    /// The persisted queue, in its insertion order.
+    ///
+    /// Rows are returned as stored; the queue layer decides what an unknown
+    /// kind or state means (it skips it).
+    async fn stored_queue(&self) -> Result<Vec<StoredJob>>;
+
+    /// Drop every persisted job. Returns how many rows were removed.
+    async fn clear_queue(&self) -> Result<usize>;
 }
 
 const UPSERT_GAME: &str = r#"
@@ -881,9 +923,94 @@ impl HistoryRepository for Db {
     }
 }
 
+const JOB_COLUMNS: &str = "store, store_id, title, target, size_bytes, kind, state,
+     message, pid, percent, stage";
+
+#[async_trait]
+impl QueueRepository for Db {
+    async fn replace_queue(&self, jobs: &[StoredJob]) -> Result<usize> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM install_queue")
+            .execute(&mut *tx)
+            .await?;
+        for (position, job) in jobs.iter().enumerate() {
+            sqlx::query(
+                "INSERT INTO install_queue (
+                     position, store, store_id, title, target, size_bytes,
+                     kind, state, message, pid, percent, stage
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(position as i64)
+            .bind(job.id.store.as_str())
+            .bind(&job.id.store_id)
+            .bind(&job.title)
+            .bind(path_text(&job.target))
+            .bind(job.size.map(|value| value as i64))
+            .bind(&job.kind)
+            .bind(&job.state)
+            .bind(job.message.as_deref())
+            .bind(job.pid.map(i64::from))
+            .bind(job.percent.map(f64::from))
+            .bind(job.stage.as_deref())
+            .execute(&mut *tx)
+            .await?;
+        }
+        tx.commit().await?;
+        Ok(jobs.len())
+    }
+
+    async fn stored_queue(&self) -> Result<Vec<StoredJob>> {
+        let sql = format!("SELECT {JOB_COLUMNS} FROM install_queue ORDER BY position, id");
+        let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
+        rows.iter().map(job_from_row).collect()
+    }
+
+    async fn clear_queue(&self) -> Result<usize> {
+        let result = sqlx::query("DELETE FROM install_queue")
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() as usize)
+    }
+}
+
 /// `LIMIT` takes a signed integer; saturating is right for a display cap.
 fn limit_to_i64(limit: usize) -> i64 {
     i64::try_from(limit).unwrap_or(i64::MAX)
+}
+
+fn job_from_row(row: &SqliteRow) -> Result<StoredJob> {
+    let store: String = row.try_get("store")?;
+    let store_id: String = row.try_get("store_id")?;
+    let size: Option<i64> = row.try_get("size_bytes")?;
+    let pid: Option<i64> = row.try_get("pid")?;
+    let percent: Option<f64> = row.try_get("percent")?;
+
+    Ok(StoredJob {
+        id: GameId::new(Store::from_str(&store)?, store_id),
+        title: row.try_get("title")?,
+        target: PathBuf::from(row.try_get::<String, _>("target")?),
+        size: size
+            .map(|value| {
+                u64::try_from(value).map_err(|_| Error::Data {
+                    column: "install_queue.size_bytes",
+                    message: format!("negative value {value}"),
+                })
+            })
+            .transpose()?,
+        kind: row.try_get("kind")?,
+        state: row.try_get("state")?,
+        message: row.try_get("message")?,
+        pid: pid
+            .map(|value| {
+                u32::try_from(value).map_err(|_| Error::Data {
+                    column: "install_queue.pid",
+                    message: format!("out of range: {value}"),
+                })
+            })
+            .transpose()?,
+        percent: percent.map(|value| value as f32),
+        stage: row.try_get("stage")?,
+    })
 }
 
 fn launch_from_row(row: &SqliteRow) -> Result<StoredLaunch> {
@@ -1972,6 +2099,120 @@ mod tests {
         );
     }
 
+    // -- The persisted install queue ----------------------------------------
+
+    fn stored_job(id: &str, kind: &str, state: &str) -> StoredJob {
+        StoredJob {
+            id: GameId::new(Store::Epic, id),
+            title: id.to_string(),
+            target: PathBuf::from("/games/epic").join(id),
+            size: None,
+            kind: kind.to_string(),
+            state: state.to_string(),
+            message: None,
+            pid: None,
+            percent: None,
+            stage: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_install_queue_round_trips_in_order() {
+        let db = Db::open_in_memory().await.unwrap();
+        let mut running = stored_job("Gizmo", "install", "running");
+        running.size = Some(4_000);
+        running.pid = Some(4242);
+        running.percent = Some(42.5);
+        running.stage = Some("downloading".into());
+        let queued = stored_job("Later", "verify", "queued");
+        let failed = StoredJob {
+            message: Some("legendary exited 1".into()),
+            state: "failed".into(),
+            ..stored_job("Gone", "update", "failed")
+        };
+
+        assert_eq!(
+            db.replace_queue(&[running.clone(), queued.clone(), failed.clone()])
+                .await
+                .unwrap(),
+            3
+        );
+
+        assert_eq!(
+            db.stored_queue().await.unwrap(),
+            vec![running, queued, failed],
+            "order, pid, size, message and progress all survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn replacing_the_queue_drops_rows_the_new_snapshot_omits() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.replace_queue(&[
+            stored_job("A", "install", "queued"),
+            stored_job("B", "install", "done"),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(db.stored_queue().await.unwrap().len(), 2);
+
+        db.replace_queue(&[stored_job("B", "install", "done")])
+            .await
+            .unwrap();
+        let read = db.stored_queue().await.unwrap();
+        assert_eq!(read.len(), 1, "the snapshot is authoritative");
+        assert_eq!(read[0].id.store_id, "B");
+    }
+
+    #[tokio::test]
+    async fn clear_queue_removes_every_row() {
+        let db = Db::open_in_memory().await.unwrap();
+        db.replace_queue(&[stored_job("A", "install", "queued")])
+            .await
+            .unwrap();
+        assert_eq!(db.clear_queue().await.unwrap(), 1);
+        assert!(db.stored_queue().await.unwrap().is_empty());
+        assert_eq!(db.clear_queue().await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_queue_row_is_reported_not_guessed() {
+        let db = Db::open_in_memory().await.unwrap();
+        sqlx::query(
+            "INSERT INTO install_queue
+                 (position, store, store_id, title, target, size_bytes, kind, state)
+             VALUES (0, 'epic', 'Gizmo', 'Gizmo', '/games/Gizmo', -1, 'install', 'queued')",
+        )
+        .execute(db.pool())
+        .await
+        .unwrap();
+
+        let error = db.stored_queue().await.unwrap_err();
+        assert!(
+            matches!(error, Error::Data { column, .. } if column == "install_queue.size_bytes"),
+            "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_queue_pid_round_trips_and_a_negative_one_is_reported() {
+        let db = Db::open_in_memory().await.unwrap();
+        let mut running = stored_job("Gizmo", "install", "running");
+        running.pid = Some(9);
+        db.replace_queue(&[running]).await.unwrap();
+        assert_eq!(db.stored_queue().await.unwrap()[0].pid, Some(9));
+
+        sqlx::query("UPDATE install_queue SET pid = -1")
+            .execute(db.pool())
+            .await
+            .unwrap();
+        let error = db.stored_queue().await.unwrap_err();
+        assert!(
+            matches!(error, Error::Data { column, .. } if column == "install_queue.pid"),
+            "{error}"
+        );
+    }
+
     // -- Integrity and the pre-migration backup -----------------------------
 
     #[tokio::test]
@@ -2023,14 +2264,16 @@ mod tests {
         );
 
         // Simulate an older install: forget the last migration and drop what it
-        // created, so reopening sees one migration pending.
+        // created, so reopening sees one migration pending. (Keep this aimed at
+        // the *latest* migration's table: the test's point is a pending
+        // migration, not which one.)
         {
             let db = Db::open(&path).await.unwrap();
             sqlx::query("DELETE FROM _sqlx_migrations WHERE version = (SELECT MAX(version) FROM _sqlx_migrations)")
                 .execute(db.pool())
                 .await
                 .unwrap();
-            sqlx::query("DROP TABLE launch_history")
+            sqlx::query("DROP TABLE install_queue")
                 .execute(db.pool())
                 .await
                 .unwrap();

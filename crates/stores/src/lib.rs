@@ -36,6 +36,7 @@ pub mod launch;
 pub mod localconfig;
 pub mod mod_install;
 pub mod queue;
+pub mod recovery;
 pub mod report;
 pub mod status;
 pub mod steam;
@@ -61,8 +62,9 @@ pub use installer::{InstallControl, InstallPlan, InstallRun, InstallerError};
 pub use launch::{ClientLaunchError, client_spec, launches_by_id};
 pub use localconfig::{Edit, LAUNCH_OPTIONS};
 pub use queue::{
-    InstallJob, InstallQueue, JobKind, JobProgress, JobState, QueueError, StartOutcome,
+    InstallJob, InstallQueue, Interrupted, JobKind, JobProgress, JobState, QueueError, StartOutcome,
 };
+pub use recovery::{Orphan, OrphanOutcome, reap, reap_all, system_cmdline};
 pub use report::{LogFormat, LogLine, RunFailure, RunReport};
 pub use status::{
     CLI_STORES, CliTool, RowState, SessionState, StoreStatusReport, UPDATE_TAG, UpdateAvailable,
