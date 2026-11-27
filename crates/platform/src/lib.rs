@@ -22,6 +22,7 @@ pub mod anticheat;
 pub mod capability;
 pub mod compat;
 pub mod disk;
+pub mod eac;
 pub mod envc;
 pub mod gpu;
 pub mod launch;
@@ -41,6 +42,10 @@ pub use compat::{
     default_shipped_dirs, default_user_dirs,
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
+pub use eac::{
+    EacProbe, EacReadiness, EacVerdict, Requirement, RequirementCheck, NOT_VALIDATED, probe,
+    reboot_argv, verdict,
+};
 pub use envc::{
     CompileRequest, CompiledRuntime, EnvcError, GraphicsContext, compile, compile_runtime,
     shim_proton,

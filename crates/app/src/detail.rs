@@ -20,6 +20,7 @@ use crate::View;
 use crate::anticheat::AnticheatView;
 use crate::copy::CopyButton;
 use crate::diagnostics::DiagnosticsEditor;
+use crate::eac::EacView;
 use crate::focus::{self, ActionChannel};
 use crate::format;
 use crate::game_page::{self, Badge, BadgeKind, BadgeTone, Primary};
@@ -105,6 +106,10 @@ pub fn Detail(props: DetailProps) -> Element {
     let mut compat = use_signal(|| None::<CompatTool>);
     // The detected/curated anti-cheat summary and its injection warning.
     let mut anticheat = use_signal(AnticheatView::pending);
+    // The EAC Linux v2 readiness verdict, and the consent-gated reboot action.
+    let mut eac_view = use_signal(EacView::hidden);
+    let mut reboot_confirm = use_signal(|| false);
+    let mut eac_message = use_signal(String::new);
 
     // Load the profiles once per mounted game; the parent keys this component
     // by appid so opening another game remounts it.
@@ -153,11 +158,18 @@ pub fn Detail(props: DetailProps) -> Element {
         let id = ac_game.clone();
         async move {
             let db = pitagames_platform::compat::CompatDb::load();
-            let curated = db
-                .get(&id)
-                .map(|entry| entry.anticheat)
-                .unwrap_or(AntiCheat::Unknown);
-            anticheat.set(crate::anticheat::summarize(dir.as_deref(), curated));
+            let entry = db.get(&id);
+            let curated = entry.map(|entry| entry.anticheat).unwrap_or(AntiCheat::Unknown);
+            let eac_v2 = entry.is_some_and(|entry| entry.eac_v2);
+            let view = crate::anticheat::summarize(dir.as_deref(), curated);
+            let effective = view.kind;
+            anticheat.set(view);
+
+            // The EAC Linux v2 verdict: the curated v2 claim folded with this
+            // boot's readiness. Read-only, and it never runs `eac-setup`.
+            let readiness =
+                pitagames_platform::eac::probe(&pitagames_platform::eac::EacProbe::host());
+            eac_view.set(crate::eac::summarize(effective, eac_v2, &readiness));
         }
     });
 
@@ -205,6 +217,19 @@ pub fn Detail(props: DetailProps) -> Element {
     let anticheat_label = anticheat_view.label.clone();
     let anticheat_warning = anticheat_view.warning.clone();
     let anticheat_evidence = anticheat_view.evidence.clone();
+
+    // The EAC Linux v2 card: shown only for a protected game.
+    let eac = eac_view();
+    let eac_show = eac.show;
+    let eac_label = eac.label.clone();
+    let eac_message_text = eac.message.clone();
+    let eac_notice = eac.notice.clone();
+    let eac_missing = eac.missing.clone();
+    let eac_needs_entry = eac.needs_entry;
+    let eac_command = eac.command_line.clone();
+    let eac_reboot = eac.reboot.clone();
+    let eac_report = eac_message.read().clone();
+    let reboot_confirming = reboot_confirm();
 
     // Store metadata is a cache: the page renders fine without it, and the
     // grid's background refresh fills this in without a reload.
@@ -799,6 +824,9 @@ pub fn Detail(props: DetailProps) -> Element {
                 {info_card("Install path", install_path)}
                 {info_card("Version", version)}
                 {info_card("Anti-cheat", anticheat_label)}
+                if eac_show {
+                    {info_card("EAC Linux v2", eac_label)}
+                }
             }
 
             if let Some(warning) = anticheat_warning.clone() {
@@ -813,6 +841,86 @@ pub fn Detail(props: DetailProps) -> Element {
                         span {
                             style: "font-family:monospace;font-size:var(--text-micro);color:#c8a870;overflow-wrap:anywhere;",
                             "{item}"
+                        }
+                    }
+                }
+            }
+
+            if eac_show {
+                div {
+                    style: "display:flex;flex-direction:column;gap:6px;padding:10px 14px;border-radius:8px;background:#1e2436;color:#c8d4f0;font-size:var(--text-caption);",
+                    div {
+                        style: "display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;",
+                        span {
+                            style: "font-weight:600;color:#ffffff;",
+                            "EAC Linux v2"
+                        }
+                        span {
+                            style: "font-size:var(--text-micro);color:#a8b4d0;",
+                            "{eac_label}"
+                        }
+                    }
+                    if let Some(message) = eac_message_text.clone() {
+                        span { "{message}" }
+                    }
+                    if !eac_missing.is_empty() {
+                        for item in eac_missing.clone() {
+                            span {
+                                style: "font-size:var(--text-micro);color:#a8b4d0;",
+                                "• {item}"
+                            }
+                        }
+                    }
+                    if let Some(notice) = eac_notice.clone() {
+                        span {
+                            style: "font-size:var(--text-micro);color:var(--warning);",
+                            "{notice}"
+                        }
+                    }
+                    if let Some(argv) = eac_reboot.clone() {
+                        if reboot_confirming {
+                            div {
+                                style: "display:flex;gap:8px;flex-wrap:wrap;",
+                                button {
+                                    onclick: move |_| {
+                                        let mut command = std::process::Command::new(&argv[0]);
+                                        command.args(&argv[1..]);
+                                        match command.spawn() {
+                                            Ok(_) => eac_message.set(
+                                                "Rebooting into the EAC entry…".to_string(),
+                                            ),
+                                            Err(error) => eac_message.set(format!(
+                                                "could not run `{}`: {error}",
+                                                argv.join(" ")
+                                            )),
+                                        }
+                                    },
+                                    style: "padding:6px 12px;border-radius:8px;border:1px solid #4a5a8c;background:#2e3a56;color:#ffffff;font-size:var(--text-micro);cursor:pointer;",
+                                    "Reboot now"
+                                }
+                                button {
+                                    onclick: move |_| reboot_confirm.set(false),
+                                    style: "padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#14141c;color:var(--text-muted);font-size:var(--text-micro);cursor:pointer;",
+                                    "Cancel"
+                                }
+                            }
+                        } else {
+                            button {
+                                onclick: move |_| reboot_confirm.set(true),
+                                style: "align-self:flex-start;padding:6px 12px;border-radius:8px;border:1px solid #4a5a8c;background:#2e3a56;color:#ffffff;font-size:var(--text-micro);cursor:pointer;",
+                                "Reboot into the EAC entry and play"
+                            }
+                        }
+                    } else if eac_needs_entry {
+                        span {
+                            style: "font-family:monospace;font-size:var(--text-micro);color:#a8b4d0;overflow-wrap:anywhere;",
+                            "run: {eac_command}"
+                        }
+                    }
+                    if !eac_report.is_empty() {
+                        span {
+                            style: "font-size:var(--text-micro);color:#a8b4d0;",
+                            "{eac_report}"
                         }
                     }
                 }
