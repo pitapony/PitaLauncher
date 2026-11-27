@@ -5,22 +5,23 @@
 //! shell asks for, the CSS its root wears, and the toggle that reconfigures the
 //! same window without restarting the process.
 //!
-//! Two shells, one process. The desktop shell is a windowed, decorated frame at
-//! 1280×800; the console shell is undecorated and fullscreen with a TV overscan
+//! Two shells, one process. The desktop shell is a frameless, windowed frame at
+//! 1280×800 whose app header doubles as the titlebar (drag to move, minimize and
+//! close); the console shell is undecorated and fullscreen with a TV overscan
 //! margin and a larger base type. Toggling only changes the window flags and the
 //! CSS — the same components, the same focus graphs, the same session.
 
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use dioxus::desktop::tao::dpi::LogicalSize;
+use dioxus::desktop::tao::dpi::{LogicalSize, PhysicalPosition};
 use dioxus::desktop::tao::monitor::MonitorHandle;
-use dioxus::desktop::tao::window::{Fullscreen, WindowBuilder};
+use dioxus::desktop::tao::window::{Fullscreen, Window, WindowBuilder};
 use dioxus::prelude::*;
 use pitagames_core::design::{self, DesignTokens};
 use pitagames_core::ui::{
     AppConfig, DESKTOP_HEIGHT, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH, DESKTOP_WIDTH, DisplayConfig,
-    Shell,
+    MonitorInfo, Placement, Shell,
 };
 
 /// The base type size of each shell, before the UI scale is applied.
@@ -98,12 +99,16 @@ pub struct WindowConfig {
 }
 
 impl WindowConfig {
-    /// The desktop shell's frame: decorated, 1280×800, resizable.
+    /// The desktop shell's frame: frameless, 1280×800, resizable.
+    ///
+    /// The desktop shell is undecorated to match the plan; the titlebar it would
+    /// otherwise lose is drawn in the app header (drag to move, plus minimize
+    /// and close), so a frameless window cannot trap the player.
     pub fn desktop() -> Self {
         Self {
             title: "PitaGames".to_string(),
             fullscreen: false,
-            decorations: true,
+            decorations: false,
             maximized: false,
             monitor: None,
             width: DESKTOP_WIDTH as u32,
@@ -129,6 +134,16 @@ impl WindowConfig {
             min_height: DESKTOP_MIN_HEIGHT as u32,
         }
     }
+
+    /// Where a windowed frame should open, resolved against the attached
+    /// monitors.
+    ///
+    /// Pure, so the display model is testable without a window. The fullscreen
+    /// console shell picks its monitor handle in [`place_at_startup`] instead,
+    /// because a `Fullscreen` needs the handle, not a position.
+    pub fn startup_placement(&self, monitors: &[MonitorInfo]) -> Placement {
+        pitagames_core::ui::placement(self.monitor.as_deref(), self.width, self.height, monitors)
+    }
 }
 
 /// The window config for a shell.
@@ -141,9 +156,10 @@ pub fn window_config(shell: Shell, display: &DisplayConfig) -> WindowConfig {
 
 /// A startup [`WindowBuilder`] for a config.
 ///
-/// A named monitor cannot be resolved before the window exists (monitor handles
-/// come from the event loop), so startup opens on the primary monitor; the
-/// preference is honoured by the first runtime toggle.
+/// A named monitor cannot be resolved here (monitor handles come from the event
+/// loop, and this runs before the window exists), so the builder opens on the
+/// primary; [`place_at_startup`] re-places the built window on the configured
+/// monitor through Dioxus's `with_on_window` hook.
 pub fn window_builder(config: &WindowConfig) -> WindowBuilder {
     let mut builder = WindowBuilder::new()
         .with_title(config.title.clone())
@@ -154,6 +170,13 @@ pub fn window_builder(config: &WindowConfig) -> WindowBuilder {
         ))
         .with_decorations(config.decorations)
         .with_resizable(true);
+    // Naming an explicit position stops Dioxus's debug-only window-state restore
+    // from overriding the monitor placement below (`place_at_startup` moves the
+    // window to the configured monitor either way; with no monitor the window
+    // is left where the window manager puts it).
+    if config.monitor.is_some() {
+        builder = builder.with_position(PhysicalPosition::new(0, 0));
+    }
     if config.fullscreen {
         builder = builder.with_fullscreen(Some(Fullscreen::Borderless(None)));
     }
@@ -161,6 +184,58 @@ pub fn window_builder(config: &WindowConfig) -> WindowBuilder {
         builder = builder.with_maximized(true);
     }
     builder
+}
+
+/// Place a freshly built window on the configured monitor.
+///
+/// A monitor handle only exists once the window is built, so the named monitor
+/// cannot be resolved in [`window_builder`] (which runs before the event loop
+/// reports any monitor). `main` runs this from Dioxus's `with_on_window` hook,
+/// which fires after `Window::build` and before the webview is created, so the
+/// window is placed before it is ever painted. With no configured monitor — or
+/// a name that is not attached — the window is left on the primary, which is
+/// the platform default.
+///
+/// The centring compares the logical window size against the monitor's physical
+/// geometry, so it assumes a scale factor of 1. A HiDPI display is part of the
+/// deferred 4K pass (`docs/m2.5-shells.md`).
+pub fn place_at_startup(window: &Window, config: &WindowConfig) {
+    // Keep the handle beside its geometry: the fullscreen path needs the handle
+    // itself, and re-enumerating would assume the two calls agree on order.
+    let attached: Vec<(MonitorHandle, MonitorInfo)> = window
+        .available_monitors()
+        .map(|handle| {
+            let position = handle.position();
+            let size = handle.size();
+            let info = MonitorInfo::new(
+                handle.name(),
+                position.x,
+                position.y,
+                size.width,
+                size.height,
+            );
+            (handle, info)
+        })
+        .collect();
+    let infos: Vec<MonitorInfo> = attached.iter().map(|(_, info)| info.clone()).collect();
+
+    // A fullscreen window is put on a monitor by handle, not by position.
+    if config.fullscreen {
+        let Some(index) = pitagames_core::ui::select_monitor(config.monitor.as_deref(), &infos)
+        else {
+            return;
+        };
+        let handle = attached[index].0.clone();
+        window.set_fullscreen(Some(Fullscreen::Borderless(Some(handle))));
+        return;
+    }
+
+    // The windowed placement is the pure model, so the startup seam and its
+    // tests share one answer. `Placement::Default` leaves the window where the
+    // window manager put it (the primary).
+    if let Placement::Center { x, y } = config.startup_placement(&infos) {
+        window.set_outer_position(PhysicalPosition::new(x, y));
+    }
 }
 
 /// Reconfigure the live window for a config.
@@ -379,6 +454,17 @@ pub fn root_style(shell: Shell, display: &DisplayConfig) -> String {
 /// reading the shell's `--hit-min` token from the root style.
 pub const HIT_FLOOR: &str = "min-height:var(--hit-min);min-width:var(--hit-min);";
 
+/// A frameless titlebar control (minimize, close) for the desktop shell.
+///
+/// The desktop window has no decoration, so these are the only way to minimize
+/// or close it. They carry the shell's hit floor, so a pointer cannot miss the
+/// one control that stops the window being trapped.
+pub fn window_control_style() -> String {
+    format!(
+        "display:inline-flex;align-items:center;justify-content:center;padding:0 12px;border:1px solid #2c2c38;border-radius:8px;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;{HIT_FLOOR}"
+    )
+}
+
 /// The app header's inline style for a shell.
 ///
 /// The wordmark reads `--text-title` and the subtitle `--text-caption`, so the
@@ -509,15 +595,74 @@ mod tests {
     }
 
     #[test]
-    fn the_desktop_frame_is_decorated_and_windowed() {
+    fn the_desktop_frame_is_frameless_and_windowed() {
         let config = window_config(Shell::Desktop, &DisplayConfig::default());
         assert!(!config.fullscreen);
-        assert!(config.decorations);
+        // The desktop shell is undecorated; the app header is the titlebar.
+        assert!(!config.decorations);
         assert!(!config.maximized);
         assert_eq!(config.width, 1_280);
         assert_eq!(config.height, 800);
         assert_eq!(config.min_width, 900);
         assert_eq!(config.min_height, 560);
+    }
+
+    #[test]
+    fn the_desktop_window_opens_on_the_configured_monitor() {
+        let monitors = [
+            MonitorInfo::new(Some("eDP-1".to_string()), 0, 0, 1920, 1080),
+            MonitorInfo::new(Some("HDMI-A-1".to_string()), 1920, 0, 2560, 1440),
+        ];
+        let config = window_config(
+            Shell::Desktop,
+            &DisplayConfig {
+                monitor: Some("HDMI-A-1".to_string()),
+                ..DisplayConfig::default()
+            },
+        );
+        assert_eq!(
+            config.startup_placement(&monitors),
+            Placement::Center {
+                x: 1920 + (2560 - 1280) / 2,
+                y: (1440 - 800) / 2,
+            }
+        );
+
+        // The default desktop frame names no monitor, so it stays on the
+        // primary.
+        assert_eq!(
+            window_config(Shell::Desktop, &DisplayConfig::default()).startup_placement(&monitors),
+            Placement::Default
+        );
+    }
+
+    #[test]
+    fn a_configured_monitor_pins_an_explicit_startup_position() {
+        // The explicit position exists only to stop Dioxus's debug-only window
+        // state restore from fighting the monitor placement; the primary case
+        // leaves the position to the window manager.
+        assert!(
+            window_builder(&window_config(Shell::Desktop, &DisplayConfig::default()))
+                .window
+                .position
+                .is_none()
+        );
+        let named = window_config(
+            Shell::Console,
+            &DisplayConfig {
+                monitor: Some("HDMI-A-1".to_string()),
+                ..DisplayConfig::default()
+            },
+        );
+        assert!(window_builder(&named).window.position.is_some());
+    }
+
+    #[test]
+    fn the_window_controls_carry_the_hit_floor() {
+        let style = window_control_style();
+        assert!(style.contains("cursor:pointer;"), "{style}");
+        assert!(style.contains(HIT_FLOOR), "{style}");
+        assert!(style.contains("font-size:var(--text-caption);"), "{style}");
     }
 
     #[test]

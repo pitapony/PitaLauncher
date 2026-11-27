@@ -157,15 +157,24 @@ fn run_gui(args: &shell::ShellArgs) {
     // A checkout has no packaged menu entry; write one that points here.
     desktop_entry::ensure();
 
-    // The window is built for the resolved shell: decorated and windowed for the
-    // desktop, undecorated and fullscreen for the console.
-    let window = shell::window_builder(&shell::window_config(shell, &display));
+    // The window is built for the resolved shell: frameless and windowed for
+    // the desktop, undecorated and fullscreen for the console.
+    let window_config = shell::window_config(shell, &display);
+    let window = shell::window_builder(&window_config);
 
-    // Dioxus installs a default Window/Edit/Help menu bar on a decorated
-    // window. The launcher has no use for it (navigation lives in the left
-    // rail), so pass an empty menu.
+    // The built window's config is kept for the startup placement below.
+    let startup_config = window_config.clone();
     let mut config = dioxus::desktop::Config::new()
         .with_window(window)
+        // A monitor handle only exists once the window is built, so the
+        // configured monitor is applied here — after `Window::build`, before
+        // the webview — rather than in the builder.
+        .with_on_window(move |window, _dom| {
+            shell::place_at_startup(&window, &startup_config);
+        })
+        // Dioxus installs a default Window/Edit/Help menu bar. The launcher has
+        // no use for it (navigation lives in the left rail), so pass an empty
+        // menu.
         .with_menu(None);
     // The window icon is painted in code (`icon::rgba`); without one the
     // window falls back to the toolkit's default placeholder.
@@ -797,6 +806,9 @@ fn App() -> Element {
     }
     let header_style = shell::header_style(shell_state.shell(), &shell_state.display);
     let shell_label = shell_state.shell().label();
+    // The desktop shell is frameless, so its header is the titlebar: dragging it
+    // moves the window. The console shell has no header controls.
+    let desktop_shell = !shell_state.shell().is_console();
     let shell_hint = if shell_state.shell().is_console() {
         "Guide or F11 returns to the desktop"
     } else {
@@ -1160,6 +1172,13 @@ fn App() -> Element {
 
             header {
                 style: "{header_style}",
+                // The frameless desktop window is moved by dragging its header.
+                // The console shell has its own window and ignores this.
+                onmousedown: move |_| {
+                    if desktop_shell {
+                        let _ = dioxus::desktop::window().window.drag_window();
+                    }
+                },
                 h1 {
                     style: "font-size:var(--text-title);font-weight:600;margin:0;color:#ffffff;",
                     "PitaGames"
@@ -1205,7 +1224,30 @@ fn App() -> Element {
                         oninput: move |event| session.write().filter_mut().query = event.value(),
                         onfocus: move |_| session.write().set_text_focused(true),
                         onblur: move |_| session.write().set_text_focused(false),
+                        // The search field is inside the draggable header; a
+                        // press here must focus it, not start a window drag.
+                        onmousedown: move |event| event.stop_propagation(),
                         style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-size:inherit;outline:none;",
+                    }
+                    // Frameless chrome: the window has no decorations, so
+                    // minimize and close live in the header. Without them a
+                    // frameless window would be impossible to put away.
+                    div {
+                        style: "display:flex;align-items:center;gap:6px;margin-left:12px;",
+                        button {
+                            title: "Minimize",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| dioxus::desktop::window().window.set_minimized(true),
+                            style: shell::window_control_style(),
+                            "–"
+                        }
+                        button {
+                            title: "Close",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| dioxus::desktop::window().close(),
+                            style: shell::window_control_style(),
+                            "✕"
+                        }
                     }
                 }
             }
