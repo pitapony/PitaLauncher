@@ -10,6 +10,7 @@
 //! selectable box, so a refused clipboard is a manual Ctrl+C, not a dead end.
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 
 /// Copy `text`, then report success back: `copied`, or `failed` after both
 /// clipboard paths fail. A second message resets the label.
@@ -49,7 +50,7 @@ pub struct CopyButtonProps {
     /// The text to copy. An empty string disables the button.
     pub text: String,
     /// The idle label; the button shows `Copied` / `Copy failed` transiently.
-    #[props(default = "Copy".to_string())]
+    #[props(default = t("action.copy").to_string())]
     pub label: String,
 }
 
@@ -62,8 +63,8 @@ pub fn CopyButton(props: CopyButtonProps) -> Element {
     let mut state = use_signal(|| CopyState::Idle);
 
     let caption: &str = match state() {
-        CopyState::Copied => "Copied",
-        CopyState::Failed => "Copy failed",
+        CopyState::Copied => t("action.copied"),
+        CopyState::Failed => t("action.copy_failed"),
         CopyState::Idle => label.as_str(),
     };
 

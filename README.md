@@ -240,6 +240,7 @@ issue templates in [`.github/ISSUE_TEMPLATE`](.github/ISSUE_TEMPLATE).
 - [`docs/m2.5-handoff.md`](docs/m2.5-handoff.md) — the launch hand-off: hide the window while a game runs and come back when it ends.
 - [`docs/m2.5-overlay.md`](docs/m2.5-overlay.md) — the console overlay: the `Menu`/`Start` system menu.
 - [`docs/m2.5-safe-mode.md`](docs/m2.5-safe-mode.md) — safe mode and the window watchdog.
+- [`docs/m2.5-testing.md`](docs/m2.5-testing.md) — the focus-graph property tests, replay fixtures and 1080p/4K layout snapshots.
 - [`docs/beta-testing.md`](docs/beta-testing.md) — the beta tester checklist: clean install to a launched game, the console path and the TV checklist.
 - [`AGENTS.md`](AGENTS.md) — contributor and agent constraints.
 

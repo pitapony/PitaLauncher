@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 
 use crate::MetadataQueue;
 use crate::detail::DbHandle;
@@ -88,33 +89,36 @@ pub fn AccountView(props: AccountProps) -> Element {
     let forget_root = steam_root.clone();
 
     let status_line = match &account {
-        None => "reading the key store…".to_string(),
+        None => t("account.reading").to_string(),
         Some(account) => match account.masked_key() {
-            Some(masked) => format!("key {masked} · stored in {}", account.backend_label()),
-            None => "installed only · no API key".to_string(),
+            Some(masked) => t("account.key_status")
+                .replace("{masked}", &masked)
+                .replace("{backend}", &account.backend_label()),
+            None => t("account.installed_only").to_string(),
         },
     };
     let steam_id_line = match &account {
         None => String::new(),
         Some(account) => match (&account.steam_id, &account.steam_id_source) {
-            (Some(id), Some(source)) => format!("SteamID {id} · {source}"),
-            (Some(id), None) => format!("SteamID {id}"),
-            (None, _) => "no Steam account found in userdata".to_string(),
+            (Some(id), Some(source)) => t("account.steam_id_source")
+                .replace("{id}", id)
+                .replace("{source}", source),
+            (Some(id), None) => t("account.steam_id").replace("{id}", id),
+            (None, _) => t("account.no_steam_account").to_string(),
         },
     };
     let owned_line = match (owned.total, owned.fetched_at) {
-        (None, _) => "the account's owned list has not been fetched yet".to_string(),
+        (None, _) => t("account.owned_not_fetched").to_string(),
         (Some(total), Some(_)) => {
             let age = owned.fetch_age(time::OffsetDateTime::now_utc());
             match age {
-                Some(age) => format!(
-                    "{total} games owned · refreshed {}",
-                    crate::format::duration_ago(age)
-                ),
-                None => format!("{total} games owned"),
+                Some(age) => t("account.owned_refreshed")
+                    .replace("{count}", &total.to_string())
+                    .replace("{when}", &crate::format::duration_ago(age)),
+                None => t("account.owned").replace("{count}", &total.to_string()),
             }
         }
-        (Some(total), None) => format!("{total} games owned"),
+        (Some(total), None) => t("account.owned").replace("{count}", &total.to_string()),
     };
 
     rsx! {
@@ -125,11 +129,11 @@ pub fn AccountView(props: AccountProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:6px;",
                 span {
                     style: "font-size:16px;font-weight:600;color:#ffffff;",
-                    "Steam account"
+                    {t("account.title")}
                 }
                 span {
                     style: "font-size:12px;color:#78788a;line-height:1.5;",
-                    "PitaGames reads the library Steam has installed on this machine. Adding a Steam Web API key also shows the games the account owns but has not installed, so they can be installed from here."
+                    {t("account.description")}
                 }
             }
 
@@ -144,7 +148,7 @@ pub fn AccountView(props: AccountProps) -> Element {
                     if owned.pending {
                         span {
                             style: "font-size:11px;color:#7a9ad6;",
-                            "refreshing…"
+                            {t("account.refreshing")}
                         }
                     }
                 }
@@ -164,12 +168,12 @@ pub fn AccountView(props: AccountProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:8px;padding:14px 16px;border-radius:12px;background:#1a1a22;border:1px solid #26262f;",
                 span {
                     style: "font-size:10px;text-transform:uppercase;letter-spacing:0.06em;color:#78788a;",
-                    "Steam Web API key"
+                    {t("account.key_title")}
                 }
                 div {
                     style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;",
                     input {
-                        placeholder: "32 hexadecimal characters",
+                        placeholder: t("account.key_placeholder"),
                         value: "{key_input}",
                         oninput: move |event| key_input.set(event.value()),
                         style: "flex:1;min-width:260px;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;font-size:12px;outline:none;",
@@ -184,7 +188,7 @@ pub fn AccountView(props: AccountProps) -> Element {
                                     let backend = updated.backend_label();
                                     account_state.set(Some(updated.clone()));
                                     key_input.set(String::new());
-                                    notice.set(format!("Key saved to the {backend}."));
+                                    notice.set(t("account.key_saved").replace("{backend}", &backend));
                                     if ready {
                                         refresh_after_save(&updated);
                                     }
@@ -193,7 +197,7 @@ pub fn AccountView(props: AccountProps) -> Element {
                             }
                         },
                         style: action_style(!key_input.read().trim().is_empty(), "#2e3a56"),
-                        "Save key"
+                        {t("account.save_key")}
                     }
                     if configured {
                         button {
@@ -213,19 +217,19 @@ pub fn AccountView(props: AccountProps) -> Element {
                                                 }
                                             });
                                         }
-                                        notice.set("Key removed. The library is installed-only again.".to_string());
+                                        notice.set(t("account.key_removed").to_string());
                                     }
                                     Err(error) => notice.set(error),
                                 }
                             },
                             style: action_style(true, "#3a2226"),
-                            "Forget key"
+                            {t("account.forget_key")}
                         }
                     }
                 }
                 span {
                     style: "font-size:11px;color:#78788a;line-height:1.5;",
-                    "Create a key at steamcommunity.com/dev/apikey. It is stored in the desktop keyring when one is available, otherwise in a 0600 file under the config directory; it is only ever sent to api.steampowered.com."
+                    {t("account.key_help")}
                 }
             }
 
@@ -240,7 +244,7 @@ pub fn AccountView(props: AccountProps) -> Element {
                         }
                     },
                     style: action_style(ready && !owned.pending, "#243024"),
-                    "Refresh owned games"
+                    {t("account.refresh_owned")}
                 }
             }
 

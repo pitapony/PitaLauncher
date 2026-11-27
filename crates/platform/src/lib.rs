@@ -24,10 +24,12 @@ pub mod anticheat;
 pub mod capability;
 pub mod compat;
 pub mod disk;
+pub mod eac;
 pub mod envc;
 pub mod gpu;
 pub mod launch;
 pub mod logs;
+pub mod nr;
 pub mod power;
 pub mod prefix;
 pub mod proton;
@@ -45,6 +47,10 @@ pub use compat::{
     default_shipped_dirs, default_user_dirs,
 };
 pub use disk::{DirSize, SizeLimits, Space, SpaceCheck};
+pub use eac::{
+    EacProbe, EacReadiness, EacVerdict, NOT_VALIDATED, Requirement, RequirementCheck, probe,
+    reboot_argv, verdict,
+};
 pub use envc::{
     CompileRequest, CompiledRuntime, EnvcError, GraphicsContext, compile, compile_runtime,
     shim_proton,
@@ -57,6 +63,10 @@ pub use launch::{
     UMU_RUN, prepare, start, terminate,
 };
 pub use logs::{LogFile, LogKind, TAIL_BYTES, Tail};
+pub use nr::{
+    BackendPin, BackendRegistry, Cost, NrError, NrPlan, NrRequest, NrVerdict, Resolution,
+    backend_for, default_scale, is_experimental, model_scale_preset, pe_is_64_bit,
+};
 pub use power::{PowerAction, PowerBackend, PowerError, request};
 pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{

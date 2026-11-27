@@ -17,8 +17,9 @@ use anyhow::{Context, Result, bail};
 use pitagames_core::desktop::{self, DesktopEntry};
 use pitagames_core::paths;
 use pitagames_core::{
-    AntiCheat, Game, GameId, GameMetadata, LaunchSpec, Platforms, Profile, ProtonRef, ShimProfile,
-    Store, read_shim_profile, shim_launch_options, shim_profile_path, steam_install,
+    AntiCheat, Budget, Game, GameId, GameMetadata, LaunchSpec, Measurement, Metric, Platforms,
+    Profile, ProtonRef, ShimProfile, Store, Verdict, read_shim_profile, shim_launch_options,
+    shim_profile_path, steam_install,
 };
 use pitagames_db::{Db, GameRepository, HistoryRepository, StoredLaunch};
 use pitagames_mods::ini::{IniSetting, IniSurface};
@@ -31,10 +32,12 @@ use pitagames_platform::anticheat::{
 use pitagames_platform::capability::{self, Availability, Field};
 use pitagames_platform::compat::{CompatDb, CompatEntry};
 use pitagames_platform::disk;
+use pitagames_platform::eac::{self, EacProbe, EacReadiness, EacVerdict};
 use pitagames_platform::gpu::{self, GpuProbe, GpuProfile, HdrSupport};
 use pitagames_platform::launch as handoff;
 use pitagames_platform::launch::{Outcome, Prepared};
 use pitagames_platform::logs as log_files;
+use pitagames_platform::nr::{self, BackendRegistry, NrRequest, Resolution};
 use pitagames_platform::prefix::{self, Prefix};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonRoot, ProtonSource};
 use pitagames_platform::proton_update::{self, ProtonPin, Registry};
@@ -89,13 +92,16 @@ fn run() -> Result<()> {
         "proton" => proton(&args.collect::<Vec<_>>()),
         "gpu" => gpu(&args.collect::<Vec<_>>()),
         "capability" => capability(&args.collect::<Vec<_>>()),
+        "nr" => nr(&args.collect::<Vec<_>>()),
         "compat" => compat(&args.collect::<Vec<_>>()),
         "anticheat" => anticheat(&args.collect::<Vec<_>>()),
+        "eac" => eac(&args.collect::<Vec<_>>()),
         "profile" => profile(&args.collect::<Vec<_>>()),
         "logs" => logs(&args.collect::<Vec<_>>()),
         "import" => import(&args.collect::<Vec<_>>()),
         "prefix" => prefix(&args.collect::<Vec<_>>()),
         "disk" => disk(&args.collect::<Vec<_>>()),
+        "perf" => perf(&args.collect::<Vec<_>>()),
         "mods" => mods(&args.collect::<Vec<_>>()),
         "history" => history(&args.collect::<Vec<_>>()),
         "launch" => launch(&args.collect::<Vec<_>>()),
@@ -1201,6 +1207,398 @@ fn capability_usage() -> String {
         .to_string()
 }
 
+// -- nr ---------------------------------------------------------------------
+
+/// Resolve the neural-rendering backend, its pinned release and the cost preset.
+///
+/// Read-only: it folds the detected GPU, the game's curated compat entry and the
+/// backend registry into `nr::plan`, prints the default `model_scale` and cost
+/// for the chosen resolution, and — with `--fetch <dir>` — runs the whole
+/// fetch → verify → unpack pipeline from a fixture, with no network.
+fn nr(args: &[String]) -> Result<()> {
+    let parsed = parse_nr_args(args)?;
+    if parsed.help {
+        println!("{}", nr_usage());
+        return Ok(());
+    }
+
+    let mut probe = match &parsed.root {
+        Some(root) => GpuProbe::at(root),
+        None => GpuProbe::host(),
+    };
+    if let Some(file) = &parsed.vulkaninfo {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        probe = probe.with_vulkaninfo(text);
+    }
+    let gpu = gpu::detect(&probe);
+    for warning in &gpu.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let shipped = if parsed.shipped.is_empty() {
+        pitagames_platform::compat::default_shipped_dirs()
+    } else {
+        parsed.shipped.clone()
+    };
+    let user = if parsed.user.is_empty() {
+        pitagames_platform::compat::default_user_dirs()
+    } else {
+        parsed.user.clone()
+    };
+    let db = CompatDb::load_from(&shipped, &user);
+    for warning in db.warnings() {
+        eprintln!("warning: {warning}");
+    }
+
+    let game = match parsed.positional.as_slice() {
+        [] => None,
+        [store, id] => Some(GameId::new(
+            Store::from_str(store).map_err(|error| anyhow::anyhow!("{error}"))?,
+            id.clone(),
+        )),
+        [_] => bail!(
+            "expected `<store> <id>` or no positional arguments\n\n{}",
+            nr_usage()
+        ),
+        _ => bail!("too many positional arguments\n\n{}", nr_usage()),
+    };
+    let entry = game.as_ref().and_then(|id| db.get(id));
+
+    let registry = match &parsed.registry {
+        Some(path) => BackendRegistry::load(path)
+            .with_context(|| format!("cannot read {}", path.display()))?,
+        None => BackendRegistry::effective(nr::default_user_path().as_deref())
+            .context("cannot read the DLSSNR backend registry")?,
+    };
+
+    let mut profile = Profile::new(
+        game.clone()
+            .unwrap_or_else(|| GameId::new(Store::Steam, "0")),
+        "nr",
+    );
+    if let Some(backend) = parsed.backend {
+        profile.neural_rendering = nr_profile(backend);
+    }
+
+    let proton = nr_proton(&parsed)?;
+    let game_64bit = match &parsed.game_exe {
+        Some(exe) => Some(
+            nr::pe_is_64_bit(exe)
+                .with_context(|| format!("cannot read the PE header of {}", exe.display()))?,
+        ),
+        None => None,
+    };
+
+    let verdict = nr::plan(
+        NrRequest::new(&gpu, &profile, &registry)
+            .with_compat(entry)
+            .with_proton(proton.as_ref())
+            .with_game_64bit(game_64bit),
+    );
+
+    // The preset is computable whether or not the plan is available, as long as
+    // the card has an NR path.
+    let backend = verdict
+        .plan()
+        .map(|plan| plan.backend)
+        .or_else(|| nr::backend_for(gpu.arch));
+    let vram = parsed.vram.or(gpu.vram_bytes);
+    let model_scale =
+        backend.map(|backend| nr::default_scale(entry, backend, gpu.arch, parsed.resolution, vram));
+    let cost = backend.map(|backend| {
+        nr::cost(
+            backend,
+            parsed.resolution,
+            model_scale.expect("a backend has a preset"),
+        )
+    });
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "gpu": gpu,
+            "verdict": verdict,
+            "resolution": parsed.resolution.as_str(),
+            "model_scale": model_scale,
+            "cost": cost,
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        let name = gpu.name.as_deref().unwrap_or("unknown GPU");
+        println!("GPU: {name} ({})", gpu.arch.label());
+        match verdict.plan() {
+            Some(plan) => {
+                println!(
+                    "Backend: {} ({} {} @ {})",
+                    nr::backend_label(plan.backend),
+                    plan.pin.source.label(),
+                    plan.pin.project,
+                    plan.pin.tag
+                );
+                println!("Pin: {}", plan.pin.asset);
+                println!(
+                    "Experimental: {}",
+                    if plan.experimental { "yes" } else { "no" }
+                );
+            }
+            None => println!("Hidden: {}", verdict.reason().unwrap_or("unknown")),
+        }
+        if let (Some(scale), Some(cost)) = (model_scale, cost) {
+            println!(
+                "Model scale: {scale} % at {} (≈{:.1} ms, {:.1} GB)",
+                parsed.resolution.label(),
+                cost.millis,
+                cost.vram_bytes as f64 / 1_000_000_000.0
+            );
+        }
+    }
+
+    if let Some(fixture) = &parsed.fixture {
+        let Some(plan) = verdict.plan() else {
+            bail!(
+                "nothing to fetch: the plan is hidden ({})",
+                verdict.reason().unwrap_or("unknown")
+            );
+        };
+        let fetcher = nr_release_fixture(&plan.pin, fixture)?;
+        let dest = parsed
+            .dest
+            .clone()
+            .unwrap_or_else(|| fixture.join("unpacked"));
+        let report = plan
+            .pin
+            .fetch_and_unpack(&fetcher, &dest)
+            .with_context(|| format!("cannot fetch {}", plan.pin.asset))?;
+        if parsed.json {
+            let payload = serde_json::json!({
+                "asset": report.asset,
+                "sha256": report.sha256,
+                "archive": report.kind.label(),
+                "dest": report.dest,
+                "files": report.files,
+            });
+            println!("{}", serde_json::to_string_pretty(&payload)?);
+        } else {
+            println!(
+                "Fetched `{}` (sha256 {}) → {} file(s) in {}",
+                report.asset,
+                report.sha256,
+                report.files.len(),
+                report.dest.display()
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// The default DLSSNR profile a `--backend` flag builds, so the cross-offer rule
+/// can be exercised from the CLI.
+fn nr_profile(
+    backend: pitagames_core::profile::NrBackend,
+) -> pitagames_core::profile::NeuralRendering {
+    use pitagames_core::profile::{
+        ModelSource, NeuralRendering, NrModel, NrProcessing, NrRoute, PkgArch,
+    };
+
+    NeuralRendering::DlssNrAmd {
+        backend,
+        version: String::new(),
+        route: NrRoute::Optiscaler,
+        model: NrModel::CcSmallFp8,
+        model_scale: 100,
+        processing: NrProcessing::RenoDx,
+        pkg_arch: PkgArch::X86_64,
+        captured_env: std::collections::BTreeMap::new(),
+        model_source: ModelSource::CachedInPackage,
+    }
+}
+
+/// The resolved Proton for the diagnostic (an explicit build wins; a fixture
+/// root suppresses host discovery).
+fn nr_proton(parsed: &NrArgs) -> Result<Option<ProtonInstall>> {
+    if let Some(dir) = &parsed.proton {
+        let install = ProtonInstall::from_dir(dir, ProtonSource::Explicit)
+            .with_context(|| format!("{} is not a Proton build", dir.display()))?;
+        return Ok(Some(install));
+    }
+    if parsed.root.is_some() {
+        return Ok(None);
+    }
+    Ok(proton::discover().resolve(&ProtonRef::Auto).ok().flatten())
+}
+
+/// A [`MapFetcher`] over a `mods release`-shaped fixture for one pin.
+///
+/// The directory holds `release.json` (the API body the host parses) and the
+/// asset itself under its pinned name, so a whole fetch → verify → unpack run
+/// needs no network.
+fn nr_release_fixture(pin: &nr::BackendPin, fixture: &Path) -> Result<MapFetcher> {
+    let release_path = fixture.join("release.json");
+    let body = fs::read(&release_path)
+        .with_context(|| format!("cannot read {}", release_path.display()))?;
+    let release = pin
+        .source
+        .parse(std::str::from_utf8(&body).context("release.json is not UTF-8")?)
+        .with_context(|| format!("cannot parse {}", release_path.display()))?;
+    let asset = release.asset(&pin.asset).with_context(|| {
+        format!(
+            "{} lists no asset named `{}`",
+            release_path.display(),
+            pin.asset
+        )
+    })?;
+    let archive_path = fixture.join(&pin.asset);
+    Ok(MapFetcher::new()
+        .with(pin.source.release_url(&pin.project, &pin.tag), body)
+        .with(
+            asset.url.clone(),
+            fs::read(&archive_path)
+                .with_context(|| format!("cannot read {}", archive_path.display()))?,
+        ))
+}
+
+/// Parsed `nr` arguments.
+#[derive(Debug, Default)]
+struct NrArgs {
+    positional: Vec<String>,
+    root: Option<PathBuf>,
+    vulkaninfo: Option<PathBuf>,
+    proton: Option<PathBuf>,
+    registry: Option<PathBuf>,
+    shipped: Vec<PathBuf>,
+    user: Vec<PathBuf>,
+    backend: Option<pitagames_core::profile::NrBackend>,
+    resolution: Resolution,
+    vram: Option<u64>,
+    game_exe: Option<PathBuf>,
+    fixture: Option<PathBuf>,
+    dest: Option<PathBuf>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_nr_args(args: &[String]) -> Result<NrArgs> {
+    let mut parsed = NrArgs {
+        resolution: Resolution::P1080,
+        ..NrArgs::default()
+    };
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "-h" | "--help" => parsed.help = true,
+            "--root" | "--vulkaninfo" | "--proton" | "--registry" | "--shipped" | "--user"
+            | "--backend" | "--resolution" | "--vram" | "--game-exe" | "--fetch" | "--dest" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a value"))?;
+                set_nr_arg(&mut parsed, arg, value)?;
+            }
+            _ if arg.starts_with("--") && arg.contains('=') => {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                set_nr_arg(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => parsed.positional.push(other.to_string()),
+            other => bail!("unexpected argument `{other}` for `nr`\n\n{}", nr_usage()),
+        }
+        index += 1;
+    }
+
+    match parsed.positional.len() {
+        0 | 2 => {}
+        1 => bail!(
+            "expected `<store> <id>` or no positional arguments\n\n{}",
+            nr_usage()
+        ),
+        _ => bail!("too many positional arguments\n\n{}", nr_usage()),
+    }
+
+    Ok(parsed)
+}
+
+fn set_nr_arg(parsed: &mut NrArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a value");
+    }
+    match flag {
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--vulkaninfo" => parsed.vulkaninfo = Some(PathBuf::from(value)),
+        "--proton" => parsed.proton = Some(PathBuf::from(value)),
+        "--registry" => parsed.registry = Some(PathBuf::from(value)),
+        "--shipped" => parsed.shipped.push(PathBuf::from(value)),
+        "--user" => parsed.user.push(PathBuf::from(value)),
+        "--backend" => parsed.backend = Some(parse_backend(value)?),
+        "--resolution" => parsed.resolution = parse_resolution(value)?,
+        "--vram" => {
+            let gb: f64 = value
+                .parse()
+                .with_context(|| format!("`{value}` is not a VRAM size in GB"))?;
+            parsed.vram = Some((gb * 1_000_000_000.0).round() as u64);
+        }
+        "--game-exe" => parsed.game_exe = Some(PathBuf::from(value)),
+        "--fetch" => parsed.fixture = Some(PathBuf::from(value)),
+        "--dest" => parsed.dest = Some(PathBuf::from(value)),
+        other => bail!("internal error: unknown nr flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn parse_backend(value: &str) -> Result<pitagames_core::profile::NrBackend> {
+    use pitagames_core::profile::NrBackend;
+    match value {
+        "rdna4-upstream" | "rdna4_upstream" => Ok(NrBackend::Rdna4Upstream),
+        "rdna3-fork" | "rdna3_fork" => Ok(NrBackend::Rdna3Fork),
+        other => bail!("`{other}` is not a backend (rdna4-upstream or rdna3-fork)"),
+    }
+}
+
+fn parse_resolution(value: &str) -> Result<Resolution> {
+    match value {
+        "1080p" | "1080" => Ok(Resolution::P1080),
+        "1440p" | "1440" => Ok(Resolution::P1440),
+        "4k" | "2160p" | "2160" => Ok(Resolution::Uhd2160),
+        other => bail!("`{other}` is not a resolution (1080p, 1440p or 4k)"),
+    }
+}
+
+fn nr_usage() -> String {
+    "USAGE:\n    \
+     pitagames-cli nr [<store> <id>] [--root <dir>] [--vulkaninfo <file>]\n    \
+     \x20                 [--proton <dir>] [--registry <file>] [--shipped <dir>] [--user <dir>]\n    \
+     \x20                 [--backend <rdna4-upstream|rdna3-fork>] [--resolution <1080p|1440p|4k>]\n    \
+     \x20                 [--vram <gb>] [--game-exe <path>] [--fetch <dir>] [--dest <dir>] [--json]\n\n\
+     ARGS:\n    \
+     <store> <id>           Resolve against one game's compat entry, e.g. `steam 1091500`\n\n\
+     OPTIONS:\n    \
+     --root <dir>           Read a fixture sysfs tree (suppresses host Proton discovery)\n    \
+     --vulkaninfo <file>    Captured `vulkaninfo --summary` output\n    \
+     --proton <dir>         Resolve this Proton build for the runtime gate\n    \
+     --registry <file>      Use this backend pin file instead of the shipped + user one\n    \
+     --shipped <dir>        Read shipped compat entries from this directory (repeatable)\n    \
+     --user <dir>           Read user compat overrides from this directory (repeatable)\n    \
+     --backend <name>       Pin the DLSSNR backend (rdna4-upstream or rdna3-fork)\n    \
+     --resolution <name>    The resolution for the preset (1080p, 1440p or 4k)\n    \
+     --vram <gb>            Override the card's VRAM size for the preset\n    \
+     --game-exe <path>      Read this game executable's PE header for the 64-bit gate\n    \
+     --fetch <dir>          Fetch, verify and unpack the resolved pin from a fixture dir\n    \
+     --dest <dir>           Where --fetch unpacks (default `<dir>/unpacked`)\n    \
+     --json                 Print the plan and the cost as JSON\n    \
+     -h, --help             Show this help\n\n\
+     The plan resolves one backend per card — RDNA 4 gets the upstream package,\n\
+     RDNA 3 the experimental fork — never the other's. A card with no NR path, a\n\
+     cross-offer, a 32-bit game and a pinned release behind the game's\n\
+     dlssnr_min_version are each hidden with a reason; see docs/dlssnr.md. --fetch\n\
+     reads a fixture (release.json + the pinned asset) so the fetch → verify →\n\
+     unpack pipeline runs with no network; a wrong digest is refused."
+        .to_string()
+}
+
 /// Show the compiled shim profile the launcher writes for one game.
 ///
 /// The GUI writes `profiles/steam-<appid>.json` on every profile save and
@@ -1936,6 +2334,287 @@ fn parse_size_bytes(value: &str) -> Result<u64> {
             .with_context(|| format!("`{number}` is not a whole number"))?;
         Ok(amount.saturating_mul(multiplier))
     }
+}
+
+/// The performance budget diagnostic: check a harness measurement against the
+/// plan's budgets.
+fn perf(args: &[String]) -> Result<()> {
+    match args.first().map(String::as_str) {
+        Some("check") => perf_check(&args[1..]),
+        Some("-h") | Some("--help") | None => {
+            println!("{}", perf_usage());
+            Ok(())
+        }
+        Some(other) => bail!("unknown `perf` action `{other}`\n\n{}", perf_usage()),
+    }
+}
+
+/// Check one measurement JSON against the hardware budgets.
+///
+/// The harness (`scripts/perf-smoke.sh`) writes the measurement; this command
+/// is the one place the numbers are judged, so the container and the hardware
+/// runs cannot disagree about what "pass" means.
+fn perf_check(args: &[String]) -> Result<()> {
+    let parsed = parse_perf_args(args)?;
+    if parsed.help {
+        println!("{}", perf_usage());
+        return Ok(());
+    }
+
+    let input = match &parsed.file {
+        Some(path) => {
+            fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?
+        }
+        None => {
+            let mut buffer = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buffer)
+                .context("cannot read the measurement from stdin")?;
+            buffer
+        }
+    };
+
+    let mut measurement = Measurement::from_json(&input)?;
+    // The harness measures the whole process group (the launcher, the webview
+    // and WebKit's helpers); the launcher's own file cannot see them, so inject
+    // the figure here rather than make the script rewrite the JSON.
+    if let Some(bytes) = parsed.memory {
+        measurement.memory_bytes = Some(bytes);
+    }
+    let required = parsed
+        .required
+        .clone()
+        .unwrap_or_else(|| Metric::ALL.to_vec());
+    let budget = Budget::default();
+    let verdict = budget.check(&measurement, &required);
+
+    if parsed.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&perf_report_json(
+                &measurement,
+                &budget,
+                &required,
+                &verdict
+            ))?
+        );
+    } else {
+        for line in perf_report_lines(&measurement, &budget, &required, &verdict) {
+            println!("{line}");
+        }
+    }
+
+    match verdict {
+        Verdict::Pass => Ok(()),
+        Verdict::Fail(_) => bail!("performance budget not met"),
+        Verdict::Incomplete(missing) => {
+            let names: Vec<&str> = missing.iter().map(|metric| metric.as_str()).collect();
+            bail!(
+                "measurement is missing required metric(s): {}",
+                names.join(", ")
+            )
+        }
+    }
+}
+
+/// Parsed `perf check` arguments.
+#[derive(Debug, Default, PartialEq)]
+struct PerfArgs {
+    file: Option<PathBuf>,
+    required: Option<Vec<Metric>>,
+    /// Peak resident memory the harness measured, in bytes. Injected into the
+    /// measurement because the launcher cannot see the webview's other processes.
+    memory: Option<u64>,
+    json: bool,
+    help: bool,
+}
+
+fn parse_perf_args(args: &[String]) -> Result<PerfArgs> {
+    let mut parsed = PerfArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--file" => {
+                index += 1;
+                let value = args.get(index).with_context(|| "--file requires a path")?;
+                parsed.file = Some(PathBuf::from(value));
+            }
+            _ if arg.starts_with("--file=") => {
+                parsed.file = Some(PathBuf::from(&arg["--file=".len()..]));
+            }
+            "--require" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--require requires a metric list")?;
+                parsed.required = Some(parse_metric_list(value)?);
+            }
+            _ if arg.starts_with("--require=") => {
+                parsed.required = Some(parse_metric_list(&arg["--require=".len()..])?);
+            }
+            "--memory" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--memory requires a byte count")?;
+                parsed.memory = Some(parse_byte_count(value)?);
+            }
+            _ if arg.starts_with("--memory=") => {
+                parsed.memory = Some(parse_byte_count(&arg["--memory=".len()..])?);
+            }
+            "-h" | "--help" => parsed.help = true,
+            other => bail!(
+                "unexpected argument `{other}` for `perf check`\n\n{}",
+                perf_usage()
+            ),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+/// Parse a `--memory` byte count (plain bytes, or a `MiB`/`GiB` suffix).
+fn parse_byte_count(value: &str) -> Result<u64> {
+    parse_size_bytes(value).with_context(|| format!("`{value}` is not a byte count"))
+}
+
+/// Parse a comma-separated metric list; duplicates collapse and an empty list is
+/// an error rather than "enforce nothing".
+fn parse_metric_list(value: &str) -> Result<Vec<Metric>> {
+    let mut metrics = Vec::new();
+    for part in value.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let metric = Metric::parse(part).with_context(|| {
+            format!("unknown metric `{part}` (expected cold-start, frame-time or memory)")
+        })?;
+        if !metrics.contains(&metric) {
+            metrics.push(metric);
+        }
+    }
+    if metrics.is_empty() {
+        bail!("--require needs at least one metric");
+    }
+    Ok(metrics)
+}
+
+/// The human report: one line per metric and a verdict.
+fn perf_report_lines(
+    measurement: &Measurement,
+    budget: &Budget,
+    required: &[Metric],
+    verdict: &Verdict,
+) -> Vec<String> {
+    let mut lines = vec![format!("performance budget ({} games)", measurement.games)];
+    if measurement.games < budget.games {
+        lines.push(format!(
+            "  note: the cold-start budget is measured with {} games",
+            budget.games
+        ));
+    }
+
+    for metric in Metric::ALL {
+        let enforced = required.contains(&metric);
+        let budget_text = match metric {
+            Metric::Memory => disk::human_bytes(budget.limit(metric) as u64),
+            _ => format!("{:.1} {}", budget.limit(metric), metric.unit()),
+        };
+        let line = match measurement.value(metric) {
+            Some(value) => {
+                let measured = match metric {
+                    Metric::Memory => disk::human_bytes(value as u64),
+                    _ => format!("{value:.1} {}", metric.unit()),
+                };
+                let status = if !enforced {
+                    "recorded"
+                } else if value > budget.limit(metric) {
+                    "FAIL"
+                } else {
+                    "PASS"
+                };
+                format!(
+                    "  {:<12} {:>12}  (budget {budget_text})  {status}",
+                    metric.as_str(),
+                    measured
+                )
+            }
+            None => {
+                let status = if enforced { "MISSING" } else { "skipped" };
+                format!(
+                    "  {:<12} {:>12}  (budget {budget_text})  {status}",
+                    metric.as_str(),
+                    "not measured"
+                )
+            }
+        };
+        lines.push(line);
+    }
+
+    let verdict_text = match verdict {
+        Verdict::Pass => "PASS".to_string(),
+        Verdict::Fail(violations) => {
+            let names: Vec<&str> = violations.iter().map(|v| v.metric.as_str()).collect();
+            format!("FAIL ({})", names.join(", "))
+        }
+        Verdict::Incomplete(missing) => {
+            let names: Vec<&str> = missing.iter().map(|metric| metric.as_str()).collect();
+            format!("INCOMPLETE ({})", names.join(", "))
+        }
+    };
+    lines.push(format!("verdict: {verdict_text}"));
+    lines
+}
+
+/// The JSON report: the measurement, the budgets and the verdict.
+fn perf_report_json(
+    measurement: &Measurement,
+    budget: &Budget,
+    required: &[Metric],
+    verdict: &Verdict,
+) -> serde_json::Value {
+    let stats = measurement.frame_stats();
+    serde_json::json!({
+        "games": measurement.games,
+        "cold_start_ms": measurement.cold_start_ms,
+        "frame_time": stats.map(|stats| serde_json::json!({
+            "frames": stats.frames,
+            "p50_ms": stats.p50_ms,
+            "p95_ms": stats.p95_ms,
+            "max_ms": stats.max_ms,
+        })),
+        "memory_bytes": measurement.memory_bytes,
+        "budget": {
+            "cold_start_ms": budget.cold_start_ms,
+            "frame_time_ms": budget.frame_time_ms,
+            "memory_bytes": budget.memory_bytes,
+            "games": budget.games,
+        },
+        "required": required.iter().map(|metric| metric.as_str()).collect::<Vec<_>>(),
+        "verdict": match verdict {
+            Verdict::Pass => "pass",
+            Verdict::Fail(_) => "fail",
+            Verdict::Incomplete(_) => "incomplete",
+        },
+        "violations": match verdict {
+            Verdict::Fail(violations) => violations
+                .iter()
+                .map(|v| serde_json::json!({
+                    "metric": v.metric.as_str(),
+                    "measured": v.measured,
+                    "limit": v.limit,
+                }))
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        },
+        "missing": match verdict {
+            Verdict::Incomplete(missing) => missing
+                .iter()
+                .map(|metric| metric.as_str())
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        },
+    })
 }
 
 /// The mod diagnostics: a manifest in a game directory, or one of the shared
@@ -7126,6 +7805,256 @@ fn anticheat_usage() -> String {
         .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// eac
+// ---------------------------------------------------------------------------
+
+/// Report EAC Linux v2 readiness and, with an appid, the game's verdict.
+///
+/// Read-only: it never runs `eac-setup`, never modifies the boot chain and
+/// never touches Secure Boot keys, the TPM or signing. `--cmdline`/`--root`
+/// point the probe at fixtures, so the whole report works with no EAC machine.
+fn eac(args: &[String]) -> Result<()> {
+    let parsed = parse_eac_args(args)?;
+    if parsed.help {
+        println!("{}", eac_usage());
+        return Ok(());
+    }
+
+    let mut probe = match &parsed.root {
+        Some(root) => EacProbe::from_root(root),
+        None => EacProbe::host(),
+    };
+    if let Some(file) = &parsed.cmdline {
+        let text =
+            fs::read_to_string(file).with_context(|| format!("cannot read {}", file.display()))?;
+        probe = probe.with_cmdline(text.trim());
+    }
+    if parsed.tools {
+        probe = probe.with_tools(true, true);
+    }
+
+    let readiness = eac::probe(&probe);
+    for warning in &readiness.warnings {
+        eprintln!("warning: {warning}");
+    }
+
+    let game = parsed
+        .app_id
+        .as_ref()
+        .map(|app_id| GameId::new(Store::Steam, app_id.clone()));
+
+    let verdict = match &game {
+        Some(id) => {
+            let shipped = if parsed.shipped.is_empty() {
+                pitagames_platform::compat::default_shipped_dirs()
+            } else {
+                parsed.shipped.clone()
+            };
+            let user = if parsed.user.is_empty() {
+                pitagames_platform::compat::default_user_dirs()
+            } else {
+                parsed.user.clone()
+            };
+            let db = CompatDb::load_from(&shipped, &user);
+            for warning in db.warnings() {
+                eprintln!("warning: {warning}");
+            }
+            let entry = db.get(id);
+            if entry.is_none() {
+                eprintln!(
+                    "warning: no compat entry for {}:{}",
+                    id.store.as_str(),
+                    id.store_id
+                );
+            }
+            let curated = entry
+                .map(|entry| entry.anticheat)
+                .unwrap_or(AntiCheat::Unknown);
+            let eac_v2 = entry.is_some_and(|entry| entry.eac_v2);
+            Some(eac::verdict(curated, eac_v2, &readiness))
+        }
+        None => None,
+    };
+
+    if parsed.json {
+        let payload = serde_json::json!({
+            "readiness": readiness,
+            "verdict": verdict,
+            "reboot": {
+                "argv": eac::reboot_argv(),
+                "command": eac::reboot_command_line(),
+            },
+        });
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        for line in eac_lines(&readiness, verdict.as_ref(), game.as_ref()) {
+            println!("{line}");
+        }
+    }
+
+    Ok(())
+}
+
+fn eac_lines(
+    readiness: &EacReadiness,
+    verdict: Option<&EacVerdict>,
+    game: Option<&GameId>,
+) -> Vec<String> {
+    let mut lines = vec!["EAC Linux v2 readiness".to_string()];
+
+    for check in &readiness.checks {
+        let mark = if check.satisfied { "ok  " } else { "FAIL" };
+        lines.push(format!(
+            "  {:<20} {mark}  {}",
+            check.requirement.as_str(),
+            check.detail
+        ));
+        if !check.satisfied {
+            lines.push(format!("      -> {}", check.requirement.fix()));
+        }
+    }
+
+    let presence = |present: bool| if present { "present" } else { "absent" };
+    lines.push(format!(
+        "  {:<20} {}",
+        "eac-setup",
+        presence(readiness.eac_setup)
+    ));
+    lines.push(format!(
+        "  {:<20} {}",
+        "eac-status",
+        presence(readiness.eac_status)
+    ));
+    lines.push(format!(
+        "  {:<20} {}",
+        "ready",
+        if readiness.ready() { "yes" } else { "no" }
+    ));
+    for warning in &readiness.warnings {
+        lines.push(format!("  warning: {warning}"));
+    }
+
+    if let Some(id) = game {
+        lines.push(format!("Game: {}:{}", id.store.as_str(), id.store_id));
+    }
+    if let Some(verdict) = verdict {
+        lines.push(format!("  verdict: {}", verdict.label()));
+        if let Some(message) = verdict.message() {
+            lines.push(format!("      {message}"));
+        }
+        if let Some(notice) = verdict.notice() {
+            lines.push(format!("      note: {notice}"));
+        }
+        match verdict {
+            EacVerdict::NeedsEacEntry {
+                can_reboot: true, ..
+            } => lines.push(format!(
+                "  reboot:  {}  (offered behind a confirmation)",
+                eac::reboot_command_line()
+            )),
+            EacVerdict::NeedsEacEntry { .. } => lines.push(format!(
+                "  reboot:  {}  (eac-setup not found)",
+                eac::reboot_command_line()
+            )),
+            EacVerdict::NotProtected
+            | EacVerdict::ProtectedUnsupported { .. }
+            | EacVerdict::Ready => {}
+        }
+    }
+
+    lines
+}
+
+/// Parsed `eac` arguments.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct EacArgs {
+    app_id: Option<String>,
+    cmdline: Option<PathBuf>,
+    root: Option<PathBuf>,
+    shipped: Vec<PathBuf>,
+    user: Vec<PathBuf>,
+    tools: bool,
+    json: bool,
+    help: bool,
+}
+
+fn parse_eac_args(args: &[String]) -> Result<EacArgs> {
+    let mut parsed = EacArgs::default();
+    let mut index = 0;
+
+    while index < args.len() {
+        let arg = args[index].as_str();
+        match arg {
+            "--json" => parsed.json = true,
+            "--tools" => parsed.tools = true,
+            "--cmdline" | "--root" | "--shipped" | "--user" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| format!("{arg} requires a path"))?;
+                set_eac_path(&mut parsed, arg, value)?;
+            }
+            "-h" | "--help" => parsed.help = true,
+            _ if arg.starts_with("--")
+                && (arg.starts_with("--cmdline=")
+                    || arg.starts_with("--root=")
+                    || arg.starts_with("--shipped=")
+                    || arg.starts_with("--user=")) =>
+            {
+                let (flag, value) = arg
+                    .split_once('=')
+                    .expect("the guard above requires an `=`");
+                set_eac_path(&mut parsed, flag, value)?;
+            }
+            other if !other.starts_with('-') => {
+                if parsed.app_id.is_some() {
+                    bail!("expected a single <appid>\n\n{}", eac_usage());
+                }
+                parsed.app_id = Some(other.to_string());
+            }
+            other => bail!("unexpected argument `{other}` for `eac`\n\n{}", eac_usage()),
+        }
+        index += 1;
+    }
+
+    Ok(parsed)
+}
+
+fn set_eac_path(parsed: &mut EacArgs, flag: &str, value: &str) -> Result<()> {
+    if value.is_empty() {
+        bail!("{flag} requires a path");
+    }
+    match flag {
+        "--cmdline" => parsed.cmdline = Some(PathBuf::from(value)),
+        "--root" => parsed.root = Some(PathBuf::from(value)),
+        "--shipped" => parsed.shipped.push(PathBuf::from(value)),
+        "--user" => parsed.user.push(PathBuf::from(value)),
+        other => bail!("internal error: unknown eac flag `{other}`"),
+    }
+    Ok(())
+}
+
+fn eac_usage() -> String {
+    "USAGE:\n    pitagames-cli eac [<appid>] [options]\n\n\
+     ARGS:\n    \
+     <appid>                Numeric Steam appid, to add the game's verdict\n\n\
+     OPTIONS:\n    \
+     --cmdline <file>       Read the kernel command line from this file (default: /proc/cmdline)\n    \
+     --root <dir>           Read the boot state from a fixture tree that mirrors `/`\n    \
+     --tools                Report eac-setup/eac-status as present (fixture runs)\n    \
+     --shipped <dir>        Read shipped compat entries from this directory (repeatable)\n    \
+     --user <dir>           Read user compat overrides from this directory (repeatable)\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Reports whether this boot satisfies the EAC Linux v2 requirements, read from\n\
+     /proc/cmdline, the kernel release and the boot state, with no dependency on\n\
+     eac-status. With an appid it adds the game's verdict. Read-only: it never runs\n\
+     eac-setup, never modifies the boot chain and never touches Secure Boot keys,\n\
+     the TPM or signing."
+        .to_string()
+}
+
 fn compat_usage() -> String {
     "USAGE:\n    pitagames-cli compat [<store> <id>] [--shipped <dir>]... [--user <dir>]... [--json]\n\n\
      ARGS:\n    \
@@ -7293,7 +8222,10 @@ fn usage() -> String {
     format!(
         "pitagames-cli — developer CLI for PitaGames\n\n{}\n\n{}",
         "USAGE:\n    pitagames-cli <command> [options]\n    pitagames-cli --version",
-        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    eac        Report EAC Linux v2 readiness and the game's verdict\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
+    nr         Resolve the neural-rendering backend, its pin and cost preset\n    \
+    }
+        "COMMANDS:\n    scan       Scan installed Steam games\n    install    Ask Steam to install a game, then poll the appmanifest\n    metadata   Fetch Steam store metadata for appids (live, uncached)\n    proton     List the Proton builds; `proton update` fetches a pinned one\n    gpu        Report the detected GPU, its architecture and VRAM\n    capability Report which graphics options this machine may offer\n    compat     List or validate the shipped compatibility database\n    anticheat  Detect a game's anti-cheat and show the injection gate\n    profile    Show the compiled shim profile for one Steam appid\n    logs       List or tail the PitaGames log directory\n    import     List the games Heroic, Lutris and Bottles have installed\n    prefix     Show one non-Steam game's Wine/Proton prefix and umu env\n    disk       Report free space and check it against an install size\n    perf       Check a performance measurement against the plan's budgets\n    mods       Show a mod manifest, or run the release/ini/capture primitives\n    history    List (or clear) the launch history PitaGames recorded\n    launch     Compose (and optionally run) one non-Steam game through umu\n    stores     Show each CLI store's status, updates, apply one update, or sync\n    desktop-entry  Print, install or remove the launcher's .desktop entry\n    activate   Ask a running PitaGames to come to the front\n    launch-options  Read, set, shim or restore one game's Steam launch options\n    compat-tool  Read, force, clear or restore one game's compatibility tool\n    steam-account  Read or manage the Steam Web API key and the owned-games list\n    \
     epic       Epic Games Store through legendary (status, list, install, verify, launch)\n    \
     amazon     Amazon Games through nile (status, list, installed, sync, install, verify, launch)\n    \
     gog        GOG through lgogdownloader + gogdl (status, list, auth, install, verify, launch)\n\n\
@@ -7484,6 +8416,29 @@ fn disk_usage() -> String {
      Reports the filesystem's total, free and user-available bytes; --need prints\n\
      whether an install of that size would fit. A path that does not exist yet is\n\
      fine: the filesystem it would land on is what matters."
+        .to_string()
+}
+
+fn perf_usage() -> String {
+    "USAGE:\n    pitagames-cli perf check [--file <path>] [--require <metrics>] [--memory <bytes>] [--json]\n\n\
+     ARGS:\n    \
+     --file <path>          Measurement JSON (default: stdin)\n    \
+     --require <metrics>    Metrics to enforce, comma-separated: cold-start,\n                           \
+                            frame-time, memory (default: all three; one left out\n                           \
+                            is recorded, not enforced)\n    \
+     --memory <bytes>       Peak resident memory the harness measured (plain\n                           \
+                            bytes, or a MiB/GiB suffix); injected into the\n                           \
+                            measurement because the launcher cannot see the\n                           \
+                            webview's other processes\n    \
+     --json                 Print the report as JSON\n    \
+     -h, --help             Show this help\n\n\
+     Checks a harness measurement (scripts/perf-smoke.sh) against the plan's\n\
+     budgets: cold start to first paint < 2000 ms with a 500-game library, a\n\
+     scroll frame time < 16.7 ms (60 fps), and resident memory with the webview\n\
+     < 300 MiB. frame-time is the 95th percentile of the raw frame samples. The\n\
+     exit is non-zero when an enforced metric is over budget or a required one\n\
+     was not measured. The container records frame time rather than enforcing\n\
+     it, because a software renderer cannot show 60 fps."
         .to_string()
 }
 
@@ -10151,6 +11106,82 @@ verified = ["rdna4"]
     }
 
     #[test]
+    fn parses_eac_arguments() {
+        let parsed = parse_eac_args(&[
+            "1172470".to_string(),
+            "--cmdline".to_string(),
+            "/tmp/cmdline".to_string(),
+            "--root=/fixture".to_string(),
+            "--shipped".to_string(),
+            "/compat".to_string(),
+            "--tools".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+
+        assert_eq!(parsed.app_id.as_deref(), Some("1172470"));
+        assert_eq!(parsed.cmdline, Some(PathBuf::from("/tmp/cmdline")));
+        assert_eq!(parsed.root, Some(PathBuf::from("/fixture")));
+        assert_eq!(parsed.shipped, vec![PathBuf::from("/compat")]);
+        assert!(parsed.tools && parsed.json && !parsed.help);
+
+        for args in [
+            vec!["--cmdline"],
+            vec!["--cmdline="],
+            vec!["1", "2"],
+            vec!["--bogus"],
+        ] {
+            let args: Vec<String> = args.into_iter().map(str::to_string).collect();
+            assert!(parse_eac_args(&args).is_err(), "accepted {args:?}");
+        }
+
+        assert!(parse_eac_args(&["--help".to_string()]).unwrap().help);
+    }
+
+    #[test]
+    fn renders_eac_readiness_and_the_verdict() {
+        use pitagames_platform::eac::{self, EacProbe};
+
+        // A normal CachyOS boot with an EAC v2 game: needs the EAC entry.
+        let normal = EacProbe::at("root=UUID=abc")
+            .with_secure_boot(true)
+            .with_tpm(2)
+            .with_tools(true, true);
+        let readiness = eac::probe(&normal);
+        let verdict = eac::verdict(AntiCheat::Eac, true, &readiness);
+        let lines = eac_lines(
+            &readiness,
+            Some(&verdict),
+            Some(&GameId::new(Store::Steam, "1172470")),
+        );
+        let joined = lines.join("\n");
+        assert!(joined.contains("EAC Linux v2 readiness"), "{joined}");
+        assert!(joined.contains("secure_boot"), "{joined}");
+        assert!(joined.contains("FAIL"), "{joined}");
+        assert!(joined.contains("Game: steam:1172470"), "{joined}");
+        assert!(joined.contains("needs the EAC entry"), "{joined}");
+        assert!(joined.contains("eac-setup boot"), "{joined}");
+
+        // On the EAC entry: every check passes and the verdict says ready.
+        let eac_entry = EacProbe::at(
+            "lockdown=integrity lsm=landlock,lockdown,yama,integrity,bpf iommu.passthrough=0 \
+             intel_iommu=on module.sig_enforce=1 sysctl.kernel.kexec_load_disabled=1",
+        )
+        .with_osrelease("7.3.3-1-cachyos-eac")
+        .with_secure_boot(true)
+        .with_tpm(2)
+        .with_tools(true, true);
+        let ready = eac::probe(&eac_entry);
+        let verdict = eac::verdict(AntiCheat::Eac, true, &ready);
+        let lines = eac_lines(&ready, Some(&verdict), None);
+        let joined = lines.join("\n");
+        assert!(!joined.contains("FAIL"), "{joined}");
+        assert!(joined.contains("ready"), "{joined}");
+        assert!(joined.contains("EAC Linux v2 — ready"), "{joined}");
+        assert!(joined.contains("new — being tested"), "{joined}");
+    }
+
+    #[test]
     fn parses_desktop_entry_actions_and_exec_argv() {
         let parsed = parse_desktop_entry_args(&[
             "--exec".to_string(),
@@ -10295,5 +11326,312 @@ verified = ["rdna4"]
             "--json".to_string(),
         ])
         .unwrap();
+    }
+
+    /// A fixture `vulkaninfo --summary` for an RX 9070 XT on Mesa 26.2.
+    const NR_VULKANINFO: &str = "\
+Devices:
+========
+GPU0:
+\tapiVersion         = 1.4.321
+\tvendorID           = 0x1002
+\tdeviceID           = 0x7550
+\tdriverID           = DRIVER_ID_MESA_RADV
+\tdriverName         = radv
+\tdriverInfo         = Mesa 26.2.0
+";
+
+    const NR_ASSET: &str = "DLSSNR-AMD-Vulkan-Linux-0.0.9-x86_64.tar.gz";
+
+    /// A one-file tar, the fixture release asset.
+    fn nr_tar() -> Vec<u8> {
+        let mut builder = tar::Builder::new(Vec::new());
+        let mut header = tar::Header::new_gnu();
+        header.set_size(11);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "dlssnr-amd.asi", &b"the plugin\n"[..])
+            .unwrap();
+        builder.into_inner().unwrap()
+    }
+
+    /// A fixture tree for `nr`: an RDNA 4 card on Mesa 26.2, a curated game, a
+    /// recent Proton, a GitLab release and a registry whose pin is `sha256`.
+    ///
+    /// Returns the temp dir (to keep it alive) and the argv, so a test only adds
+    /// the flags it exercises.
+    fn nr_fixture(sha256: &str) -> (tempfile::TempDir, Vec<String>) {
+        let temp = tempfile::tempdir().unwrap();
+
+        let sys = temp.path().join("sys");
+        let card = sys.join("class/drm/card0/device");
+        fs::create_dir_all(&card).unwrap();
+        fs::write(card.join("vendor"), "0x1002\n").unwrap();
+        fs::write(card.join("device"), "0x7550\n").unwrap();
+        let vulkaninfo = temp.path().join("vulkaninfo.txt");
+        fs::write(&vulkaninfo, NR_VULKANINFO).unwrap();
+
+        let shipped = temp.path().join("compat");
+        fs::create_dir_all(&shipped).unwrap();
+        fs::write(
+            shipped.join("steam-1091500.toml"),
+            "[game]\nstore = \"steam\"\nstore_id = \"1091500\"\ntitle = \"Cyberpunk 2077\"\nanticheat = \"none\"\n\n[upscaling]\nsupported = [\"dlss\"]\n\n[neural_rendering]\nbackend = \"auto\"\nroute = \"optiscaler\"\nmin_mesa = \"26.2\"\nrequires_64bit = true\n",
+        )
+        .unwrap();
+        let user = temp.path().join("user");
+        fs::create_dir_all(&user).unwrap();
+
+        let proton = temp.path().join("GE-Proton10-1");
+        fs::create_dir_all(proton.join("files")).unwrap();
+        fs::write(proton.join("proton"), "#!/usr/bin/env python3\n").unwrap();
+        fs::write(proton.join("version"), "GE-Proton10-1").unwrap();
+
+        let release = temp.path().join("release");
+        fs::create_dir_all(&release).unwrap();
+        fs::write(
+            release.join("release.json"),
+            serde_json::json!({
+                "tag_name": "v0.0.9",
+                "assets": {
+                    "links": [{ "name": NR_ASSET, "direct_asset_url": "https://gitlab.test/asset" }],
+                },
+            })
+            .to_string(),
+        )
+        .unwrap();
+        fs::write(release.join(NR_ASSET), nr_tar()).unwrap();
+
+        let registry = temp.path().join("backends.toml");
+        fs::write(
+            &registry,
+            format!(
+                "[[backends]]\nbackend = \"rdna4_upstream\"\nsource = \"gitlab\"\nproject = \"mochizuki0323/DLSSNR-AMD\"\ntag = \"v0.0.9\"\nversion = \"0.0.9\"\nasset = \"{NR_ASSET}\"\nsha256 = \"{sha256}\"\n"
+            ),
+        )
+        .unwrap();
+
+        let args = vec![
+            "steam".to_string(),
+            "1091500".to_string(),
+            "--root".to_string(),
+            sys.display().to_string(),
+            "--vulkaninfo".to_string(),
+            vulkaninfo.display().to_string(),
+            "--shipped".to_string(),
+            shipped.display().to_string(),
+            "--user".to_string(),
+            user.display().to_string(),
+            "--proton".to_string(),
+            proton.display().to_string(),
+            "--registry".to_string(),
+            registry.display().to_string(),
+            "--fetch".to_string(),
+            release.display().to_string(),
+            "--dest".to_string(),
+            temp.path().join("unpacked").display().to_string(),
+            "--json".to_string(),
+        ];
+        (temp, args)
+    }
+
+    #[test]
+    fn nr_fetches_and_verifies_a_pinned_release_from_a_fixture() {
+        let digest = pitagames_mods::release::sha256_hex(&nr_tar());
+        let (temp, args) = nr_fixture(&digest);
+        nr(&args).unwrap();
+        assert!(
+            temp.path().join("unpacked/dlssnr-amd.asi").is_file(),
+            "the verified archive is unpacked into --dest"
+        );
+    }
+
+    #[test]
+    fn nr_refuses_a_pin_the_bytes_do_not_match() {
+        let (temp, args) = nr_fixture(&"0".repeat(64));
+        let error = nr(&args).unwrap_err().to_string();
+        assert!(error.contains("cannot fetch"), "{error}");
+        assert!(
+            !temp.path().join("unpacked/dlssnr-amd.asi").exists(),
+            "nothing is unpacked when the digest is refused"
+        );
+    }
+
+    #[test]
+    fn nr_hides_a_cross_offered_backend_by_name() {
+        let digest = pitagames_mods::release::sha256_hex(&nr_tar());
+        let (_temp, mut args) = nr_fixture(&digest);
+        // An RDNA 4 card asked for the RDNA 3 fork is refused by name.
+        args.extend(["--backend".to_string(), "rdna3-fork".to_string()]);
+        let error = nr(&args).unwrap_err().to_string();
+        assert!(
+            error.contains("the RDNA 3 fork is offered only on RDNA 3"),
+            "{error}"
+        );
+    }
+    #[test]
+    fn perf_metric_list_rejects_unknown_and_empty() {
+        assert!(parse_metric_list("nonsense").is_err());
+        assert!(parse_metric_list("").is_err());
+        assert!(parse_metric_list(" , ").is_err());
+        assert_eq!(
+            parse_metric_list("memory,cold-start,memory").unwrap(),
+            vec![Metric::Memory, Metric::ColdStart]
+        );
+    }
+
+    #[test]
+    fn perf_args_parse_a_file_and_a_required_list() {
+        let parsed = parse_perf_args(&[
+            "--file".to_string(),
+            "m.json".to_string(),
+            "--require".to_string(),
+            "cold-start,memory".to_string(),
+            "--json".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(parsed.file, Some(PathBuf::from("m.json")));
+        assert_eq!(
+            parsed.required,
+            Some(vec![Metric::ColdStart, Metric::Memory])
+        );
+        assert!(parsed.json);
+
+        let default = parse_perf_args(&[]).unwrap();
+        assert_eq!(default.required, None);
+        assert!(parse_perf_args(&["--nope".to_string()]).is_err());
+    }
+
+    fn write_measurement(dir: &Path, json: &str) -> PathBuf {
+        let path = dir.join("perf.json");
+        fs::write(&path, json).unwrap();
+        path
+    }
+
+    #[test]
+    fn perf_check_passes_a_within_budget_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 1500.0, "frame_ms": [8.0, 9.0, 10.0], "memory_bytes": 1000 }"#,
+        );
+        perf_check(&["--file".to_string(), path.display().to_string()]).unwrap();
+    }
+
+    #[test]
+    fn perf_check_fails_an_over_budget_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 5000.0, "frame_ms": [8.0], "memory_bytes": 1000 }"#,
+        );
+        let error = perf_check(&["--file".to_string(), path.display().to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("performance budget not met"), "{error}");
+    }
+
+    #[test]
+    fn perf_check_records_but_does_not_enforce_an_unrequired_metric() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 1500.0, "frame_ms": [500.0], "memory_bytes": 1000 }"#,
+        );
+        perf_check(&[
+            "--file".to_string(),
+            path.display().to_string(),
+            "--require".to_string(),
+            "cold-start,memory".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn perf_check_errors_when_a_required_metric_is_missing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(temp.path(), r#"{ "games": 500 }"#);
+        let error = perf_check(&["--file".to_string(), path.display().to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing required metric"), "{error}");
+    }
+
+    #[test]
+    fn perf_report_lines_name_the_verdict_and_each_metric() {
+        let measurement = Measurement {
+            games: 500,
+            cold_start_ms: Some(1500.0),
+            frame_ms: vec![8.0, 9.0, 10.0],
+            memory_bytes: Some(1000),
+        };
+        let budget = Budget::default();
+        let verdict = budget.check(&measurement, &Metric::ALL);
+        let lines = perf_report_lines(&measurement, &budget, &Metric::ALL, &verdict);
+        let text = lines.join("\n");
+        assert!(text.contains("verdict: PASS"), "{text}");
+        assert!(text.contains("cold-start"), "{text}");
+        assert!(text.contains("frame-time"), "{text}");
+        assert!(text.contains("memory"), "{text}");
+    }
+
+    #[test]
+    fn perf_report_json_carries_the_percentiles() {
+        let measurement = Measurement {
+            games: 500,
+            cold_start_ms: Some(1500.0),
+            frame_ms: vec![8.0, 9.0, 10.0],
+            memory_bytes: Some(1000),
+        };
+        let budget = Budget::default();
+        let verdict = budget.check(&measurement, &Metric::ALL);
+        let report = perf_report_json(&measurement, &budget, &Metric::ALL, &verdict);
+        assert_eq!(report["verdict"], "pass");
+        assert_eq!(report["frame_time"]["frames"], 3);
+        assert_eq!(report["budget"]["games"], 500);
+    }
+
+    #[test]
+    fn perf_check_injects_the_harness_memory_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        // The launcher's own file has no memory figure; the harness supplies it.
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 1500.0, "frame_ms": [8.0, 9.0] }"#,
+        );
+        perf_check(&[
+            "--file".to_string(),
+            path.display().to_string(),
+            "--memory".to_string(),
+            "1000".to_string(),
+            "--require".to_string(),
+            "memory".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn perf_check_fails_when_the_harness_memory_is_over_the_ceiling() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(temp.path(), r#"{ "games": 500 }"#);
+        let error = perf_check(&[
+            "--file".to_string(),
+            path.display().to_string(),
+            "--memory".to_string(),
+            (pitagames_core::MEMORY_CEILING_BYTES + 1).to_string(),
+            "--require".to_string(),
+            "memory".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("performance budget not met"), "{error}");
+    }
+
+    #[test]
+    fn perf_args_parse_the_memory_override() {
+        let parsed = parse_perf_args(&["--memory".to_string(), "123".to_string()]).unwrap();
+        assert_eq!(parsed.memory, Some(123));
+        assert!(parse_perf_args(&["--memory".to_string()]).is_err());
+        assert!(parse_perf_args(&["--memory".to_string(), "lots".to_string()]).is_err());
     }
 }

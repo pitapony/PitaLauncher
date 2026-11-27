@@ -50,6 +50,7 @@ anything not covered here.
 | [0028](0028-design-tokens-and-legibility-floor.md) | Design tokens and the legibility floor | Accepted |
 | [0029](0029-one-in-app-terminal.md) | One in-app terminal, generalized from the sign-in panel | Accepted |
 | [0030](0030-updates-ride-the-install-queue.md) | Updates ride the install queue; Proton/GE updates are opt-in and pinned | Accepted |
+| [0031](0031-eac-linux-v2-readiness-and-the-boot-chain-gate.md) | EAC Linux v2 readiness and the boot-chain gate | Accepted |
 
 ## See also
 

@@ -63,13 +63,24 @@ pub const HINT_ACTIONS: [Action; 5] = [
     Action::Guide,
 ];
 
-/// The console game page's cheat-sheet: Play, Overlay, Back.
+/// The console game page's cheat-sheet: Play, Graphics, Overlay, Back.
 ///
-/// The page's `Confirm` starts (or installs) the game and its `Menu` opens the
-/// overlay, so it names both for what they do here rather than `Confirm`/`Menu`.
-pub const GAME_PAGE_HINTS: [ScreenHint; 3] = [
+/// The page's `Confirm` starts (or installs) the game, `Context` (the pad's
+/// `West`) opens its Graphics profile, and `Menu` opens the overlay, so it names
+/// each for what it does here rather than by the action's generic word.
+pub const GAME_PAGE_HINTS: [ScreenHint; 4] = [
     ScreenHint::new(Action::Confirm, "Play"),
+    ScreenHint::new(Action::Context, "Graphics"),
     ScreenHint::new(Action::Menu, "Overlay"),
+    ScreenHint::new(Action::Back, "Back"),
+];
+
+/// The Graphics screen's cheat-sheet: Choose, Back.
+///
+/// The screen's `Confirm` presses the focused row; the global `Menu`/`Guide`
+/// actions are the shell's, so they are not repeated here.
+pub const GRAPHICS_HINTS: [ScreenHint; 2] = [
+    ScreenHint::new(Action::Confirm, "Choose"),
     ScreenHint::new(Action::Back, "Back"),
 ];
 
@@ -179,6 +190,7 @@ pub fn key_label(key: Key) -> &'static str {
         Key::Q => "Q",
         Key::E => "E",
         Key::F => "F",
+        Key::C => "C",
         Key::M => "M",
         Key::F11 => "F11",
     }
@@ -301,7 +313,7 @@ mod tests {
     }
 
     #[test]
-    fn the_game_page_row_names_play_overlay_and_back() {
+    fn the_game_page_row_names_play_graphics_overlay_and_back() {
         let map = InputMap::gamepad("pad");
         let row = hints_for(&map, &GAME_PAGE_HINTS);
         let named: Vec<(&str, &str)> = row
@@ -310,8 +322,34 @@ mod tests {
             .collect();
         assert_eq!(
             named,
-            [("A", "Play"), ("Start", "Overlay"), ("B", "Back")],
+            [
+                ("A", "Play"),
+                ("X", "Graphics"),
+                ("Start", "Overlay"),
+                ("B", "Back")
+            ],
             "the page's own words, in the order it reads them"
+        );
+    }
+
+    #[test]
+    fn the_graphics_row_names_choose_and_back() {
+        let map = InputMap::gamepad("pad");
+        let row = hints_for(&map, &GRAPHICS_HINTS);
+        let named: Vec<(&str, &str)> = row
+            .iter()
+            .map(|hint| (hint.label.as_str(), hint.name.as_str()))
+            .collect();
+        assert_eq!(named, [("A", "Choose"), ("B", "Back")]);
+
+        // The keyboard row names the same two actions with its own keys.
+        let keyboard = InputMap::keyboard();
+        assert_eq!(
+            hints_for(&keyboard, &GRAPHICS_HINTS)
+                .iter()
+                .map(|hint| hint.label.as_str())
+                .collect::<Vec<_>>(),
+            ["Enter", "Esc"]
         );
     }
 

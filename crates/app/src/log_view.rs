@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 
 use pitagames_platform::logs::{self, LogFile, Tail};
 
@@ -49,7 +50,7 @@ pub fn LogsView(props: LogsViewProps) -> Element {
     let dir_display = dir
         .as_ref()
         .map(|dir| dir.display().to_string())
-        .unwrap_or_else(|| "(no data directory)".to_string());
+        .unwrap_or_else(|| t("logs.no_data_dir").to_string());
     let file_rows = files();
     let current = selected();
     let error_text = error();
@@ -76,17 +77,17 @@ pub fn LogsView(props: LogsViewProps) -> Element {
     let tail_text = lines.join("\n");
     let truncated = tail.read().as_ref().is_some_and(|value| value.truncated);
     let summary = if current.is_none() {
-        "Select a log to read it.".to_string()
+        t("logs.select").to_string()
     } else if shown == 0 {
         if needle.is_empty() {
-            "The log is empty.".to_string()
+            t("logs.empty").to_string()
         } else {
-            format!("No line matches \"{}\".", filter())
+            t("logs.no_match").replace("{query}", &filter())
         }
     } else if shown < matched || truncated {
-        format!("Showing the last {shown} matching line(s).")
+        t("logs.showing_last").replace("{shown}", &shown.to_string())
     } else {
-        format!("{shown} line(s).")
+        t("logs.lines").replace("{shown}", &shown.to_string())
     };
 
     let refresh_dir = dir.clone();
@@ -101,11 +102,11 @@ pub fn LogsView(props: LogsViewProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:4px;",
                 span {
                     style: "font-size:16px;font-weight:600;color:#ffffff;",
-                    "Logs"
+                    {t("logs.title")}
                 }
                 span {
                     style: "font-size:12px;color:#78788a;line-height:1.5;",
-                    "Launch lines from pitagames-shim, the Proton log and DXVK's per-exe logs. Read-only: nothing here is edited or deleted."
+                    {t("logs.description")}
                 }
             }
 
@@ -123,7 +124,7 @@ pub fn LogsView(props: LogsViewProps) -> Element {
                         }
                     },
                     style: action_style(),
-                    "Refresh"
+                    {t("action.refresh")}
                 }
                 if dir.is_some() {
                     button {
@@ -133,7 +134,7 @@ pub fn LogsView(props: LogsViewProps) -> Element {
                             }
                         },
                         style: action_style(),
-                        "Open folder"
+                        {t("logs.open_folder")}
                     }
                 }
             }
@@ -148,7 +149,7 @@ pub fn LogsView(props: LogsViewProps) -> Element {
             if file_rows.is_empty() {
                 div {
                     style: "padding:40px 0;color:#78788a;font-size:13px;",
-                    "No logs yet. pitagames-shim appends a line to shim.log each time a game launches through it."
+                    {t("logs.no_logs")}
                 }
             } else {
                 div {
@@ -165,7 +166,7 @@ pub fn LogsView(props: LogsViewProps) -> Element {
                                     .modified
                                     .map(time::OffsetDateTime::from)
                                     .map(|at| format::log_time(at, now))
-                                    .unwrap_or_else(|| "unknown time".to_string());
+                                    .unwrap_or_else(|| t("logs.unknown_time").to_string());
                                 let size = format::human_bytes(file.size);
                                 let kind = file.kind.label();
                                 rsx! {
@@ -198,12 +199,12 @@ pub fn LogsView(props: LogsViewProps) -> Element {
                         div {
                             style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
                             input {
-                                placeholder: "Filter lines",
+                                placeholder: t("logs.filter"),
                                 value: "{filter}",
                                 oninput: move |event| filter.set(event.value()),
                                 style: "flex:1;min-width:180px;padding:7px 10px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;font-size:12px;outline:none;",
                             }
-                            CopyButton { text: tail_text.clone(), label: "Copy tail".to_string() }
+                            CopyButton { text: tail_text.clone(), label: t("logs.copy_tail").to_string() }
                         }
 
                         span {
@@ -257,7 +258,11 @@ fn read_tail(dir: &Path, name: &str, mut tail: Signal<Option<Tail>>, mut error: 
         }
         Err(source) => {
             tail.set(None);
-            error.set(format!("Could not read {}: {source}", path.display()));
+            error.set(
+                t("logs.read_error")
+                    .replace("{path}", &path.display().to_string())
+                    .replace("{error}", &source.to_string()),
+            );
         }
     }
 }
@@ -266,7 +271,11 @@ fn read_tail(dir: &Path, name: &str, mut tail: Signal<Option<Tail>>, mut error: 
 fn open_folder(dir: &Path, mut error: Signal<String>) {
     match std::process::Command::new("xdg-open").arg(dir).spawn() {
         Ok(_) => error.set(String::new()),
-        Err(source) => error.set(format!("Could not open {}: {source}", dir.display())),
+        Err(source) => error.set(
+            t("logs.open_error")
+                .replace("{path}", &dir.display().to_string())
+                .replace("{error}", &source.to_string()),
+        ),
     }
 }
 

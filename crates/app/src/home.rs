@@ -17,7 +17,8 @@
 use std::cmp::Reverse;
 
 use pitagames_core::Store;
-use pitagames_input::{FocusGraph, FocusId};
+use pitagames_core::i18n::t;
+use pitagames_input::{Band, FocusGraph, FocusId};
 
 use crate::library::Library;
 
@@ -142,16 +143,20 @@ impl Home {
     /// The focus graph over the ragged layout: the hero on row 0, one row per
     /// shelf. The resolver's diagonal fallback and per-axis wrap keep a short
     /// shelf reachable from a long one with no trap.
+    ///
+    /// The layout is the shared [`FocusGraph::ragged`] builder — the hero is a
+    /// one-cell band and each shelf is a single-row band — so the home and the
+    /// console library walk the same graph code.
     pub fn graph(&self) -> FocusGraph {
-        let mut graph = FocusGraph::new();
-        for (index, cell) in self.cells.iter().enumerate() {
-            let (row, col) = match *cell {
-                HomeCell::Hero => (0, 0),
-                HomeCell::Tile { shelf, item } => (shelf + 1, item),
-            };
-            graph.insert(index, row, col);
+        if self.is_empty() {
+            return FocusGraph::new();
         }
-        graph
+        let mut bands = Vec::with_capacity(self.shelves.len() + 1);
+        bands.push(Band::new(1, 1)); // the Continue hero
+        for shelf in &self.shelves {
+            bands.push(Band::new(shelf.games.len(), shelf.games.len().max(1)));
+        }
+        FocusGraph::ragged(&bands)
     }
 }
 
@@ -201,7 +206,7 @@ fn shelves(library: &Library) -> Vec<Shelf> {
     recent.truncate(RECENT_LIMIT);
     if !recent.is_empty() {
         shelves.push(Shelf {
-            title: "Recently played".to_string(),
+            title: t("home.recently_played").to_string(),
             kind: ShelfKind::RecentlyPlayed,
             games: recent,
         });
@@ -216,7 +221,7 @@ fn shelves(library: &Library) -> Vec<Shelf> {
         .collect();
     if !installed.is_empty() {
         shelves.push(Shelf {
-            title: "Installed".to_string(),
+            title: t("home.installed").to_string(),
             kind: ShelfKind::Installed,
             games: installed,
         });
@@ -251,11 +256,11 @@ fn shelves(library: &Library) -> Vec<Shelf> {
 /// The display name of a store shelf.
 pub fn store_label(store: Store) -> &'static str {
     match store {
-        Store::Steam => "Steam",
-        Store::Gog => "GOG",
-        Store::Epic => "Epic",
-        Store::Amazon => "Amazon",
-        Store::Local => "Local",
+        Store::Steam => t("store.steam"),
+        Store::Gog => t("store.gog"),
+        Store::Epic => t("store.epic"),
+        Store::Amazon => t("store.amazon"),
+        Store::Local => t("store.local"),
     }
 }
 

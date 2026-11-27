@@ -11,10 +11,12 @@
 pub mod activation;
 pub mod design;
 pub mod desktop;
+pub mod i18n;
 pub mod launch;
 pub mod lock;
 pub mod metadata;
 pub mod paths;
+pub mod perf;
 pub mod profile;
 pub mod profile_file;
 pub mod store;
@@ -25,6 +27,7 @@ pub use activation::{Activation, ActivationError, ActivationServer, request_focu
 pub use desktop::{
     APP_ID, DESKTOP_SPEC_VERSION, DesktopEntry, DesktopEntryError, ENTRY_FILE_NAME, InstallOutcome,
 };
+pub use i18n::{Catalog, CatalogError, Language, t};
 pub use launch::{
     LaunchSpec, SHIM_PROGRAM, TokenizeError, flatten_wrappers, render_command,
     render_shell_command, shell_quote, shim_launch_options, steam_install, steam_run,
@@ -32,6 +35,11 @@ pub use launch::{
 };
 pub use lock::{InstanceLock, LockError};
 pub use metadata::{AppKind, GameMetadata, Platforms};
+pub use perf::{
+    BURST_GAP_MS, Budget, COLD_START_BUDGET_MS, FLUSH_INTERVAL_MS, FRAME_TIME_BUDGET_MS,
+    FrameStats, LIBRARY_GAMES, MAX_FRAME_SAMPLES, MEMORY_CEILING_BYTES, Measurement, Metric,
+    PerfError, PerfRecorder, Verdict, Violation,
+};
 pub use profile::{
     Diagnostics, FrameGen, GamescopeOptions, Injection, InjectionDll, ModelSource, NeuralRendering,
     NrBackend, NrModel, NrProcessing, NrRoute, PkgArch, Profile, ProfileError, ProtonRef, Upscaler,

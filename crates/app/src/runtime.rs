@@ -13,12 +13,14 @@
 
 use std::path::{Path, PathBuf};
 
+use pitagames_core::i18n::t;
 use pitagames_core::profile::{Diagnostics, GamescopeOptions, WrapperChain, WrapperStep};
 use pitagames_core::{
-    Game, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, flatten_wrappers,
+    Game, LaunchSpec, Profile, ProtonRef, SHIM_PROGRAM, ShimProfile, Store, flatten_wrappers,
     render_shell_command, save_shim_profile, shell_quote, shim_launch_options, tokenize_command,
 };
-use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime};
+use pitagames_platform::envc::{self, CompileRequest, CompiledRuntime, GraphicsContext};
+use pitagames_platform::gpu::GpuProfile;
 use pitagames_platform::launch::{self as handoff, Prepared};
 use pitagames_platform::proton::{self, DiscoveryReport, ProtonInstall, ProtonSource};
 use pitagames_stores::compat_tool::CompatTool;
@@ -113,11 +115,11 @@ impl WrapperDraft {
     pub fn to_chain(&self) -> Result<WrapperChain, String> {
         let gamescope = if self.gamescope {
             Some(GamescopeOptions {
-                width: parse_dimension(&self.width, "Gamescope width")?,
-                height: parse_dimension(&self.height, "Gamescope height")?,
-                refresh_hz: parse_dimension(&self.refresh_hz, "Gamescope refresh rate")?,
+                width: parse_dimension(&self.width, t("wrapper.gamescope_width"))?,
+                height: parse_dimension(&self.height, t("wrapper.gamescope_height"))?,
+                refresh_hz: parse_dimension(&self.refresh_hz, t("wrapper.gamescope_refresh"))?,
                 fullscreen: self.fullscreen,
-                extra_args: parse_args(&self.extra_args, "Gamescope extra args")?,
+                extra_args: parse_args(&self.extra_args, t("wrapper.gamescope_extra_args"))?,
             })
         } else {
             None
@@ -127,11 +129,13 @@ impl WrapperDraft {
         for (index, step) in self.custom.iter().enumerate() {
             let program = step.program.trim();
             if program.is_empty() {
-                return Err(format!("Custom wrapper #{} needs a program.", index + 1));
+                return Err(t("wrapper.custom_needs_program")
+                    .replace("{index}", &(index + 1).to_string()));
             }
+            let args_label = t("wrapper.custom_args_named").replace("{index}", &(index + 1).to_string());
             custom.push(WrapperStep {
                 program: PathBuf::from(program),
-                args: parse_args(&step.args, &format!("Custom wrapper #{} args", index + 1))?,
+                args: parse_args(&step.args, &args_label)?,
             });
         }
 
@@ -148,9 +152,9 @@ impl WrapperDraft {
     pub fn add_step(&mut self, program: &str, args: &str) -> Result<(), String> {
         let program = program.trim();
         if program.is_empty() {
-            return Err("A custom wrapper needs a program.".to_string());
+            return Err(t("wrapper.custom_program_missing").to_string());
         }
-        parse_args(args, "Custom wrapper args")?;
+        parse_args(args, t("wrapper.custom_args"))?;
         self.custom.push(WrapperDraftStep {
             program: program.to_string(),
             args: args.trim().to_string(),
@@ -225,14 +229,14 @@ impl DiagnosticToggle {
     ];
 
     /// The short label on the toggle chip.
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::DxvkHud => "DXVK HUD",
-            Self::Mangohud => "MangoHUD",
-            Self::ProtonLog => "Proton log",
-            Self::DxvkLog => "DXVK log",
-            Self::Fsr4Indicator => "FSR 4 indicator",
-            Self::DlssIndicator => "DLSS indicator",
+            Self::DxvkHud => t("diag.dxvk_hud"),
+            Self::Mangohud => t("diag.mangohud"),
+            Self::ProtonLog => t("diag.proton_log"),
+            Self::DxvkLog => t("diag.dxvk_log"),
+            Self::Fsr4Indicator => t("diag.fsr4_indicator"),
+            Self::DlssIndicator => t("diag.dlss_indicator"),
         }
     }
 
@@ -379,16 +383,16 @@ fn parse_dimension(text: &str, label: &str) -> Result<Option<u32>, String> {
     }
     let value = text
         .parse::<u32>()
-        .map_err(|_| format!("{label} must be a whole number."))?;
+        .map_err(|_| t("wrapper.must_be_number").replace("{label}", label))?;
     if value == 0 {
-        return Err(format!("{label} must be greater than zero."));
+        return Err(t("wrapper.must_be_positive").replace("{label}", label));
     }
     Ok(Some(value))
 }
 
 fn profiles_dir() -> Result<PathBuf, String> {
     pitagames_core::paths::profiles_dir()
-        .ok_or_else(|| "no data directory (HOME is unset)".to_string())
+        .ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 fn logs_dir() -> Option<PathBuf> {
@@ -397,21 +401,46 @@ fn logs_dir() -> Option<PathBuf> {
 
 fn backup_dir() -> Result<PathBuf, String> {
     pitagames_core::paths::steam_backup_dir()
-        .ok_or_else(|| "no data directory (HOME is unset)".to_string())
+        .ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 /// Compile the runtime subset of a profile against the current discovery.
+///
+/// This carries no GPU or compat context, so a profile that asks for a graphics
+/// field is refused by name ([`envc::EnvcError::Unavailable`]). The Graphics
+/// screen uses [`compile_with_graphics`] instead; the two share one compiler and
+/// one renderer, so a preview and a launch cannot drift.
 pub fn compile(profile: &Profile, report: &DiscoveryReport) -> Result<CompiledRuntime, String> {
+    compile_with_graphics(
+        profile,
+        report,
+        GraphicsContext::new(&GpuProfile::default(), None),
+    )
+}
+
+/// Compile a profile with the detected GPU and the game's curated entry.
+///
+/// The Graphics screen's compile path: it hands the full [`GraphicsContext`] to
+/// the one M3 compiler, so a graphics choice is checked against the capability
+/// matrix exactly as a launch would check it.
+pub fn compile_with_graphics(
+    profile: &Profile,
+    report: &DiscoveryReport,
+    graphics: GraphicsContext<'_>,
+) -> Result<CompiledRuntime, String> {
     let install = report
         .resolve(&profile.proton)
         .map_err(|error| error.to_string())?;
     let log_dir = logs_dir();
-    envc::compile_runtime(CompileRequest {
-        profile,
-        proton: install.as_ref(),
-        log_dir: log_dir.as_deref(),
-        session: session_mode(),
-    })
+    envc::compile(
+        CompileRequest {
+            profile,
+            proton: install.as_ref(),
+            log_dir: log_dir.as_deref(),
+            session: session_mode(),
+        },
+        graphics,
+    )
     .map_err(|error| error.to_string())
 }
 
@@ -426,21 +455,46 @@ pub fn write_shim_profile(
     write_shim_profile_in(&profiles_dir()?, profile, report)
 }
 
+/// Compile a profile with the graphics context and write its shim profile.
+///
+/// The Graphics screen's save path: a profile that asks for a graphics field
+/// compiles against the detected GPU and the game's curated entry, so the file
+/// the shim and the hand-off read is written rather than refused.
+pub fn write_shim_profile_with_graphics(
+    profile: &Profile,
+    report: &DiscoveryReport,
+    graphics: GraphicsContext<'_>,
+) -> Result<(PathBuf, CompiledRuntime), String> {
+    let dir = profiles_dir()?;
+    let compiled = compile_with_graphics(profile, report, graphics)?;
+    let shim = shim_from_compiled(profile, &compiled);
+    let path = save_shim_profile(&dir, &shim).map_err(|error| error.to_string())?;
+    Ok((path, compiled))
+}
+
 fn write_shim_profile_in(
     dir: &Path,
     profile: &Profile,
     report: &DiscoveryReport,
 ) -> Result<(PathBuf, CompiledRuntime), String> {
     let compiled = compile(profile, report)?;
+    let shim = shim_from_compiled(profile, &compiled);
+    let path = save_shim_profile(dir, &shim).map_err(|error| error.to_string())?;
+    Ok((path, compiled))
+}
 
+/// Build the shim profile a launch or a hand-off reads from a compiled runtime.
+///
+/// The one place the compiled env, wrapper chain and resolved Proton become a
+/// [`ShimProfile`], so the file a write produces and the preview a screen shows
+/// are the same data.
+fn shim_from_compiled(profile: &Profile, compiled: &CompiledRuntime) -> ShimProfile {
     let mut shim = ShimProfile::new(profile.game.clone(), &profile.name);
     shim.proton = Some(envc::shim_proton(&profile.proton, compiled.proton.as_ref()));
     shim.env = compiled.env.clone();
     shim.wrappers = compiled.wrappers.clone();
     shim.log_path = logs_dir().map(|dir| dir.join("shim.log"));
-
-    let path = save_shim_profile(dir, &shim).map_err(|error| error.to_string())?;
-    Ok((path, compiled))
+    shim
 }
 
 /// A non-Steam launch composed from a profile, for the Runtime panel.
@@ -455,6 +509,70 @@ pub struct HandoffPreview {
     pub command: String,
 }
 
+/// A resolved-command preview: the one line the launcher would run.
+///
+/// The Graphics screen shows this for either shell; the Runtime panel shows the
+/// non-Steam shape. Both come from [`compose_preview`], so a preview and a real
+/// launch cannot fork.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphicsPreview {
+    /// The launch shape for a non-Steam row (`umu`/`native`/`client`); `None`
+    /// for a Steam row, whose line is the shim invocation.
+    pub mode: Option<&'static str>,
+    /// The per-game Wine prefix, when the launcher owns one.
+    pub prefix: Option<String>,
+    /// The POSIX-quoted command.
+    pub command: String,
+}
+
+/// Render a compiled runtime as the command the launcher would run for `game`.
+///
+/// A Steam row renders the shim line ([`resolved_command`]); every other row
+/// runs the same [`compose_handoff`] the Play button runs. One renderer, two
+/// callers.
+fn compose_preview(
+    game: &Game,
+    app_id: &str,
+    profile: &Profile,
+    compiled: CompiledRuntime,
+    report: &DiscoveryReport,
+) -> Result<GraphicsPreview, String> {
+    if game.id.store == Store::Steam {
+        return Ok(GraphicsPreview {
+            mode: None,
+            prefix: None,
+            command: resolved_command(app_id, &compiled),
+        });
+    }
+
+    let shim = shim_from_compiled(profile, &compiled);
+    let prepared = compose_handoff(game, Some(&shim), report)?;
+    Ok(GraphicsPreview {
+        mode: Some(prepared.mode.label()),
+        prefix: prepared
+            .prefix
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        command: prepared.render(),
+    })
+}
+
+/// The Graphics screen's resolved-command preview.
+///
+/// The full M3 compile against the detected GPU and the game's curated entry,
+/// rendered by the same code the detail page's Command panel and a real launch
+/// use. It writes nothing, so unsaved draft edits can be previewed.
+pub fn graphics_preview(
+    game: &Game,
+    app_id: &str,
+    profile: &Profile,
+    report: &DiscoveryReport,
+    graphics: GraphicsContext<'_>,
+) -> Result<GraphicsPreview, String> {
+    let compiled = compile_with_graphics(profile, report, graphics)?;
+    compose_preview(game, app_id, profile, compiled, report)
+}
+
 /// Compose a non-Steam row's hand-off from a profile, for the preview.
 ///
 /// The GUI's mirror of `pitagames-cli launch`: it compiles the profile with the
@@ -467,30 +585,12 @@ pub fn handoff_preview(
     profile: &Profile,
     report: &DiscoveryReport,
 ) -> Result<HandoffPreview, String> {
-    let log_dir = logs_dir();
-    let compiled = envc::compile_runtime(CompileRequest {
-        profile,
-        // Proton is resolved once, inside `compose_handoff`, so a preview and a
-        // real launch take the same path.
-        proton: None,
-        log_dir: log_dir.as_deref(),
-        session: session_mode(),
-    })
-    .map_err(|error| error.to_string())?;
-
-    let mut shim = ShimProfile::new(profile.game.clone(), &profile.name);
-    shim.proton = Some(envc::shim_proton(&profile.proton, None));
-    shim.env = compiled.env;
-    shim.wrappers = compiled.wrappers;
-
-    let prepared = compose_handoff(game, Some(&shim), report)?;
+    let compiled = compile(profile, report)?;
+    let preview = compose_preview(game, game.id.store_id.as_str(), profile, compiled, report)?;
     Ok(HandoffPreview {
-        mode: prepared.mode.label(),
-        prefix: prepared
-            .prefix
-            .as_ref()
-            .map(|path| path.display().to_string()),
-        command: prepared.render(),
+        mode: preview.mode.unwrap_or("native"),
+        prefix: preview.prefix,
+        command: preview.command,
     })
 }
 
@@ -515,7 +615,7 @@ pub fn compose_handoff(
     };
 
     let root = pitagames_platform::prefix::default_root()
-        .ok_or_else(|| "no data directory (HOME is unset)".to_string())?;
+        .ok_or_else(|| t("runtime.no_data_dir").to_string())?;
     // A store whose client starts games by id (gogdl, nile) names no
     // executable, so its argv is composed here and the hand-off only supervises
     // it.
@@ -588,7 +688,7 @@ pub fn resolve_user(steam_root: &Path) -> Result<(String, PathBuf), String> {
     user_configs(steam_root)
         .into_iter()
         .next()
-        .ok_or_else(|| "no Steam user with a localconfig.vdf; sign in to Steam once".to_string())
+        .ok_or_else(|| t("runtime.no_steam_user").to_string())
 }
 
 /// What the routing panel shows for one game.
@@ -625,7 +725,7 @@ pub fn routing_status(steam_root: &Path, app_id: &str) -> RoutingStatus {
     };
 
     let Some(localconfig) = status.localconfig.clone() else {
-        status.warning = Some("No Steam user config found.".to_string());
+        status.warning = Some(t("runtime.no_steam_config").to_string());
         return status;
     };
 
@@ -964,7 +1064,11 @@ mod tests {
         };
 
         let error = write_shim_profile_in(temp.path(), &profile, &report).unwrap_err();
-        assert!(error.contains("upscaler"), "{error}");
+        // The M3 compiler refuses the field by name with the capability
+        // matrix's own reason (the runtime-subset compile carries no GPU, so the
+        // card reads as unrecognised).
+        assert!(error.contains("FSR 4 upgrade"), "{error}");
+        assert!(error.contains("not available"), "{error}");
         assert!(
             !temp.path().join("steam-620.json").exists(),
             "a refused profile must not leave a file behind"
@@ -1127,7 +1231,169 @@ mod tests {
             ..DiscoveryReport::default()
         };
         let error = resolved_preview("620", &profile, &report).unwrap_err();
-        assert!(error.contains("upscaler"), "{error}");
+        assert!(error.contains("FSR 4 upgrade"), "{error}");
+        assert!(error.contains("not available"), "{error}");
+    }
+
+    // -- The Graphics screen's one composition -----------------------------
+
+    fn rdna4() -> GpuProfile {
+        GpuProfile {
+            vendor: pitagames_platform::gpu::GpuArch::Rdna4.vendor(),
+            arch: pitagames_platform::gpu::GpuArch::Rdna4,
+            device_id: None,
+            name: None,
+            mesa: Some(pitagames_platform::compat::Version::parse("27.0.0").unwrap()),
+            vram_bytes: None,
+            ntsync: false,
+            hdr: pitagames_platform::gpu::HdrSupport::Unknown,
+            warnings: Vec::new(),
+        }
+    }
+
+    fn cyberpunk() -> pitagames_platform::compat::CompatEntry {
+        pitagames_platform::compat::CompatEntry::from_toml(
+            "[game]\nstore = \"steam\"\nstore_id = \"620\"\ntitle = \"Cyberpunk 2077\"\n\n\
+             [upscaling]\nsupported = [\"dlss\"]\n",
+        )
+        .unwrap()
+    }
+
+    fn steam_game() -> Game {
+        let mut game = Game::new(game(), "Cyberpunk 2077");
+        game.installed = true;
+        game
+    }
+
+    #[test]
+    fn a_graphics_profile_previews_with_the_gpu_context() {
+        // The same profile the runtime-subset compile refuses compiles here,
+        // because the graphics context says the card offers FSR 4. The line is
+        // the shim invocation, rendered by the same `resolved_command`.
+        let mut profile = Profile::new(game(), "FSR 4");
+        profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
+        let report = DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        };
+        let gpu = rdna4();
+        let compat = cyberpunk();
+
+        let preview = graphics_preview(
+            &steam_game(),
+            "620",
+            &profile,
+            &report,
+            GraphicsContext::new(&gpu, Some(&compat)),
+        )
+        .unwrap();
+        assert_eq!(preview.mode, None, "a Steam row renders the shim line");
+        assert_eq!(preview.prefix, None);
+        assert!(
+            preview.command.contains("PROTON_FSR4_UPGRADE=1"),
+            "{}",
+            preview.command
+        );
+        assert!(
+            preview.command.contains("pitagames-shim 620"),
+            "{}",
+            preview.command
+        );
+    }
+
+    #[test]
+    fn a_hidden_field_is_refused_by_name_with_the_matrix_reason() {
+        let mut profile = Profile::new(game(), "FSR 4");
+        profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
+        let report = DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        };
+        // An unrecognised card hides FSR 4; the preview says so instead of
+        // rendering a line that would not inject.
+        let error = graphics_preview(
+            &steam_game(),
+            "620",
+            &profile,
+            &report,
+            GraphicsContext::new(&GpuProfile::default(), Some(&cyberpunk())),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains(pitagames_platform::capability::reason::GPU_UNKNOWN),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn a_non_steam_graphics_row_previews_the_hand_off() {
+        let temp = tempfile::tempdir().unwrap();
+        let install = temp.path().join("Gizmo");
+        std::fs::create_dir_all(&install).unwrap();
+        let exe = install.join("Gizmo.exe");
+        std::fs::write(&exe, "").unwrap();
+        let mut game = epic_game("Gizmo", Some(exe.to_str().unwrap()));
+        game.install_dir = Some(install);
+
+        let mut profile = Profile::new(game.id.clone(), "FSR 4");
+        profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
+
+        let preview = graphics_preview(
+            &game,
+            &game.id.store_id,
+            &profile,
+            &report(),
+            GraphicsContext::new(&rdna4(), None),
+        )
+        .unwrap();
+        assert_eq!(preview.mode, Some("umu"));
+        assert!(
+            preview.command.contains("PROTON_FSR4_UPGRADE=1"),
+            "{}",
+            preview.command
+        );
+        assert!(preview.command.contains("umu-run"), "{}", preview.command);
+    }
+
+    #[test]
+    fn the_graphics_write_accepts_a_profile_the_runtime_subset_refuses() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut profile = Profile::new(game(), "FSR 4");
+        profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
+        let report = DiscoveryReport {
+            installs: vec![cachyos()],
+            ..DiscoveryReport::default()
+        };
+
+        // The runtime-subset write refuses it…
+        assert!(write_shim_profile_in(temp.path(), &profile, &report).is_err());
+
+        // …and the graphics write does not, writing the shim file.
+        let dir = temp.path();
+        let compiled = compile_with_graphics(
+            &profile,
+            &report,
+            GraphicsContext::new(&rdna4(), Some(&cyberpunk())),
+        )
+        .unwrap();
+        assert!(
+            compiled
+                .env
+                .iter()
+                .any(|(key, _)| key == "PROTON_FSR4_UPGRADE")
+        );
+        let shim = shim_from_compiled(&profile, &compiled);
+        let path = save_shim_profile(dir, &shim).unwrap();
+        assert!(path.exists());
+        let stored = pitagames_core::load_shim_profile(dir, &game())
+            .unwrap()
+            .unwrap();
+        assert!(
+            stored
+                .env
+                .iter()
+                .any(|(key, _)| key == "PROTON_FSR4_UPGRADE")
+        );
     }
 
     /// An installed non-Steam row with an optional executable.
@@ -1314,6 +1580,7 @@ mod tests {
         profile.upscaler = pitagames_core::Upscaler::Fsr4Upgrade { version: None };
 
         let error = handoff_preview(&game, &profile, &report()).unwrap_err();
-        assert!(error.contains("upscaler"), "{error}");
+        assert!(error.contains("FSR 4 upgrade"), "{error}");
+        assert!(error.contains("not available"), "{error}");
     }
 }

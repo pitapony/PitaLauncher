@@ -6,6 +6,7 @@ store = "steam"
 store_id = "1172470"
 title = "Apex Legends"
 anticheat = "eac"
+eac_v2 = true
 verified = ["rdna4"]
 
 [upscaling]

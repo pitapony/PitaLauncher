@@ -77,8 +77,14 @@ dioxus = { version = "0.7", features = ["desktop"] }
 futures-channel = "0.3"
 futures-util = "0.3"
 
-# Golden-file snapshots for the M3 env compiler (`platform::envc`, ticket #18).
-# No inline snapshots: the matrix is committed as files under `tests/snapshots`.
+# Golden-file snapshots: the M3 env compiler (`platform::envc`, ticket #18) and
+# the pure-model layout snapshots at 1080p/4K (`pitagames-input`, ticket #14).
+# No inline snapshots: both are committed as files under `tests/snapshots`, and
+# the pure-model ones need no webview, so they run on macOS and in the container.
 insta = "1"
+
+# `goblin` reads a game's PE header so the neural-rendering backends can refuse a
+# 32-bit game (ticket #28); only the PE half is enabled.
+goblin = { version = "0.10", default-features = false, features = ["std", "pe32", "pe64"] }
 
 tempfile = "3.15"

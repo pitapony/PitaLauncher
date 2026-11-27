@@ -6,6 +6,7 @@
 //! the model owns the closed set of screens, not the root component.
 
 use pitagames_core::GameId;
+use pitagames_core::i18n::t;
 
 use crate::filter::LibraryFilter;
 
@@ -18,6 +19,7 @@ pub(crate) enum View {
     History,
     Stores,
     Detail,
+    Graphics,
     Account,
     Controls,
     Logs,
@@ -41,18 +43,19 @@ pub(crate) const DESTINATIONS: [View; 8] = [
 
 impl View {
     /// The label a nav pill or the console destination strip shows.
-    pub(crate) const fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> &'static str {
         match self {
-            Self::Home => "Home",
-            Self::Library => "Library",
-            Self::Downloads => "Downloads",
-            Self::History => "History",
-            Self::Stores => "Stores",
+            Self::Home => t("nav.home"),
+            Self::Library => t("nav.library"),
+            Self::Downloads => t("nav.downloads"),
+            Self::History => t("nav.history"),
+            Self::Stores => t("nav.stores"),
             // Not a destination, but the enum is closed and a label is cheap.
-            Self::Detail => "Details",
-            Self::Account => "Account",
-            Self::Controls => "Controls",
-            Self::Logs => "Logs",
+            Self::Detail => t("nav.detail"),
+            Self::Graphics => t("nav.graphics"),
+            Self::Account => t("nav.account"),
+            Self::Controls => t("nav.controls"),
+            Self::Logs => t("nav.logs"),
         }
     }
 }
@@ -172,6 +175,18 @@ impl Navigation {
         self.view = View::Detail;
     }
 
+    /// Open the graphics screen for a game.
+    ///
+    /// The graphics screen is opened *from* a detail page, so it does not touch
+    /// `back`: the detail page's own Back target is preserved, and `Back` from
+    /// graphics returns to the detail page (whose Back then returns to wherever
+    /// the game was opened). The selection is kept, so the page resolves the
+    /// same game.
+    pub(crate) fn open_graphics(&mut self, id: GameId) {
+        self.selected = Some(id);
+        self.view = View::Graphics;
+    }
+
     /// Cycle the current view to the next (`forward`) or previous destination.
     ///
     /// `Tab`'s job, handled at the app level so it works on every screen without
@@ -221,6 +236,18 @@ mod tests {
         // Back is where the page was opened from, not a fixed screen.
         nav.open_detail(id("620"), View::Stores);
         assert_eq!(nav.back(), View::Stores);
+    }
+
+    #[test]
+    fn open_graphics_keeps_the_detail_pages_back_target() {
+        let mut nav = Navigation::new(View::Home);
+        nav.open_detail(id("620"), View::Home);
+        nav.open_graphics(id("620"));
+        assert_eq!(nav.view(), View::Graphics);
+        assert_eq!(nav.selected(), Some(id("620")));
+        // The detail page's Back target is untouched, so leaving graphics
+        // returns to the detail page and leaving that returns Home.
+        assert_eq!(nav.back(), View::Home);
     }
 
     #[test]

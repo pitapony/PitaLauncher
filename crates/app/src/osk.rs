@@ -17,6 +17,7 @@
 //! why the model is seeded with a copy on open.
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 use pitagames_input::{OnScreenKeyboard, OskKey, OskPress};
 
 use crate::focus;
@@ -96,7 +97,7 @@ pub fn OskSheet(props: OskSheetProps) -> Element {
                     }
                     span {
                         style: "margin-left:auto;font-size:var(--text-micro);color:var(--text-muted);",
-                        "A types · B cancels"
+                        {t("osk.hint_pointer")}
                     }
                 }
 
@@ -163,12 +164,12 @@ pub fn OskSheet(props: OskSheetProps) -> Element {
                     style: "display:flex;gap:10px;align-items:center;",
                     span {
                         style: "font-size:var(--text-micro);color:var(--text-muted);",
-                        "D-pad moves · A types · B cancels"
+                        {t("osk.hint_pad")}
                     }
                     button {
                         onclick: move |_| on_cancel.call(()),
                         style: "margin-left:auto;padding:8px 16px;border-radius:10px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-body);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                        "Cancel"
+                        {t("osk.cancel")}
                     }
                 }
             }

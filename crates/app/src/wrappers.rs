@@ -11,6 +11,7 @@
 //! preview's quoted text is for copying, not for execution.
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 
 use crate::runtime::{WrapperDraft, WrapperDraftStep};
 
@@ -63,11 +64,11 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                 style: "display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;",
                 span {
                     style: "font-size:12px;font-weight:600;color:#e8e8ee;",
-                    "Wrappers"
+                    {t("wrappers.title")}
                 }
                 span {
                     style: "font-size:11px;color:#78788a;",
-                    "run outermost first, outside the game"
+                    {t("wrappers.hint")}
                 }
             }
 
@@ -106,9 +107,9 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                         style: "display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end;",
                         label {
                             style: field_style(),
-                            span { style: label_style(), "Width" }
+                            span { style: label_style(), {t("wrappers.width")} }
                             input {
-                                placeholder: "auto",
+                                placeholder: t("wrappers.auto"),
                                 value: "{width}",
                                 oninput: move |event| draft.write().width = event.value(),
                                 style: input_style(),
@@ -116,9 +117,9 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                         }
                         label {
                             style: field_style(),
-                            span { style: label_style(), "Height" }
+                            span { style: label_style(), {t("wrappers.height")} }
                             input {
-                                placeholder: "auto",
+                                placeholder: t("wrappers.auto"),
                                 value: "{height}",
                                 oninput: move |event| draft.write().height = event.value(),
                                 style: input_style(),
@@ -126,9 +127,9 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                         }
                         label {
                             style: field_style(),
-                            span { style: label_style(), "Refresh Hz" }
+                            span { style: label_style(), {t("wrappers.refresh_hz")} }
                             input {
-                                placeholder: "auto",
+                                placeholder: t("wrappers.auto"),
                                 value: "{refresh_hz}",
                                 oninput: move |event| draft.write().refresh_hz = event.value(),
                                 style: input_style(),
@@ -140,12 +141,12 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                                 draft.fullscreen = !draft.fullscreen;
                             },
                             style: toggle_style(current.fullscreen),
-                            "fullscreen"
+                            {t("wrappers.fullscreen")}
                         }
                     }
                     label {
                         style: field_style(),
-                        span { style: label_style(), "Extra args" }
+                        span { style: label_style(), {t("wrappers.extra_args")} }
                         input {
                             placeholder: "--hdr-enabled",
                             value: "{extra_args}",
@@ -155,18 +156,18 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                     }
                     span {
                         style: "font-size:11px;color:#78788a;",
-                        "The console session already owns a compositor; this step is skipped under PITAGAMES_SESSION=1."
+                        {t("wrappers.session_hint")}
                     }
                 }
             }
 
             div {
                 style: "display:flex;flex-direction:column;gap:6px;",
-                span { style: label_style(), "Custom wrappers" }
+                span { style: label_style(), {t("wrappers.custom_title")} }
                 if current.custom.is_empty() {
                     span {
                         style: "font-size:11px;color:#78788a;",
-                        "None. Add a program (and optional arguments) to put another process in front of the game."
+                        {t("wrappers.custom_hint")}
                     }
                 }
                 for (index, step) in current.custom.iter().cloned().enumerate() {
@@ -191,7 +192,7 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                                         }
                                     },
                                     style: small_style(up_index == 0),
-                                    "Up"
+                                    {t("wrappers.up")}
                                 }
                                 button {
                                     disabled: down_index + 1 >= row_count,
@@ -202,7 +203,7 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                                         }
                                     },
                                     style: small_style(down_index + 1 >= row_count),
-                                    "Down"
+                                    {t("wrappers.down")}
                                 }
                                 button {
                                     onclick: move |_| {
@@ -212,7 +213,7 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                                         }
                                     },
                                     style: "padding:5px 10px;border-radius:7px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:11px;cursor:pointer;",
-                                    "Remove"
+                                    {t("action.remove")}
                                 }
                             }
                         }
@@ -222,13 +223,13 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                 div {
                     style: "display:flex;gap:8px;flex-wrap:wrap;align-items:center;",
                     input {
-                        placeholder: "program",
+                        placeholder: t("wrappers.program_placeholder"),
                         value: "{program_text}",
                         oninput: move |event| program.set(event.value()),
                         style: input_style(),
                     }
                     input {
-                        placeholder: "args (quoted as needed)",
+                        placeholder: t("wrappers.args_placeholder"),
                         value: "{args_text}",
                         oninput: move |event| args.set(event.value()),
                         style: "flex:1;min-width:180px;padding:7px 10px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:#e8e8ee;font-size:12px;outline:none;",
@@ -247,7 +248,7 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
                             }
                         },
                         style: small_style(program_text.trim().is_empty()),
-                        "Add step"
+                        {t("wrappers.add_step")}
                     }
                 }
 
@@ -261,7 +262,7 @@ pub fn WrapperEditor(props: WrapperEditorProps) -> Element {
 
             div {
                 style: "display:flex;flex-direction:column;gap:4px;",
-                span { style: label_style(), "Preview" }
+                span { style: label_style(), {t("wrappers.preview")} }
                 {preview_body}
             }
         }

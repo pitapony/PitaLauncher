@@ -50,17 +50,19 @@ jobs:
       # Install webkit2gtk and friends BEFORE checkout: the runner container
       # needs git + nodejs for actions/checkout to work at all. clippy/rustfmt
       # ship inside the `rust` package on Arch; libudev via systemd-libs.
+      # xorg-server-xvfb, dbus, xdotool and procps are for the perf harness.
       - name: Install build dependencies
         run: |
           pacman -Syu --noconfirm --needed \
             git nodejs pkgconf openssl xdotool \
             rust systemd-libs \
-            webkit2gtk-4.1 gtk3 libsecret sqlite
+            webkit2gtk-4.1 gtk3 libsecret sqlite \
+            xorg-server-xvfb dbus procps-ng
 
       - uses: actions/checkout@v4
 
       - name: Build the launcher (crates/app)
-        run: cargo build -p pitagames --all-targets
+        run: cargo build -p pitagames -p pitagames-cli
 
       # Keep the GUI lint bar the same as everyone else's.
       - name: Clippy (crates/app)
@@ -68,3 +70,13 @@ jobs:
 
       - name: Tests (crates/app)
         run: cargo test -p pitagames
+
+      # The container can only trust resident memory: a software renderer
+      # cannot show 60 fps and its cold start is not the machine's. Cold start
+      # and frame time are recorded in the report; both are asserted on hardware
+      # (`scripts/perf-smoke.sh --require cold-start,frame-time,memory`).
+      - name: Performance budget (container)
+        env:
+          # No user namespaces in the runner container.
+          WEBKIT_DISABLE_SANDBOX_THIS_IS_DANGEROUS: "1"
+        run: scripts/perf-smoke.sh --require memory

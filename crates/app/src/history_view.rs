@@ -9,6 +9,7 @@
 //! library and profiles are untouched) and is two clicks on purpose.
 
 use dioxus::prelude::*;
+use pitagames_core::i18n::t;
 use pitagames_db::{Db, HistoryRepository, StoredLaunch};
 use time::OffsetDateTime;
 
@@ -52,11 +53,11 @@ pub fn history_row(stored: &StoredLaunch, now: OffsetDateTime) -> HistoryRow {
         mode: record
             .mode
             .clone()
-            .unwrap_or_else(|| "not started".to_string()),
+            .unwrap_or_else(|| t("history.not_started").to_string()),
         verdict: record
             .detail
             .clone()
-            .unwrap_or_else(|| "no verdict recorded".to_string()),
+            .unwrap_or_else(|| t("history.no_verdict").to_string()),
         ok: record.succeeded,
         log: record
             .log_path
@@ -98,11 +99,13 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
     let refresh_db = db.clone();
     let clear_db = db.clone();
     let summary = if total == 0 {
-        "No sessions recorded yet.".to_string()
+        t("history.empty").to_string()
     } else if failures == 0 {
-        format!("{total} session(s), all exited cleanly.")
+        t("history.summary_all_ok").replace("{total}", &total.to_string())
     } else {
-        format!("{total} session(s), {failures} did not exit cleanly.")
+        t("history.summary_failures")
+            .replace("{total}", &total.to_string())
+            .replace("{failures}", &failures.to_string())
     };
 
     rsx! {
@@ -113,11 +116,11 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:4px;",
                 span {
                     style: "font-size:16px;font-weight:600;color:#ffffff;",
-                    "History"
+                    {t("history.title")}
                 }
                 span {
                     style: "font-size:12px;color:#78788a;line-height:1.5;",
-                    "Every launch PitaGames started for you, with its outcome and the transcript it wrote. Steam starts its own games, so its sessions are not here. Rows survive an uninstall."
+                    {t("history.description")}
                 }
             }
 
@@ -135,7 +138,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                         });
                     },
                     style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:12px;cursor:pointer;",
-                    "Refresh"
+                    {t("action.refresh")}
                 }
                 if confirming_clear {
                     button {
@@ -143,7 +146,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                             let db = clear_db.clone();
                             spawn(async move {
                                 let Some(db) = db else {
-                                    error.set("The history needs the database to be open.".to_string());
+                                    error.set(t("history.needs_db").to_string());
                                     return;
                                 };
                                 match db.clear_launches(None).await {
@@ -153,17 +156,19 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                                         revision.set(revision() + 1);
                                         reload(Some(db), stored, error).await;
                                     }
-                                    Err(message) => error.set(format!("could not clear the history: {message}")),
+                                    Err(message) => error.set(
+                                        t("history.clear_error").replace("{error}", &message),
+                                    ),
                                 }
                             });
                         },
                         style: "padding:6px 12px;border-radius:8px;border:1px solid #5a2c2c;background:#3a1e1e;color:#f0b0b0;font-size:12px;cursor:pointer;",
-                        "Confirm clear"
+                        {t("history.confirm_clear")}
                     }
                     button {
                         onclick: move |_| confirming.set(false),
                         style: "padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#14141c;color:#78788a;font-size:12px;cursor:pointer;",
-                        "Keep"
+                        {t("history.keep")}
                     }
                 } else {
                     button {
@@ -174,7 +179,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                         } else {
                             "padding:6px 12px;border-radius:8px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:12px;cursor:pointer;"
                         },
-                        "Clear history"
+                        {t("history.clear")}
                     }
                 }
             }
@@ -189,7 +194,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
             if rows.is_empty() {
                 div {
                     style: "padding:16px;border-radius:10px;background:#1a1a22;border:1px solid #26262f;color:#78788a;font-size:12px;",
-                    "Play a non-Steam game and its session shows up here. A launch that fails before it starts is recorded too — that is usually the row worth reading."
+                    {t("history.empty_hint")}
                 }
             } else {
                 for row in rows {
@@ -224,7 +229,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
                             "{row.verdict}"
                         }
                         if let Some(log) = row.log.clone() {
-                            CopyButton { text: log, label: "Copy log path".to_string() }
+                            CopyButton { text: log, label: t("history.copy_log_path").to_string() }
                         }
                     }
                 }
@@ -237,7 +242,7 @@ pub fn HistoryView(props: HistoryViewProps) -> Element {
 async fn reload(db: Option<Db>, mut stored: Signal<Vec<StoredLaunch>>, mut error: Signal<String>) {
     let Some(db) = db else {
         stored.set(Vec::new());
-        error.set("The history needs the database to be open.".to_string());
+        error.set(t("history.needs_db").to_string());
         return;
     };
     match persist::recent_launches(&db, HISTORY_LIMIT).await {

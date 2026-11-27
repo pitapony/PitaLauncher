@@ -23,6 +23,7 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::stream::{self, StreamExt};
 use pitagames_core::ui::Shell;
 use pitagames_core::{GameId, Store};
+use pitagames_core::i18n::t;
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_platform::power::{self, PowerAction};
@@ -49,11 +50,14 @@ mod desktop_entry;
 mod detail;
 mod diagnostics;
 mod downloads;
+mod eac;
 mod filter;
 mod focus;
 mod format;
 mod game_page;
 mod gamepad;
+mod graphics;
+mod graphics_view;
 mod grid;
 mod handoff;
 mod history_view;
@@ -67,6 +71,7 @@ mod navigation;
 mod osk;
 mod overlay;
 mod overlay_view;
+mod perf;
 mod persist;
 mod play;
 mod pumps;
@@ -130,6 +135,10 @@ fn main() {
 /// first render is up so the supervisor can tell a real exit from a failed
 /// start.
 fn run_gui(args: &shell::ShellArgs) {
+    // The perf harness: anchor the cold-start clock at this process's start.
+    // A no-op unless `PITAGAMES_PERF_FILE` is set.
+    perf::install();
+
     let (preferences, _warnings) = pitagames_core::ui::AppConfig::load_default();
 
     // Safe mode: disable the DMABUF renderer before WebKit starts and drop
@@ -158,15 +167,24 @@ fn run_gui(args: &shell::ShellArgs) {
     // A checkout has no packaged menu entry; write one that points here.
     desktop_entry::ensure();
 
-    // The window is built for the resolved shell: decorated and windowed for the
-    // desktop, undecorated and fullscreen for the console.
-    let window = shell::window_builder(&shell::window_config(shell, &display));
+    // The window is built for the resolved shell: frameless and windowed for
+    // the desktop, undecorated and fullscreen for the console.
+    let window_config = shell::window_config(shell, &display);
+    let window = shell::window_builder(&window_config);
 
-    // Dioxus installs a default Window/Edit/Help menu bar on a decorated
-    // window. The launcher has no use for it (navigation lives in the left
-    // rail), so pass an empty menu.
+    // The built window's config is kept for the startup placement below.
+    let startup_config = window_config.clone();
     let mut config = dioxus::desktop::Config::new()
         .with_window(window)
+        // A monitor handle only exists once the window is built, so the
+        // configured monitor is applied here — after `Window::build`, before
+        // the webview — rather than in the builder.
+        .with_on_window(move |window, _dom| {
+            shell::place_at_startup(&window, &startup_config);
+        })
+        // Dioxus installs a default Window/Edit/Help menu bar. The launcher has
+        // no use for it (navigation lives in the left rail), so pass an empty
+        // menu.
         .with_menu(None);
     // The window icon is painted in code (`icon::rgba`); without one the
     // window falls back to the toolkit's default placeholder.
@@ -203,8 +221,8 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
         Ok(lock) => Some(lock),
         Err(pitagames_core::LockError::AlreadyRunning { path, pid }) => {
             match pid {
-                Some(pid) => eprintln!("PitaGames is already running (pid {pid})."),
-                None => eprintln!("PitaGames is already running."),
+                Some(pid) => eprintln!("{}", t("app.already_running_pid").replace("{pid}", &pid.to_string())),
+                None => eprintln!("{}", t("app.already_running")),
             }
             eprintln!("Another instance holds {}.", path.display());
             // The window the user meant to reach is already open; ask it to
@@ -360,6 +378,7 @@ fn App() -> Element {
     let downloads_actions = use_hook(focus::ActionChannel::new);
     let stores_actions = use_hook(focus::ActionChannel::new);
     let detail_actions = use_hook(focus::ActionChannel::new);
+    let graphics_actions = use_hook(focus::ActionChannel::new);
     let controls_actions = use_hook(focus::ActionChannel::new);
     let downloads_focus = focus::use_focus();
 
@@ -457,6 +476,7 @@ fn App() -> Element {
             downloads_actions.clone(),
             stores_actions.clone(),
             detail_actions.clone(),
+            graphics_actions.clone(),
             controls_actions.clone(),
         ),
         shell_state.clone(),
@@ -573,6 +593,7 @@ fn App() -> Element {
             downloads_actions.clone(),
             stores_actions.clone(),
             detail_actions.clone(),
+            graphics_actions.clone(),
             controls_actions.clone(),
         ),
         shell_state.clone(),
@@ -755,7 +776,7 @@ fn App() -> Element {
     let overlay_status = overlay_status(&pads.read(), &batteries.read());
 
     let subtitle = match snapshot.as_ref() {
-        None => "Scanning…".to_string(),
+        None => t("library.scanning").to_string(),
         Some(library) => {
             let steam_games = library
                 .games
@@ -763,20 +784,27 @@ fn App() -> Element {
                 .filter(|entry| entry.is_steam())
                 .count();
             let mut subtitle = match &library.steam_root {
-                Some(root) => format!("{steam_games} Steam games · {}", root.display()),
-                None => "No Steam library on this machine".to_string(),
+                Some(root) => t("library.subtitle_steam")
+                    .replace("{count}", &steam_games.to_string())
+                    .replace("{root}", &root.display().to_string()),
+                None => t("library.no_steam_library").to_string(),
             };
             // The CLI stores' rows come from the cache, not a scan; saying so
             // keeps the count honest when only some of them are synced.
             let other_stores = library.games.len() - steam_games;
             if other_stores > 0 {
-                subtitle.push_str(&format!(" · {other_stores} from other stores"));
+                subtitle.push_str(
+                    &t("library.subtitle_other_stores")
+                        .replace("{count}", &other_stores.to_string()),
+                );
             }
             if let Some(total) = library.owned.total {
-                subtitle.push_str(&format!(" · {total} owned"));
+                subtitle.push_str(
+                    &t("library.subtitle_owned").replace("{count}", &total.to_string()),
+                );
             }
             if library.metadata_pending {
-                subtitle.push_str(" · fetching store metadata…");
+                subtitle.push_str(t("library.subtitle_fetching"));
             }
             subtitle
         }
@@ -798,10 +826,13 @@ fn App() -> Element {
     }
     let header_style = shell::header_style(shell_state.shell(), &shell_state.display);
     let shell_label = shell_state.shell().label();
+    // The desktop shell is frameless, so its header is the titlebar: dragging it
+    // moves the window. The console shell has no header controls.
+    let desktop_shell = !shell_state.shell().is_console();
     let shell_hint = if shell_state.shell().is_console() {
-        "Guide or F11 returns to the desktop"
+        t("shell.hint_console")
     } else {
-        "Guide or F11 opens the console shell"
+        t("shell.hint_desktop")
     };
 
     // The hint row follows the device last used: the pad's labels while it is
@@ -820,8 +851,11 @@ fn App() -> Element {
     };
     let hint_row = if shell_state.shell().is_console() && current_view == View::Detail {
         // The console game page advertises only the actions it exposes, in its
-        // own words: Play (Confirm), Overlay (Menu), Back.
+        // own words: Play (Confirm), Graphics (Context), Overlay (Menu), Back.
         pitagames_input::hints_for(&hint_map, &pitagames_input::GAME_PAGE_HINTS)
+    } else if current_view == View::Graphics {
+        // The graphics screen's own row: Choose (Confirm) and Back.
+        pitagames_input::hints_for(&hint_map, &pitagames_input::GRAPHICS_HINTS)
     } else {
         pitagames_input::hints(&hint_map)
     };
@@ -846,7 +880,7 @@ fn App() -> Element {
             if nothing_tracked {
                 div {
                     style: "padding:40px 0;color:var(--text-muted);",
-                    "Nothing downloading. Installs and updates started here or in Steam show up as they happen."
+                    {t("downloads.nothing")}
                 }
             }
 
@@ -855,7 +889,7 @@ fn App() -> Element {
                     style: "display:flex;align-items:center;gap:12px;margin-top:8px;",
                     span {
                         style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
-                        "Store installs"
+                        {t("downloads.store_installs")}
                     }
                     if !store_finished.is_empty() {
                         {
@@ -867,7 +901,7 @@ fn App() -> Element {
                                         installs.write().clear_finished();
                                     },
                                     style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{ring}",
-                                    "Clear finished"
+                                    {t("action.clear_finished")}
                                 }
                             }
                         }
@@ -881,7 +915,7 @@ fn App() -> Element {
                         let store_id = job.id.store_id.clone();
                         let cancelling = install_snapshot.is_cancelling(&job.id);
                         let state = if cancelling {
-                            "cancelling"
+                            t("store_installs.cancelling")
                         } else {
                             job.state.label()
                         };
@@ -943,7 +977,7 @@ fn App() -> Element {
                                                 installs.write().cancel(index);
                                             },
                                             style: "margin-left:auto;padding:5px 10px;border-radius:7px;border:1px solid #4a2c2c;background:#2a1e1e;color:#e0a0a0;font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                                            "Cancel"
+                                            {t("action.cancel")}
                                         }
                                     }
                                 }
@@ -1000,7 +1034,7 @@ fn App() -> Element {
                                                 }
                                             },
                                             style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #3a3a4c;background:#2e3a56;color:#ffffff;font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                                            "Retry"
+                                            {t("action.retry")}
                                         }
                                     }
                                     button {
@@ -1008,7 +1042,7 @@ fn App() -> Element {
                                             installs.write().remove(index);
                                         },
                                         style: "padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);margin-left:auto;",
-                                        "Remove"
+                                        {t("action.remove")}
                                     }
                                 }
                                 if !message.is_empty() {
@@ -1073,7 +1107,7 @@ fn App() -> Element {
 
                             div {
                                 style: "display:flex;justify-content:space-between;font-size:var(--text-micro);color:var(--text-muted);",
-                                span { "steam · appid {app_id}" }
+                                span { {t("downloads.steam_appid").replace("{id}", &app_id)} }
                                 span { "{bytes}" }
                             }
                         }
@@ -1086,14 +1120,14 @@ fn App() -> Element {
                     style: "display:flex;align-items:center;gap:12px;margin-top:8px;",
                     span {
                         style: "font-size:var(--text-micro);text-transform:uppercase;letter-spacing:0.06em;color:var(--text-muted);",
-                        "Finished"
+                        {t("downloads.finished")}
                     }
                     button {
                         onclick: move |_| {
                             board.write().dismiss_finished();
                         },
                         style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                        "Clear"
+                        {t("action.clear")}
                     }
                 }
 
@@ -1114,14 +1148,14 @@ fn App() -> Element {
                                 }
                                 span {
                                     style: "font-size:var(--text-micro);color:var(--text-muted);",
-                                    "steam · appid {app_id} · {state}"
+                                    {t("downloads.steam_appid_state").replace("{id}", &app_id).replace("{state}", &state)}
                                 }
                                 button {
                                     onclick: move |_| {
                                         board.write().dismiss(&dismiss_id);
                                     },
                                     style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                                    "Dismiss"
+                                    {t("action.dismiss")}
                                 }
                             }
                         }
@@ -1161,9 +1195,16 @@ fn App() -> Element {
 
             header {
                 style: "{header_style}",
+                // The frameless desktop window is moved by dragging its header.
+                // The console shell has its own window and ignores this.
+                onmousedown: move |_| {
+                    if desktop_shell {
+                        let _ = dioxus::desktop::window().window.drag_window();
+                    }
+                },
                 h1 {
                     style: "font-size:var(--text-title);font-weight:600;margin:0;color:#ffffff;",
-                    "PitaGames"
+                    {t("app.name")}
                 }
                 span {
                     style: "font-size:inherit;color:var(--text-muted);",
@@ -1177,8 +1218,8 @@ fn App() -> Element {
                 if start.safe_mode {
                     span {
                         style: "font-size:inherit;text-transform:uppercase;letter-spacing:0.08em;color:var(--warning);border:1px solid #5a4a2a;border-radius:999px;padding:1px 8px;",
-                        title: "the DMABUF renderer, animations and blur are off; start without --safe-mode to re-enable them",
-                        "Safe mode"
+                        title: t("app.safe_mode_title"),
+                        {t("app.safe_mode")}
                     }
                 }
                 if shell_state.shell().is_console() {
@@ -1201,12 +1242,35 @@ fn App() -> Element {
                     }
                 } else {
                     input {
-                        placeholder: "Search your library",
+                        placeholder: t("osk.search_library"),
                         value: "{session.read().filter().query}",
                         oninput: move |event| session.write().filter_mut().query = event.value(),
                         onfocus: move |_| session.write().set_text_focused(true),
                         onblur: move |_| session.write().set_text_focused(false),
+                        // The search field is inside the draggable header; a
+                        // press here must focus it, not start a window drag.
+                        onmousedown: move |event| event.stop_propagation(),
                         style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-size:inherit;outline:none;",
+                    }
+                    // Frameless chrome: the window has no decorations, so
+                    // minimize and close live in the header. Without them a
+                    // frameless window would be impossible to put away.
+                    div {
+                        style: "display:flex;align-items:center;gap:6px;margin-left:12px;",
+                        button {
+                            title: "Minimize",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| dioxus::desktop::window().window.set_minimized(true),
+                            style: shell::window_control_style(),
+                            "–"
+                        }
+                        button {
+                            title: "Close",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| dioxus::desktop::window().close(),
+                            style: shell::window_control_style(),
+                            "✕"
+                        }
                     }
                 }
             }
@@ -1283,7 +1347,7 @@ fn App() -> Element {
                     style: "display:flex;align-items:center;gap:12px;margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#1e2a24;color:var(--success);font-size:var(--text-caption);",
                     span {
                         style: "font-weight:600;",
-                        "Playing {running.title}"
+                        {t("app.playing").replace("{title}", &running.title)}
                     }
                     if let Some(log) = running.log.clone() {
                         span {
@@ -1294,11 +1358,11 @@ fn App() -> Element {
                     button {
                         onclick: move |_| {
                             if !play.write().stop() {
-                                notice.set("The game has not started yet; give it a moment.".to_string());
+                                notice.set(t("play.not_started").to_string());
                             }
                         },
                         style: "margin-left:auto;padding:6px 14px;border-radius:8px;border:1px solid #3a5a48;background:#243a2e;color:var(--success);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                        "Stop"
+                        {t("action.stop")}
                     }
                 }
             } else if let Some(last) = last_play.clone() {
@@ -1314,7 +1378,7 @@ fn App() -> Element {
                             play.write().clear_last();
                         },
                         style: "margin-left:auto;padding:4px 10px;border-radius:8px;border:1px solid #2c2c38;background:#14141c;color:var(--text-muted);font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                        "Dismiss"
+                        {t("action.dismiss")}
                     }
                 }
             }
@@ -1340,7 +1404,7 @@ fn App() -> Element {
                     button {
                         onclick: move |_| handoff.write().dismiss(),
                         style: "margin-left:auto;padding:4px 10px;border-radius:8px;border:1px solid #3a3354;background:#1a1626;color:#a898c8;font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
-                        "Dismiss"
+                        {t("action.dismiss")}
                     }
                 }
             }
@@ -1359,6 +1423,20 @@ fn App() -> Element {
                             proton: proton_report.clone(),
                             shell: shell_state.shell,
                             libraries: detail_libraries.clone(),
+                        }
+                    }
+                }
+            } else if current_view == View::Graphics {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    if let Some(entry) = detail_entry {
+                        graphics_view::Graphics {
+                            key: "graphics-{entry.store().as_str()}-{entry.app_id()}",
+                            entry,
+                            db: detail::DbHandle(db_handle.clone()),
+                            proton: proton_report.clone(),
+                            actions: graphics_actions,
+                            shell: shell_state.shell,
                         }
                     }
                 }
@@ -1594,10 +1672,15 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         return rsx! {
             div {
                 style: "padding:32px;color:var(--text-muted);",
-                "Scanning Steam libraries…"
+                {t("library.scanning_steam")}
             }
         };
     };
+
+    // The first paint of a loaded library is the cold start the harness wants:
+    // the scan and the database read are behind it, so a 500-game library is
+    // what the budget is measured against. Idempotent and a no-op off-harness.
+    crate::perf::mark_first_paint(state.games.len());
 
     let matches: Vec<&library::GameEntry> = session
         .read()
@@ -1653,7 +1736,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         if warning_count > 0 {
             div {
                 style: "margin:0 32px 12px;padding:10px 14px;border-radius:8px;background:#2a2420;color:#e0b090;font-size:var(--text-caption);",
-                "{warning_count} scan warning(s) — run `pitagames-cli scan --json` for detail."
+                {t("library.scan_warnings").replace("{count}", &warning_count.to_string())}
             }
         }
 
@@ -1664,7 +1747,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                     span { "{note}" }
                 }
                 if metadata_warning_count > 2 {
-                    span { "…and {metadata_warning_count - 2} more metadata warning(s)." }
+                    span { {t("library.more_metadata_warnings").replace("{count}", &(metadata_warning_count - 2).to_string())} }
                 }
             }
         }
@@ -1672,7 +1755,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         if !has_games {
             div {
                 style: "flex:1;padding:48px 32px;color:var(--text-muted);",
-                "No games yet. PitaGames reads Steam's own libraries; open Stores and choose \"Sync libraries\" to fetch your Epic, Amazon and GOG games."
+                {t("library.empty")}
             }
         } else {
             // The chip row sits above the grid in both shells, so the two shells
@@ -1900,7 +1983,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                                         );
                                                     },
                                                     style: button_style(can_play, "#2e3a56", "#ffffff"),
-                                                    "Play"
+                                                    {t("action.play")}
                                                 }
                                             }
 
@@ -1935,7 +2018,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
                                             } else if tracked {
                                                 span {
                                                     style: "flex:1;align-self:center;font-size:var(--text-micro);color:var(--accent);",
-                                                    "in downloads"
+                                                    {t("library.in_downloads")}
                                                 }
                                             } else if !show_play {
                                                 span {
@@ -1959,7 +2042,7 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
         // container: the grid behind it never scrolls while typing.
         if osk_open() {
             osk::OskSheet {
-                title: "Search your library".to_string(),
+                title: t("osk.search_library").to_string(),
                 keyboard: osk,
                 on_done: move |text| commit_search(session, screen_focus, osk_open, text),
                 on_cancel: move |_| osk_open.set(false),
@@ -2065,6 +2148,9 @@ fn perform_action(
             // Update the window model now so the next render draws the focused
             // row; the DOM scroll keeps the container in sync.
             scroll_top.set(target);
+            // A real scroll step is a frame for the perf harness: the interval
+            // since the previous step is what the 60 fps budget is measured on.
+            crate::perf::mark_frame();
             let future = scroller
                 .borrow()
                 .as_ref()
@@ -2264,7 +2350,7 @@ fn apply_overlay_choice(
                 && id.store == Store::Steam
                 && let Err(error) = library::spawn_store_page(&id.store_id)
             {
-                notice.set(format!("Could not open the Steam store page: {error}"));
+                notice.set(t("app.store_page_error").replace("{error}", &error.to_string()));
             }
         }
         OverlayChoice::ToggleShell => toggle_shell(shell, session),
@@ -2287,7 +2373,11 @@ fn spawn_power(action: PowerAction, mut notice: Signal<String>) {
             Err(error) => Some(error.to_string()),
         };
         if let Some(message) = failure {
-            notice.set(format!("Could not {action}: {message}"));
+            notice.set(
+                t("app.power_failed")
+                    .replace("{action}", action.label())
+                    .replace("{message}", &message),
+            );
         }
     });
 }
@@ -2301,7 +2391,7 @@ fn overlay_status(
     batteries: &std::collections::BTreeMap<pitagames_input::DeviceId, pitagames_input::Battery>,
 ) -> String {
     let Some(device) = pads.iter().rev().find(|device| device.is_gamepad) else {
-        return "Keyboard".to_string();
+        return t("overlay.keyboard").to_string();
     };
     let battery = batteries.get(&device.id).copied().and_then(|state| {
         state
@@ -2310,7 +2400,7 @@ fn overlay_status(
     });
     match battery {
         Some((percent, charging)) => {
-            let suffix = if charging { " (charging)" } else { "" };
+            let suffix = if charging { t("overlay.charging") } else { "" };
             format!("{} · {percent}%{suffix}", device.name)
         }
         None => device.name.clone(),
@@ -2333,6 +2423,7 @@ pub(crate) fn dispatch_action(
     downloads: &focus::ActionChannel,
     stores: &focus::ActionChannel,
     detail: &focus::ActionChannel,
+    graphics: &focus::ActionChannel,
     controls: &focus::ActionChannel,
 ) {
     // Read the current view first: the match scrutinee's guard would live for
@@ -2344,6 +2435,7 @@ pub(crate) fn dispatch_action(
         View::Downloads => downloads,
         View::Stores => stores,
         View::Detail => detail,
+        View::Graphics => graphics,
         View::Controls => controls,
         View::History | View::Account | View::Logs => {
             // These screens have no graph yet; Back still leaves them so the
@@ -2513,7 +2605,9 @@ async fn fetch_batch(
     if !stopped && failures > 0 {
         note_metadata_problem(
             library_state,
-            format!("Steam has no store data for {failures} of {requested} appid(s)."),
+            t("library.no_store_data")
+                .replace("{failures}", &failures.to_string())
+                .replace("{requested}", &requested.to_string()),
         );
     }
 }

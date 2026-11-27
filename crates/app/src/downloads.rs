@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use pitagames_core::i18n::t;
 use pitagames_stores::{DEFAULT_POLL_INTERVAL, InstallMonitor, InstallPhase, InstallSample};
 
 /// Give up following an install after six hours.
@@ -36,12 +37,12 @@ impl DownloadState {
     }
 
     /// Short status word for the downloads row.
-    pub const fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Waiting => "waiting for Steam",
+            Self::Waiting => t("downloads.waiting"),
             Self::Running(phase) => phase.as_str(),
-            Self::Installed => "installed",
-            Self::TimedOut => "timed out",
+            Self::Installed => t("downloads.installed"),
+            Self::TimedOut => t("downloads.timed_out"),
         }
     }
 }
