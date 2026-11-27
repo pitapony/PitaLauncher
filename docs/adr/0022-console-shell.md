@@ -36,8 +36,9 @@ runs without losing its place when the game exits.
   report, not from a future.
 - **The overlay** (pad `Start`, keyboard `M`) is the system menu: resume, the
   running/open game's detail page and (Steam-only) store page, the shell switch,
-  and (disabled until v1.1) power rows, with a controller + battery line and a
-  clock. While it is open the pumps route **every** action into it.
+  and (v1.1: enabled in the console session, over logind) power rows, with a
+  controller + battery line and a clock. While it is open the pumps route
+  **every** action into it.
 - **No `<video>`** in the v1 UI (would bind the UI to WebKit's GStreamer stack
   and block the native-renderer migration).
 - The last-input glyph hint row and the 2 s auto-hidden cursor follow the device
@@ -55,7 +56,9 @@ runs without losing its place when the game exits.
   by hiding the window during play.
 - Negative: no TV is attached, so 10-foot claims ship "not tested on a TV"
   (ADR-0004).
-- Console power rows are placeholders until the v1.1 gamescope session owns them.
+- Console power rows are placeholders until the v1.1 console session owns them;
+  v1.1 fulfils this with `platform::power` over logind (`docs/v1.1-power.md`),
+  which enables the rows in the session and leaves them disabled off it.
 
 ## Alternatives considered
 

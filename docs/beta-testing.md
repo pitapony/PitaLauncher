@@ -165,7 +165,9 @@ pitagames --console       # or press F11 / the pad's Guide from the desktop shel
       focus, the "game ended — press Guide" badge appears and `Guide` dismisses it.
 - [ ] The cursor hides while only the pad is used and returns on pointer motion.
 - [ ] `Start` opens the overlay: `Resume` closes it; the controller and clock are
-      correct; the power rows read as not-yet-available (they arrive in v1.1).
+      correct; the power rows read as enabled in the console session and as
+      "available in the console session" off it (v1.1, over logind). **Do not
+      press a power row unless you mean to suspend, restart or power off.**
 - [ ] On Controls, rebind one action by pressing a new control; `Save` applies it
       live and the footer hint updates; `Discard` reverts.
 - [ ] If no pad is detected, the Controls screen shows the actionable
