@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
-use pitagames_core::{Game, GameId, Store};
+use pitagames_core::{Game, Store};
 use pitagames_stores::queue::StartOutcome;
 
 use crate::downloads::{self, DownloadEvent, Downloads};
@@ -72,10 +72,14 @@ pub(crate) fn start_play(
 /// Steam installs through its own client and the board follows the manifest;
 /// the CLI stores run their own client on the serial queue. The two paths also
 /// live in the grid's card button, so both go through this one function.
+///
+/// A CLI row that is already installed is an **update**: [`library::install_plan`]
+/// queues `installer::update_plan` (install the existing id, then the backend's
+/// own verify) so the console Updates chip, the store-status list and the grid
+/// card all drive the same queue as a fresh install.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn start_install(
-    id: &GameId,
-    title: &str,
+    game: &Game,
     mut installs: Signal<Installs>,
     install_events: Signal<Option<UnboundedSender<InstallEvent>>>,
     events: Signal<Option<UnboundedSender<DownloadEvent>>>,
@@ -86,8 +90,8 @@ pub(crate) fn start_install(
 ) {
     notice.set(String::new());
 
-    if id.store != Store::Steam {
-        match pitagames_stores::installer::plan(id, title) {
+    if game.id.store != Store::Steam {
+        match library::install_plan(game) {
             Ok(plan) => {
                 if let Err(error) = installs.write().enqueue(plan.job()) {
                     notice.set(error.to_string());
@@ -101,16 +105,17 @@ pub(crate) fn start_install(
         return;
     }
 
-    if let Err(error) = library::spawn_install(&id.store_id) {
+    let title = game.title.clone();
+    if let Err(error) = library::spawn_install(&game.id.store_id) {
         notice.set(format!(
             "Could not ask Steam to install appid {}: {error}",
-            id.store_id
+            game.id.store_id
         ));
         return;
     }
     match events.read().clone() {
         Some(sender) => {
-            start_download(board, &sender, libraries, &id.store_id, title);
+            start_download(board, &sender, libraries, &game.id.store_id, &title);
             session.write().set_view(View::Downloads);
         }
         None => notice.set("Downloads are not ready yet; try again in a moment.".to_string()),

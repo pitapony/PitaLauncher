@@ -13,6 +13,8 @@ use pitagames_core::launch::{steam_install, steam_run, steam_store};
 use pitagames_core::{Game, GameId, OwnedGame};
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
+use pitagames_stores::installer::{self, InstallPlan, InstallerError};
+use pitagames_stores::status::UPDATE_TAG;
 use pitagames_stores::{InstallPhase, scan_steam};
 use time::OffsetDateTime;
 
@@ -65,6 +67,25 @@ impl GameEntry {
     /// launch and config writes are wired so far.
     pub fn is_steam(&self) -> bool {
         self.game.id.store == pitagames_core::Store::Steam
+    }
+
+    /// Whether the store's own listing flags these files as needing an update
+    /// or a verification ([`UPDATE_TAG`]).
+    ///
+    /// Steam keeps update state in the manifest (`StateFlags` → [`InstallPhase`]),
+    /// not on the game, so a Steam row's answer is its phase; the CLI stores put
+    /// the flag in a tag, because nothing else carries it. A store that exposes
+    /// no update signal (Amazon, GOG) simply never sets the tag, so this is
+    /// `false` and the row honestly offers no Update.
+    pub fn update_available(&self) -> bool {
+        if !self.game.installed {
+            return false;
+        }
+        if self.is_steam() {
+            self.phase == InstallPhase::UpdateAvailable
+        } else {
+            self.game.tags.iter().any(|tag| tag == UPDATE_TAG)
+        }
     }
 
     /// Whether the Play button can actually start this game.
@@ -157,10 +178,12 @@ impl GameEntry {
     ///
     /// Steam installs through its client; the CLI stores install through
     /// [`pitagames_stores::installer`], which is why the grid branches on the
-    /// store before offering the button.
+    /// store before offering the button. A CLI row offers *Update* only when the
+    /// store flags it ([`update_available`](Self::update_available)) — an
+    /// installed row with no flag has nothing to fetch.
     pub fn can_install(&self) -> bool {
         if !self.is_steam() {
-            return !self.game.installed;
+            return !self.game.installed || self.update_available();
         }
         matches!(
             self.phase,
@@ -170,6 +193,9 @@ impl GameEntry {
 
     /// Status shown next to the title; `None` for a plain installed game.
     pub fn status_label(&self) -> Option<&'static str> {
+        if self.game.installed && self.update_available() {
+            return Some(InstallPhase::UpdateAvailable.as_str());
+        }
         match self.phase {
             InstallPhase::Installed => None,
             InstallPhase::Unknown => Some(t("install.state_unknown")),
@@ -181,8 +207,13 @@ impl GameEntry {
     ///
     /// The one source [`install_status`](Self::install_status) and
     /// [`install_action`](Self::install_action) both map from, so a badge and a
-    /// button for one game cannot disagree.
+    /// button for one game cannot disagree. A CLI row the store flagged
+    /// ([`update_available`](Self::update_available)) reads as an update even
+    /// though its manifest phase is a plain `Installed`.
     pub fn install_state(&self) -> InstallState {
+        if self.update_available() {
+            return InstallState::UpdateAvailable;
+        }
         match self.phase {
             InstallPhase::Installed => InstallState::Installed,
             InstallPhase::NotInstalled => InstallState::NotInstalled,
@@ -276,6 +307,24 @@ impl OwnedSummary {
 /// large library drains over a few launches instead of hammering Steam. Every
 /// installed game is always refreshed; only the owned tail is capped.
 pub const OWNED_METADATA_PER_RUN: usize = 100;
+
+/// The install queue entry for a game: a fresh install, or an update of the
+/// files already on disk.
+///
+/// One function so the grid card, the home hero, the game page and the console
+/// Updates-filtered grid all queue the same thing. A Steam row is the caller's
+/// to hand to Steam (`library::spawn_install`); this is the CLI-store side, and
+/// for those stores an **installed** row is an update — `installer::update_plan`
+/// installs the existing id and then runs the backend's own verify against the
+/// directory the game already occupies, so the Updates chip and the store-status
+/// list drive the same queue as a fresh install.
+pub fn install_plan(game: &Game) -> Result<InstallPlan, InstallerError> {
+    if game.installed {
+        installer::update_plan(game)
+    } else {
+        installer::plan(&game.id, &game.title)
+    }
+}
 
 /// The library as loaded, plus warnings from the scan.
 #[derive(Debug, Clone, Default)]
@@ -450,13 +499,17 @@ impl Library {
     /// Mark a store install as finished, in memory.
     ///
     /// The worker already wrote the row to SQLite; this is the grid catching up
-    /// without a rescan. Returns whether the row was found.
+    /// without a rescan. An update clears the store's [`UPDATE_TAG`]: the files
+    /// were just rewritten **and verified**, so the listing's old flag is stale
+    /// and the card must flip off "Update" (the next sync re-adds it only if the
+    /// store still flags them). Returns whether the row was found.
     pub fn apply_install(&mut self, id: &GameId, target: &Path) -> bool {
         let Some(entry) = self.games.iter_mut().find(|entry| &entry.game.id == id) else {
             return false;
         };
         entry.game.installed = true;
         entry.game.install_dir = Some(target.to_path_buf());
+        entry.game.tags.retain(|tag| tag != UPDATE_TAG);
         entry.phase = InstallPhase::Installed;
         true
     }
@@ -1318,6 +1371,90 @@ mod tests {
         // The passive fallback names the status instead of a dead button.
         assert_eq!(row(Store::Local, false).card_label(), "not installed");
         assert_eq!(row(Store::Epic, true).card_label(), "installed");
+    }
+
+    #[test]
+    fn a_store_flagged_install_offers_an_update_on_the_same_path_as_an_install() {
+        // The console Updates chip and the store-status list already drive one
+        // queue; this is the GUI's half: an installed CLI row the store flags
+        // (`UPDATE_TAG`) offers **Update**, and its action plans an update of
+        // the directory the game already occupies.
+        use pitagames_stores::queue::JobKind;
+        use pitagames_stores::status::UPDATE_TAG;
+
+        let mut game = store_row(Store::Epic, "gizmo", "Gizmo", true);
+        game.install_dir = Some(PathBuf::from("/games/epic/Gizmo"));
+        game.tags = vec![UPDATE_TAG.to_string()];
+        let entry = GameEntry {
+            game,
+            phase: InstallPhase::Installed,
+            metadata: None,
+            owned: false,
+        };
+
+        assert!(entry.update_available(), "the store flagged the files");
+        assert!(entry.offers_install(), "a flagged row offers the update");
+        assert_eq!(entry.install_action(), "Update");
+        assert_eq!(entry.install_status(), "Update");
+        assert_eq!(entry.status_label(), Some("update available"));
+
+        let plan = install_plan(&entry.game).expect("an Epic row plans");
+        assert_eq!(plan.kind, JobKind::Update);
+        assert_eq!(
+            plan.target,
+            PathBuf::from("/games/epic/Gizmo"),
+            "the update fills the directory the game already occupies"
+        );
+    }
+
+    #[test]
+    fn a_plain_cli_install_offers_nothing() {
+        // A store that reports no update (Amazon, GOG — neither prints a
+        // latest-version field) leaves an installed row alone: no Update
+        // button, no invented flag.
+        let mut game = store_row(Store::Gog, "120", "Aardvark", true);
+        game.install_dir = Some(PathBuf::from("/games/gog/Aardvark"));
+        let entry = GameEntry {
+            game,
+            phase: InstallPhase::Installed,
+            metadata: None,
+            owned: false,
+        };
+
+        assert!(!entry.update_available());
+        assert!(!entry.offers_install());
+        assert_eq!(entry.install_action(), "Install");
+        assert_eq!(entry.status_label(), None);
+    }
+
+    #[test]
+    fn a_missing_cli_game_plans_a_fresh_install() {
+        use pitagames_stores::queue::JobKind;
+
+        let game = store_row(Store::Epic, "gizmo", "Gizmo Deluxe", false);
+        let plan = install_plan(&game).expect("an Epic row plans");
+        assert_eq!(plan.kind, JobKind::Install);
+    }
+
+    #[test]
+    fn applying_an_update_clears_the_stale_store_flag() {
+        use pitagames_stores::status::UPDATE_TAG;
+
+        let mut library = Library::default();
+        let mut row = store_row(Store::Epic, "Gizmo", "Gizmo", true);
+        row.tags = vec![UPDATE_TAG.to_string()];
+        library.apply_store_rows(&[row]);
+        let id = GameId::new(Store::Epic, "Gizmo");
+        assert!(library.games[0].update_available());
+
+        assert!(library.apply_install(&id, Path::new("/games/epic/Gizmo")));
+
+        let entry = &library.games[0];
+        assert!(
+            !entry.update_available(),
+            "the launcher just verified the files, so the store's old flag is stale"
+        );
+        assert_eq!(entry.install_action(), "Install");
     }
 
     #[test]
