@@ -412,7 +412,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                         start_probe(counts_probes.sender.clone(), next);
                     },
                     style: "{action_style(!is_pending)}{counts_ring}",
-                    if show_counts { t("stores.hide_counts") } else { t("stores.show_counts") }
+                    if show_counts { {t("stores.hide_counts")} } else { {t("stores.show_counts")} }
                 }
                 button {
                     disabled: is_syncing,
@@ -512,7 +512,7 @@ pub fn StoresView(props: StoresViewProps) -> Element {
                                     }
                                 },
                                 style: "margin-left:auto;padding:6px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-micro);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);{cancel_ring}",
-                                if terminal.running() { t("action.cancel") } else { t("action.close") }
+                                if terminal.running() { {t("action.cancel")} } else { {t("action.close")} }
                             }
                         }
 
@@ -751,9 +751,9 @@ fn StoreRow(props: StoreRowProps) -> Element {
         (Some(owned), None) => {
             Some(t("stores.counts_owned").replace("{owned}", &owned.to_string()))
         }
-        (None, Some(installed)) => Some(
-            t("stores.counts_installed").replace("{installed}", &installed.to_string()),
-        ),
+        (None, Some(installed)) => {
+            Some(t("stores.counts_installed").replace("{installed}", &installed.to_string()))
+        }
         (None, None) => None,
     };
 
@@ -799,7 +799,7 @@ fn StoreRow(props: StoreRowProps) -> Element {
                             focus.set(Some(0));
                         },
                         style: action_style(!signing_in),
-                        if signing_in { t("stores.signing_in") } else { t("stores.sign_in") }
+                        if signing_in { {t("stores.signing_in")} } else { {t("stores.sign_in")} }
                     }
                 }
             }

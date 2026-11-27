@@ -11,8 +11,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use pitagames_metadata::{OwnedClient, OwnedLibrary};
 use pitagames_core::i18n::t;
+use pitagames_metadata::{OwnedClient, OwnedLibrary};
 use pitagames_secrets::{KeyStatus, SteamApiKey, SteamKeyStore};
 use pitagames_stores::steam;
 use time::OffsetDateTime;
@@ -60,7 +60,9 @@ impl Account {
         };
 
         if status.key.is_some() && steam_id.is_none() {
-            status.warnings.push(t("steam_account.no_account").to_string());
+            status
+                .warnings
+                .push(t("steam_account.no_account").to_string());
         }
 
         Self {

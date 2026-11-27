@@ -29,6 +29,7 @@ use crate::detail::DbHandle;
 use crate::focus::{self, ActionChannel};
 use crate::graphics::{self, Control, DurableRevert, GraphicsEditor, OptionRow, Section};
 use crate::library::GameEntry;
+use crate::nr_install_view::NrInstallPanel;
 use crate::persist;
 use crate::runtime;
 use crate::shell;
@@ -249,8 +250,8 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     }
                     Control::Restore => {
                         if let Some(dir) = entry.game.install_dir.clone() {
-                            let status = status;
-                            let manifest = manifest;
+                            let mut status = status;
+                            let mut manifest = manifest;
                             spawn(async move {
                                 match pitagames_mods::ModManifest::restore(&dir) {
                                     Ok(report) => {
@@ -326,6 +327,36 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     let focused = screen_focus
         .index()
         .and_then(|index| controls.get(index).copied());
+
+    // The neural-rendering backend verdict, for the install panel. It is the
+    // same `platform::nr::plan` the CLI uses, so the panel and the diagnostic
+    // cannot disagree about whether NR is offered.
+    let nr_plan = match (gpu_snapshot.as_ref(), report.as_ref()) {
+        (Some(gpu), Some(report)) => {
+            let draft = editor_state.draft();
+            let proton = report.resolve(&draft.proton).ok().flatten();
+            let registry = pitagames_platform::nr::BackendRegistry::effective(
+                pitagames_platform::nr::default_user_path().as_deref(),
+            )
+            .unwrap_or_default();
+            let game_64bit = entry
+                .game
+                .exe
+                .as_deref()
+                .and_then(|exe| pitagames_platform::nr::pe_is_64_bit(exe).ok());
+            pitagames_platform::nr::plan(pitagames_platform::nr::NrRequest {
+                gpu,
+                profile: draft,
+                registry: &registry,
+                compat: compat_snapshot.as_ref(),
+                proton: proton.as_ref(),
+                game_64bit,
+            })
+            .plan()
+            .cloned()
+        }
+        _ => None,
+    };
 
     // Group the rows by section so the screen draws the four headings in order.
     let mut sections: Vec<(Section, Vec<(usize, OptionRow)>)> = Section::ALL
@@ -454,6 +485,13 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 }
             }
 
+            if let Some(plan) = nr_plan {
+                NrInstallPanel {
+                    entry: entry.clone(),
+                    plan,
+                }
+            }
+
             div {
                 style: "display:flex;flex-direction:column;gap:6px;padding-top:6px;",
                 div {
@@ -564,12 +602,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                     style: "{action_button_style(focused == Some(Control::Reset), true, \"#1e1e28\", \"var(--text-secondary)\")}",
                     "Reset to safe defaults"
                 }
-                if let Some(revert) = manifest_snapshot.clone() {
+                if manifest_snapshot.is_some() {
                     button {
                         onclick: move |_| {
                             if let Some(dir) = entry.game.install_dir.clone() {
-                                let status = status;
-                                let manifest = manifest;
+                                let mut status = status;
+                                let mut manifest = manifest;
                                 spawn(async move {
                                     match pitagames_mods::ModManifest::restore(&dir) {
                                         Ok(report) => {

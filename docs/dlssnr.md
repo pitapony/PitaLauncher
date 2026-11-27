@@ -183,10 +183,14 @@ reason string.
 - **The cost figures are the plan's estimates, not measurements.** The per-scale
   scaling is a model (cost ∝ `model_scale²`), and the 50 % 4K fork figure lands
   near the plan's ≈16 ms rather than on it.
-- **The installer, the model sourcing, the safe ini surface, the in-game hints,
-  the verify-from-log and the uninstall are later slices.** `platform::nr` is
-  the registry, the pinning, the gates and the cost data only; the route is
-  fixed to `optiscaler` by the profile validation.
+- **The installer run and the model sourcing ship** (`docs/m3.5-nr-install.md`,
+  ticket #29): the pre-flight form, upstream's `install.sh` run in the shared
+  terminal with the game's executable directory as cwd, the `%command%` capture,
+  and the model scan / PE-version check / picker. Still later slices: the safe ini
+  surface, the in-game hints, the verify-from-log and the uninstall (#30–#32), and
+  the live fetch (ticket #12). `platform::nr` itself is the registry, the pinning,
+  the gates and the cost data; the route is fixed to `optiscaler` by the profile
+  validation.
 - **32-bit detection reads the game's PE header, not the package's.** A native
   Linux game has no NR path, so `pe_is_64_bit` treats a non-PE file as an error
   rather than guessing.

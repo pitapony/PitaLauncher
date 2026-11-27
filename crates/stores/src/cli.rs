@@ -628,8 +628,40 @@ impl CliHandle {
         options: &CliOptions,
     ) -> Result<Self, CliError> {
         let argv = spec.argv(command)?;
-        let program = resolve_program(&spec.program, options.env.get("PATH").map(String::as_str))?;
-        let log_path = create_log_path(options, &spec.program, command)?;
+        Self::spawn_argv(
+            &spec.program,
+            &argv,
+            spec.progress.clone(),
+            command.as_str(),
+            options,
+        )
+    }
+
+    /// Starts an arbitrary program with an explicit argument vector.
+    ///
+    /// The store presets are argv templates behind [`CliSpec`]; this is the same
+    /// driver for a caller whose argv is already built — the upstream mod
+    /// installers (DLSSNR, HelixSR), which are not a store CLI. The program is
+    /// resolved through `PATH` exactly as a spec's program is, and `label` names
+    /// the per-run transcript.
+    pub fn spawn_command(
+        program: &str,
+        args: &[String],
+        label: &str,
+        options: &CliOptions,
+    ) -> Result<Self, CliError> {
+        Self::spawn_argv(program, args, ProgressParser::Plain, label, options)
+    }
+
+    fn spawn_argv(
+        program: &str,
+        argv: &[String],
+        parser: ProgressParser,
+        label: &str,
+        options: &CliOptions,
+    ) -> Result<Self, CliError> {
+        let program = resolve_program(program, options.env.get("PATH").map(String::as_str))?;
+        let log_path = create_log_path(options, &program, label)?;
         let log_file = match &log_path {
             Some(path) => Some(fs::File::create(path).map_err(|source| CliError::Log {
                 path: path.clone(),
@@ -651,7 +683,7 @@ impl CliHandle {
             .map_err(|err| CliError::Spawn(err.to_string()))?;
 
         let mut builder = CommandBuilder::new(&program);
-        for arg in &argv {
+        for arg in argv {
             builder.arg(arg);
         }
         if let Some(cwd) = &options.cwd {
@@ -681,7 +713,7 @@ impl CliHandle {
                 killer,
                 pid,
                 writer,
-                assembler: LineAssembler::new(spec.progress.clone()),
+                assembler: LineAssembler::new(parser),
                 log_path,
                 idle_timeout: options.idle_timeout,
                 hard_timeout: options.hard_timeout,
@@ -1173,8 +1205,8 @@ fn is_executable(path: &Path) -> bool {
 
 fn create_log_path(
     options: &CliOptions,
-    program: &str,
-    command: &CliCommand,
+    program: &Path,
+    label: &str,
 ) -> Result<Option<PathBuf>, CliError> {
     let Some(dir) = &options.log_dir else {
         return Ok(None);
@@ -1183,19 +1215,12 @@ fn create_log_path(
         path: dir.clone(),
         source,
     })?;
-    let stem = Path::new(program)
-        .file_stem()
-        .and_then(OsStr::to_str)
-        .unwrap_or("cli");
+    let stem = program.file_stem().and_then(OsStr::to_str).unwrap_or("cli");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| elapsed.as_nanos())
         .unwrap_or(0);
-    let name = format!(
-        "cli-{stem}-{}-{nanos}-{}.log",
-        command.as_str(),
-        std::process::id()
-    );
+    let name = format!("cli-{stem}-{label}-{nanos}-{}.log", std::process::id());
     Ok(Some(dir.join(name)))
 }
 

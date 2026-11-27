@@ -129,10 +129,12 @@ impl WrapperDraft {
         for (index, step) in self.custom.iter().enumerate() {
             let program = step.program.trim();
             if program.is_empty() {
-                return Err(t("wrapper.custom_needs_program")
-                    .replace("{index}", &(index + 1).to_string()));
+                return Err(
+                    t("wrapper.custom_needs_program").replace("{index}", &(index + 1).to_string())
+                );
             }
-            let args_label = t("wrapper.custom_args_named").replace("{index}", &(index + 1).to_string());
+            let args_label =
+                t("wrapper.custom_args_named").replace("{index}", &(index + 1).to_string());
             custom.push(WrapperStep {
                 program: PathBuf::from(program),
                 args: parse_args(&step.args, &args_label)?,
@@ -391,8 +393,7 @@ fn parse_dimension(text: &str, label: &str) -> Result<Option<u32>, String> {
 }
 
 fn profiles_dir() -> Result<PathBuf, String> {
-    pitagames_core::paths::profiles_dir()
-        .ok_or_else(|| t("runtime.no_data_dir").to_string())
+    pitagames_core::paths::profiles_dir().ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 fn logs_dir() -> Option<PathBuf> {
@@ -400,8 +401,7 @@ fn logs_dir() -> Option<PathBuf> {
 }
 
 fn backup_dir() -> Result<PathBuf, String> {
-    pitagames_core::paths::steam_backup_dir()
-        .ok_or_else(|| t("runtime.no_data_dir").to_string())
+    pitagames_core::paths::steam_backup_dir().ok_or_else(|| t("runtime.no_data_dir").to_string())
 }
 
 /// Compile the runtime subset of a profile against the current discovery.

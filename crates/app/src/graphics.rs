@@ -116,7 +116,7 @@ impl Choice {
     }
 
     /// The label the row wears.
-    pub const fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             Self::Upscaler(upscaler) => upscaler_label(upscaler),
             Self::FrameGen(frame_gen) => frame_gen_label(*frame_gen),

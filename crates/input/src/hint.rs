@@ -190,6 +190,7 @@ pub fn key_label(key: Key) -> &'static str {
         Key::Q => "Q",
         Key::E => "E",
         Key::F => "F",
+        Key::C => "C",
         Key::M => "M",
         Key::F11 => "F11",
     }
@@ -358,7 +359,7 @@ mod tests {
         let row = hints_for(&map, &GAME_PAGE_HINTS);
         assert_eq!(
             row.iter().map(|hint| hint.action).collect::<Vec<_>>(),
-            [Action::Confirm, Action::Menu, Action::Back]
+            [Action::Confirm, Action::Context, Action::Menu, Action::Back]
         );
         // The default row names Search and the shell key; the game page does not.
         assert!(!row.iter().any(|hint| hint.action == Action::Search));

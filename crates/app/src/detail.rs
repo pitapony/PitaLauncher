@@ -431,25 +431,25 @@ pub fn Detail(props: DetailProps) -> Element {
     };
 
     let mut handoff_note: Option<String> = None;
-    let command_preview: Result<String, String> = match (draft_preview, props.proton.as_ref()) {
-        (Ok(preview), Some(report)) if is_steam => {
-            runtime::resolved_preview(&preview_app, &preview, report)
-        }
-        (Ok(preview), Some(report)) => {
-            runtime::handoff_preview(&entry.game, &preview, report).map(|handoff| {
-                handoff_note = Some(match &handoff.prefix {
-                    Some(prefix) => t("detail.handoff_prefix")
-                        .replace("{mode}", &handoff.mode.to_string())
-                        .replace("{prefix}", prefix),
-                    None => t("detail.handoff_no_prefix")
-                        .replace("{mode}", &handoff.mode.to_string()),
-                });
-                handoff.command
-            })
-        }
-        (Ok(_), None) => Err(t("detail.proton_not_ready").to_string()),
-        (Err(message), _) => Err(message),
-    };
+    let command_preview: Result<String, String> =
+        match (draft_preview, props.proton.as_ref()) {
+            (Ok(preview), Some(report)) if is_steam => {
+                runtime::resolved_preview(&preview_app, &preview, report)
+            }
+            (Ok(preview), Some(report)) => runtime::handoff_preview(&entry.game, &preview, report)
+                .map(|handoff| {
+                    handoff_note = Some(match &handoff.prefix {
+                        Some(prefix) => t("detail.handoff_prefix")
+                            .replace("{mode}", &handoff.mode.to_string())
+                            .replace("{prefix}", prefix),
+                        None => t("detail.handoff_no_prefix")
+                            .replace("{mode}", &handoff.mode.to_string()),
+                    });
+                    handoff.command
+                }),
+            (Ok(_), None) => Err(t("detail.proton_not_ready").to_string()),
+            (Err(message), _) => Err(message),
+        };
     let (command_text, command_error) = match command_preview {
         Ok(command) => (command, None),
         Err(message) => (String::new(), Some(message)),
@@ -850,7 +850,7 @@ pub fn Detail(props: DetailProps) -> Element {
                 {info_card(t("detail.version"), version)}
                 {info_card(t("detail.anticheat"), anticheat_label)}
                 if eac_show {
-                    {info_card(t("detail.eac_linux_v2"), eac_label)}
+                    {info_card(t("detail.eac_linux_v2"), eac_label.clone())}
                 }
             }
 
@@ -1413,7 +1413,7 @@ pub fn Detail(props: DetailProps) -> Element {
                     if let Some(status) = routing_status.clone().filter(|_| is_steam) {
                         div {
                             style: "display:flex;flex-direction:column;gap:2px;font-size:var(--text-micro);color:var(--text-muted);",
-                            span { {t("detail.steam_status").replace("{status}", status.steam.describe())} }
+                            span { {t("detail.steam_status").replace("{status}", &status.steam.describe())} }
                             if let Some(value) = status.launch_options.clone() {
                                 span { {t("detail.launch_options").replace("{value}", &value)} }
                             } else {

@@ -21,9 +21,9 @@ use dioxus::html::{MountedData, ScrollBehavior};
 use dioxus::prelude::*;
 use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender};
 use futures_util::stream::{self, StreamExt};
+use pitagames_core::i18n::t;
 use pitagames_core::ui::Shell;
 use pitagames_core::{GameId, Store};
-use pitagames_core::i18n::t;
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_stores::queue::{InstallJob, JobState};
@@ -67,6 +67,8 @@ mod launch_start;
 mod library;
 mod log_view;
 mod navigation;
+mod nr_install;
+mod nr_install_view;
 mod osk;
 mod overlay;
 mod overlay_view;
@@ -220,7 +222,10 @@ fn take_instance_lock() -> Option<pitagames_core::InstanceLock> {
         Ok(lock) => Some(lock),
         Err(pitagames_core::LockError::AlreadyRunning { path, pid }) => {
             match pid {
-                Some(pid) => eprintln!("{}", t("app.already_running_pid").replace("{pid}", &pid.to_string())),
+                Some(pid) => eprintln!(
+                    "{}",
+                    t("app.already_running_pid").replace("{pid}", &pid.to_string())
+                ),
                 None => eprintln!("{}", t("app.already_running")),
             }
             eprintln!("Another instance holds {}.", path.display());
@@ -798,9 +803,8 @@ fn App() -> Element {
                 );
             }
             if let Some(total) = library.owned.total {
-                subtitle.push_str(
-                    &t("library.subtitle_owned").replace("{count}", &total.to_string()),
-                );
+                subtitle
+                    .push_str(&t("library.subtitle_owned").replace("{count}", &total.to_string()));
             }
             if library.metadata_pending {
                 subtitle.push_str(t("library.subtitle_fetching"));

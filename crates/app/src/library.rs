@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use pitagames_art::ArtRequest;
+use pitagames_core::i18n::t;
 use pitagames_core::launch::{steam_install, steam_run, steam_store};
 use pitagames_core::{Game, GameId, OwnedGame};
-use pitagames_core::i18n::t;
 use pitagames_db::StoredMetadata;
 use pitagames_metadata::CachePolicy;
 use pitagames_stores::{InstallPhase, scan_steam};
@@ -238,7 +238,8 @@ impl GameEntry {
         }
         if !self.game.playtime.is_zero() {
             parts.push(
-                t("library.meta_played").replace("{time}", &crate::format::playtime(self.playtime())),
+                t("library.meta_played")
+                    .replace("{time}", &crate::format::playtime(self.playtime())),
             );
         }
 

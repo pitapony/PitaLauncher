@@ -28,6 +28,7 @@ pub mod gpu;
 pub mod launch;
 pub mod logs;
 pub mod nr;
+pub mod nr_install;
 pub mod prefix;
 pub mod proton;
 pub mod proton_update;
@@ -63,6 +64,12 @@ pub use logs::{LogFile, LogKind, TAIL_BYTES, Tail};
 pub use nr::{
     BackendPin, BackendRegistry, Cost, NrError, NrPlan, NrRequest, NrVerdict, Resolution,
     backend_for, default_scale, is_experimental, model_scale_preset, pe_is_64_bit,
+};
+pub use nr_install::{
+    DO_NOT_SHARE, FoundModel, INSTALLER_PROGRAM, INSTALLER_SCRIPT, InstallForm, InstallPlan,
+    MODEL_DLL_NAME, MODEL_VERSIONS, ModelError, ModelScan, PREFERRED_MODEL_VERSION, PlanError,
+    SUPPORTED_MODEL_VERSION, inspect_model, model_arg, model_version, scan, scan_roots,
+    version_supported,
 };
 pub use prefix::{PREFIX_DIR_ENV, Prefix};
 pub use proton::{

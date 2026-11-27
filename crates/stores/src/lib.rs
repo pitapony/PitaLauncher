@@ -15,8 +15,10 @@
 //! `Game` rows and merges them over the cache without deleting anything a failed
 //! listing could not vouch for, [`installer`] turns a queued job into the
 //! backend run that fills its directory, [`launch`] composes the argv for the
-//! two backends whose client starts a game by id (`gogdl`, `nile`), and [`auth`]
-//! is the sign-in relay the CLI and the GUI both drive.
+//! two backends whose client starts a game by id (`gogdl`, `nile`), [`auth`] is
+//! the sign-in relay the CLI and the GUI both drive, and [`mod_install`] is the
+//! same kind of relay for the upstream mod installers (DLSSNR-AMD's `install.sh`)
+//! that run on that same PTY driver.
 
 use std::path::PathBuf;
 
@@ -32,6 +34,7 @@ pub mod install;
 pub mod installer;
 pub mod launch;
 pub mod localconfig;
+pub mod mod_install;
 pub mod queue;
 pub mod report;
 pub mod status;
