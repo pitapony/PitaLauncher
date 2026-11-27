@@ -1977,7 +1977,13 @@ fn perf_check(args: &[String]) -> Result<()> {
         }
     };
 
-    let measurement = Measurement::from_json(&input)?;
+    let mut measurement = Measurement::from_json(&input)?;
+    // The harness measures the whole process group (the launcher, the webview
+    // and WebKit's helpers); the launcher's own file cannot see them, so inject
+    // the figure here rather than make the script rewrite the JSON.
+    if let Some(bytes) = parsed.memory {
+        measurement.memory_bytes = Some(bytes);
+    }
     let required = parsed
         .required
         .clone()
@@ -2019,6 +2025,9 @@ fn perf_check(args: &[String]) -> Result<()> {
 struct PerfArgs {
     file: Option<PathBuf>,
     required: Option<Vec<Metric>>,
+    /// Peak resident memory the harness measured, in bytes. Injected into the
+    /// measurement because the launcher cannot see the webview's other processes.
+    memory: Option<u64>,
     json: bool,
     help: bool,
 }
@@ -2049,6 +2058,16 @@ fn parse_perf_args(args: &[String]) -> Result<PerfArgs> {
             _ if arg.starts_with("--require=") => {
                 parsed.required = Some(parse_metric_list(&arg["--require=".len()..])?);
             }
+            "--memory" => {
+                index += 1;
+                let value = args
+                    .get(index)
+                    .with_context(|| "--memory requires a byte count")?;
+                parsed.memory = Some(parse_byte_count(value)?);
+            }
+            _ if arg.starts_with("--memory=") => {
+                parsed.memory = Some(parse_byte_count(&arg["--memory=".len()..])?);
+            }
             "-h" | "--help" => parsed.help = true,
             other => bail!(
                 "unexpected argument `{other}` for `perf check`\n\n{}",
@@ -2059,6 +2078,11 @@ fn parse_perf_args(args: &[String]) -> Result<PerfArgs> {
     }
 
     Ok(parsed)
+}
+
+/// Parse a `--memory` byte count (plain bytes, or a `MiB`/`GiB` suffix).
+fn parse_byte_count(value: &str) -> Result<u64> {
+    parse_size_bytes(value).with_context(|| format!("`{value}` is not a byte count"))
 }
 
 /// Parse a comma-separated metric list; duplicates collapse and an empty list is
@@ -7747,12 +7771,16 @@ fn disk_usage() -> String {
 }
 
 fn perf_usage() -> String {
-    "USAGE:\n    pitagames-cli perf check [--file <path>] [--require <metrics>] [--json]\n\n\
+    "USAGE:\n    pitagames-cli perf check [--file <path>] [--require <metrics>] [--memory <bytes>] [--json]\n\n\
      ARGS:\n    \
      --file <path>          Measurement JSON (default: stdin)\n    \
      --require <metrics>    Metrics to enforce, comma-separated: cold-start,\n                           \
                             frame-time, memory (default: all three; one left out\n                           \
                             is recorded, not enforced)\n    \
+     --memory <bytes>       Peak resident memory the harness measured (plain\n                           \
+                            bytes, or a MiB/GiB suffix); injected into the\n                           \
+                            measurement because the launcher cannot see the\n                           \
+                            webview's other processes\n    \
      --json                 Print the report as JSON\n    \
      -h, --help             Show this help\n\n\
      Checks a harness measurement (scripts/perf-smoke.sh) against the plan's\n\
@@ -10695,5 +10723,49 @@ verified = ["rdna4"]
         assert_eq!(report["verdict"], "pass");
         assert_eq!(report["frame_time"]["frames"], 3);
         assert_eq!(report["budget"]["games"], 500);
+    }
+
+    #[test]
+    fn perf_check_injects_the_harness_memory_measurement() {
+        let temp = tempfile::tempdir().unwrap();
+        // The launcher's own file has no memory figure; the harness supplies it.
+        let path = write_measurement(
+            temp.path(),
+            r#"{ "games": 500, "cold_start_ms": 1500.0, "frame_ms": [8.0, 9.0] }"#,
+        );
+        perf_check(&[
+            "--file".to_string(),
+            path.display().to_string(),
+            "--memory".to_string(),
+            "1000".to_string(),
+            "--require".to_string(),
+            "memory".to_string(),
+        ])
+        .unwrap();
+    }
+
+    #[test]
+    fn perf_check_fails_when_the_harness_memory_is_over_the_ceiling() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = write_measurement(temp.path(), r#"{ "games": 500 }"#);
+        let error = perf_check(&[
+            "--file".to_string(),
+            path.display().to_string(),
+            "--memory".to_string(),
+            (pitagames_core::MEMORY_CEILING_BYTES + 1).to_string(),
+            "--require".to_string(),
+            "memory".to_string(),
+        ])
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("performance budget not met"), "{error}");
+    }
+
+    #[test]
+    fn perf_args_parse_the_memory_override() {
+        let parsed = parse_perf_args(&["--memory".to_string(), "123".to_string()]).unwrap();
+        assert_eq!(parsed.memory, Some(123));
+        assert!(parse_perf_args(&["--memory".to_string()]).is_err());
+        assert!(parse_perf_args(&["--memory".to_string(), "lots".to_string()]).is_err());
     }
 }

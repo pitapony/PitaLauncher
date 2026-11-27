@@ -15,6 +15,8 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use std::time::Instant;
+
 /// Cold start to first paint with a full library, in milliseconds.
 pub const COLD_START_BUDGET_MS: f64 = 2000.0;
 
@@ -258,6 +260,129 @@ impl Budget {
     }
 }
 
+/// A pause longer than this between two scroll steps starts a new burst, so the
+/// gap between the cold-start paint and the first scroll is never counted as a
+/// frame.
+pub const BURST_GAP_MS: f64 = 500.0;
+
+/// Most frame samples the recorder keeps. A scroll burst is a few hundred
+/// steps; the cap only stops a runaway from growing the buffer forever.
+pub const MAX_FRAME_SAMPLES: usize = 600;
+
+/// How long the launcher waits between writes of the measurement file while it
+/// scrolls. Small enough that a killed run still leaves a usable file.
+pub const FLUSH_INTERVAL_MS: f64 = 250.0;
+
+/// Collects the launcher's own half of a [`Measurement`] — the cold-start paint
+/// and the scroll frame intervals — with an injected clock, so the rules are
+/// tested without sleeping.
+///
+/// The launcher's process start is `started`; [`mark_first_paint`] records how
+/// long the first painted grid took, and [`mark_frame`] records the wall time
+/// between two scroll steps. The harness owns resident memory (an OS question),
+/// so [`measurement`] leaves it `None`.
+///
+/// [`mark_first_paint`]: PerfRecorder::mark_first_paint
+/// [`mark_frame`]: PerfRecorder::mark_frame
+/// [`measurement`]: PerfRecorder::measurement
+#[derive(Debug, Clone)]
+pub struct PerfRecorder {
+    started: Instant,
+    cold_start_ms: Option<f64>,
+    games: usize,
+    last_frame: Option<Instant>,
+    frames: Vec<f64>,
+    last_flush: Option<Instant>,
+}
+
+impl PerfRecorder {
+    /// A recorder anchored at the process start.
+    pub fn new(started: Instant) -> Self {
+        PerfRecorder {
+            started,
+            cold_start_ms: None,
+            games: 0,
+            last_frame: None,
+            frames: Vec::new(),
+            last_flush: None,
+        }
+    }
+
+    /// Record the first painted grid. Returns the elapsed milliseconds, or
+    /// `None` when a paint was already recorded (cold start is the first one).
+    pub fn mark_first_paint(&mut self, now: Instant) -> Option<f64> {
+        if self.cold_start_ms.is_some() {
+            return None;
+        }
+        let elapsed = now.saturating_duration_since(self.started).as_secs_f64() * 1000.0;
+        self.cold_start_ms = Some(elapsed);
+        Some(elapsed)
+    }
+
+    /// How many games the painted library held.
+    pub fn set_games(&mut self, games: usize) {
+        self.games = games;
+    }
+
+    /// The library size the recorder last saw.
+    pub fn games(&self) -> usize {
+        self.games
+    }
+
+    /// Record one scroll step.
+    ///
+    /// The first step only anchors the burst; each later step contributes the
+    /// interval since the previous one, unless that gap is longer than
+    /// [`BURST_GAP_MS`] (a pause, not a frame).
+    pub fn mark_frame(&mut self, now: Instant) {
+        if let Some(previous) = self.last_frame {
+            let interval = now.saturating_duration_since(previous).as_secs_f64() * 1000.0;
+            if interval <= BURST_GAP_MS && self.frames.len() < MAX_FRAME_SAMPLES {
+                self.frames.push(interval);
+            }
+        }
+        self.last_frame = Some(now);
+    }
+
+    /// The cold-start time, once the first paint was recorded.
+    pub fn cold_start_ms(&self) -> Option<f64> {
+        self.cold_start_ms
+    }
+
+    /// The raw scroll frame intervals collected so far.
+    pub fn frames(&self) -> &[f64] {
+        &self.frames
+    }
+
+    /// The percentile summary of the collected frames.
+    pub fn frame_stats(&self) -> Option<FrameStats> {
+        FrameStats::from_samples(&self.frames)
+    }
+
+    /// The launcher's half of a measurement, with memory left for the harness.
+    pub fn measurement(&self) -> Measurement {
+        Measurement {
+            games: self.games,
+            cold_start_ms: self.cold_start_ms,
+            frame_ms: self.frames.clone(),
+            memory_bytes: None,
+        }
+    }
+
+    /// Whether enough time has passed to write the measurement again, and
+    /// whether that write just happened. Throttles the file to
+    /// [`FLUSH_INTERVAL_MS`] so a scroll burst does not write per frame.
+    pub fn should_flush(&mut self, now: Instant) -> bool {
+        let due = self.last_flush.is_none_or(|last| {
+            now.saturating_duration_since(last).as_secs_f64() * 1000.0 >= FLUSH_INTERVAL_MS
+        });
+        if due {
+            self.last_flush = Some(now);
+        }
+        due
+    }
+}
+
 /// Why a measurement could not be parsed or rendered.
 #[derive(Debug, Error)]
 pub enum PerfError {
@@ -269,6 +394,7 @@ pub enum PerfError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     /// Ten frames, one millisecond apart — a worked example with known
     /// percentiles (linear interpolation: p50 = 5.5, p95 = 9.55, max = 10).
@@ -452,5 +578,81 @@ mod tests {
     fn the_default_verdict_is_not_a_pass_until_checked() {
         assert!(!Verdict::Incomplete(Vec::new()).is_pass());
         assert!(Verdict::Pass.is_pass());
+    }
+
+    #[test]
+    fn the_recorder_measures_cold_start_once() {
+        let start = Instant::now();
+        let mut recorder = PerfRecorder::new(start);
+        assert_eq!(
+            recorder.mark_first_paint(start + Duration::from_millis(1500)),
+            Some(1500.0)
+        );
+        // A later paint is ignored: cold start is the first one.
+        assert_eq!(
+            recorder.mark_first_paint(start + Duration::from_millis(9000)),
+            None
+        );
+        assert_eq!(recorder.cold_start_ms(), Some(1500.0));
+    }
+
+    #[test]
+    fn a_frame_is_the_interval_between_two_scroll_steps() {
+        let start = Instant::now();
+        let mut recorder = PerfRecorder::new(start);
+        // The first step only anchors the burst; there is no interval yet.
+        recorder.mark_frame(start + Duration::from_millis(100));
+        recorder.mark_frame(start + Duration::from_millis(116));
+        recorder.mark_frame(start + Duration::from_millis(132));
+        assert_eq!(recorder.frames(), &[16.0, 16.0]);
+        assert_eq!(recorder.frame_stats().unwrap().frames, 2);
+    }
+
+    #[test]
+    fn a_pause_between_scrolls_starts_a_new_burst() {
+        let start = Instant::now();
+        let mut recorder = PerfRecorder::new(start);
+        recorder.mark_frame(start);
+        recorder.mark_frame(start + Duration::from_millis(16));
+        // Two seconds later the user scrolls again: that gap is not a frame.
+        recorder.mark_frame(start + Duration::from_millis(2016));
+        recorder.mark_frame(start + Duration::from_millis(2032));
+        assert_eq!(recorder.frames(), &[16.0, 16.0]);
+    }
+
+    #[test]
+    fn frame_samples_are_capped() {
+        let start = Instant::now();
+        let mut recorder = PerfRecorder::new(start);
+        for step in 0..(MAX_FRAME_SAMPLES + 50) {
+            recorder.mark_frame(start + Duration::from_millis(step as u64));
+        }
+        assert_eq!(recorder.frames().len(), MAX_FRAME_SAMPLES);
+    }
+
+    #[test]
+    fn the_measurement_carries_the_cold_start_the_games_and_the_frames() {
+        let start = Instant::now();
+        let mut recorder = PerfRecorder::new(start);
+        recorder.set_games(500);
+        recorder.mark_first_paint(start + Duration::from_millis(1234));
+        recorder.mark_frame(start);
+        recorder.mark_frame(start + Duration::from_millis(20));
+        let measurement = recorder.measurement();
+        assert_eq!(measurement.games, 500);
+        assert_eq!(measurement.cold_start_ms, Some(1234.0));
+        assert_eq!(measurement.frame_ms, vec![20.0]);
+        // Memory is measured by the harness, not the launcher.
+        assert_eq!(measurement.memory_bytes, None);
+    }
+
+    #[test]
+    fn the_flush_is_throttled_to_the_interval() {
+        let start = Instant::now();
+        let mut recorder = PerfRecorder::new(start);
+        // The first write is immediate; the next waits out the interval.
+        assert!(recorder.should_flush(start));
+        assert!(!recorder.should_flush(start + Duration::from_millis(10)));
+        assert!(recorder.should_flush(start + Duration::from_millis(FLUSH_INTERVAL_MS as u64)));
     }
 }
