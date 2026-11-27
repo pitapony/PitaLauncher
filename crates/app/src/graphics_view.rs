@@ -15,7 +15,7 @@
 use dioxus::prelude::*;
 
 use pitagames_core::AntiCheat;
-use pitagames_core::profile::Profile;
+use pitagames_core::profile::{NeuralRendering, Profile, ProtonRef};
 use pitagames_core::ui::Shell;
 use pitagames_input::Action;
 use pitagames_platform::compat::{CompatDb, CompatEntry};
@@ -386,6 +386,12 @@ pub fn Graphics(props: GraphicsProps) -> Element {
     );
     let gate_allows = gate.allows();
     let gate_message = gate.message();
+    // DLSSNR ships its own OptiScaler, so on the NR route the Upscaling section
+    // points at DLSSNR's in-game menu rather than offering launcher upscalers.
+    let nr_upscaler = graphics::nr_upscaler_note(editor_state.draft());
+    // The NR install panel reports its finished value back here; this owns the
+    // report so the default-Proton choice is the NR one (GE, then Valve).
+    let nr_report = report.clone();
 
     rsx! {
         div {
@@ -426,6 +432,21 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                         span {
                             style: "font-size:var(--text-micro);color:var(--text-muted);",
                             "{section.hint()}"
+                        }
+                    }
+                    if section == Section::Upscaling {
+                        if let Some(note) = nr_upscaler {
+                            div {
+                                style: "display:flex;align-items:center;gap:8px;padding:8px 12px;border-radius:8px;background:#1a1e28;border:1px solid #2c3444;",
+                                span {
+                                    style: "font-size:var(--text-caption);font-weight:600;color:#ffffff;",
+                                    "Upscaler"
+                                }
+                                span {
+                                    style: "font-size:var(--text-caption);color:var(--text-secondary);",
+                                    "{note}"
+                                }
+                            }
                         }
                     }
                     div {
@@ -489,6 +510,19 @@ pub fn Graphics(props: GraphicsProps) -> Element {
                 NrInstallPanel {
                     entry: entry.clone(),
                     plan,
+                    on_installed: move |nr: NeuralRendering| {
+                        let default_proton = nr_report
+                            .as_ref()
+                            .map(pitagames_platform::nr::default_proton)
+                            .unwrap_or(ProtonRef::Auto);
+                        if let Some(editor) = editor.write().as_mut() {
+                            editor.enable_neural_rendering(nr, default_proton);
+                        }
+                        status.set(
+                            "Added the NR profile to the draft — press Apply & verify to save."
+                                .to_string(),
+                        );
+                    },
                 }
             }
 
