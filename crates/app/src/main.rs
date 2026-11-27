@@ -54,6 +54,8 @@ mod focus;
 mod format;
 mod game_page;
 mod gamepad;
+mod graphics;
+mod graphics_view;
 mod grid;
 mod handoff;
 mod history_view;
@@ -67,6 +69,7 @@ mod navigation;
 mod osk;
 mod overlay;
 mod overlay_view;
+mod perf;
 mod persist;
 mod play;
 mod pumps;
@@ -130,6 +133,10 @@ fn main() {
 /// first render is up so the supervisor can tell a real exit from a failed
 /// start.
 fn run_gui(args: &shell::ShellArgs) {
+    // The perf harness: anchor the cold-start clock at this process's start.
+    // A no-op unless `PITAGAMES_PERF_FILE` is set.
+    perf::install();
+
     let (preferences, _warnings) = pitagames_core::ui::AppConfig::load_default();
 
     // Safe mode: disable the DMABUF renderer before WebKit starts and drop
@@ -158,15 +165,24 @@ fn run_gui(args: &shell::ShellArgs) {
     // A checkout has no packaged menu entry; write one that points here.
     desktop_entry::ensure();
 
-    // The window is built for the resolved shell: decorated and windowed for the
-    // desktop, undecorated and fullscreen for the console.
-    let window = shell::window_builder(&shell::window_config(shell, &display));
+    // The window is built for the resolved shell: frameless and windowed for
+    // the desktop, undecorated and fullscreen for the console.
+    let window_config = shell::window_config(shell, &display);
+    let window = shell::window_builder(&window_config);
 
-    // Dioxus installs a default Window/Edit/Help menu bar on a decorated
-    // window. The launcher has no use for it (navigation lives in the left
-    // rail), so pass an empty menu.
+    // The built window's config is kept for the startup placement below.
+    let startup_config = window_config.clone();
     let mut config = dioxus::desktop::Config::new()
         .with_window(window)
+        // A monitor handle only exists once the window is built, so the
+        // configured monitor is applied here — after `Window::build`, before
+        // the webview — rather than in the builder.
+        .with_on_window(move |window, _dom| {
+            shell::place_at_startup(&window, &startup_config);
+        })
+        // Dioxus installs a default Window/Edit/Help menu bar. The launcher has
+        // no use for it (navigation lives in the left rail), so pass an empty
+        // menu.
         .with_menu(None);
     // The window icon is painted in code (`icon::rgba`); without one the
     // window falls back to the toolkit's default placeholder.
@@ -360,6 +376,7 @@ fn App() -> Element {
     let downloads_actions = use_hook(focus::ActionChannel::new);
     let stores_actions = use_hook(focus::ActionChannel::new);
     let detail_actions = use_hook(focus::ActionChannel::new);
+    let graphics_actions = use_hook(focus::ActionChannel::new);
     let controls_actions = use_hook(focus::ActionChannel::new);
     let downloads_focus = focus::use_focus();
 
@@ -457,6 +474,7 @@ fn App() -> Element {
             downloads_actions.clone(),
             stores_actions.clone(),
             detail_actions.clone(),
+            graphics_actions.clone(),
             controls_actions.clone(),
         ),
         shell_state.clone(),
@@ -573,6 +591,7 @@ fn App() -> Element {
             downloads_actions.clone(),
             stores_actions.clone(),
             detail_actions.clone(),
+            graphics_actions.clone(),
             controls_actions.clone(),
         ),
         shell_state.clone(),
@@ -798,6 +817,9 @@ fn App() -> Element {
     }
     let header_style = shell::header_style(shell_state.shell(), &shell_state.display);
     let shell_label = shell_state.shell().label();
+    // The desktop shell is frameless, so its header is the titlebar: dragging it
+    // moves the window. The console shell has no header controls.
+    let desktop_shell = !shell_state.shell().is_console();
     let shell_hint = if shell_state.shell().is_console() {
         "Guide or F11 returns to the desktop"
     } else {
@@ -820,8 +842,11 @@ fn App() -> Element {
     };
     let hint_row = if shell_state.shell().is_console() && current_view == View::Detail {
         // The console game page advertises only the actions it exposes, in its
-        // own words: Play (Confirm), Overlay (Menu), Back.
+        // own words: Play (Confirm), Graphics (Context), Overlay (Menu), Back.
         pitagames_input::hints_for(&hint_map, &pitagames_input::GAME_PAGE_HINTS)
+    } else if current_view == View::Graphics {
+        // The graphics screen's own row: Choose (Confirm) and Back.
+        pitagames_input::hints_for(&hint_map, &pitagames_input::GRAPHICS_HINTS)
     } else {
         pitagames_input::hints(&hint_map)
     };
@@ -1161,6 +1186,13 @@ fn App() -> Element {
 
             header {
                 style: "{header_style}",
+                // The frameless desktop window is moved by dragging its header.
+                // The console shell has its own window and ignores this.
+                onmousedown: move |_| {
+                    if desktop_shell {
+                        let _ = dioxus::desktop::window().window.drag_window();
+                    }
+                },
                 h1 {
                     style: "font-size:var(--text-title);font-weight:600;margin:0;color:#ffffff;",
                     "PitaGames"
@@ -1206,7 +1238,30 @@ fn App() -> Element {
                         oninput: move |event| session.write().filter_mut().query = event.value(),
                         onfocus: move |_| session.write().set_text_focused(true),
                         onblur: move |_| session.write().set_text_focused(false),
+                        // The search field is inside the draggable header; a
+                        // press here must focus it, not start a window drag.
+                        onmousedown: move |event| event.stop_propagation(),
                         style: "margin-left:auto;padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1e1e28;color:var(--text);font-size:inherit;outline:none;",
+                    }
+                    // Frameless chrome: the window has no decorations, so
+                    // minimize and close live in the header. Without them a
+                    // frameless window would be impossible to put away.
+                    div {
+                        style: "display:flex;align-items:center;gap:6px;margin-left:12px;",
+                        button {
+                            title: "Minimize",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| dioxus::desktop::window().window.set_minimized(true),
+                            style: shell::window_control_style(),
+                            "–"
+                        }
+                        button {
+                            title: "Close",
+                            onmousedown: move |event| event.stop_propagation(),
+                            onclick: move |_| dioxus::desktop::window().close(),
+                            style: shell::window_control_style(),
+                            "✕"
+                        }
                     }
                 }
             }
@@ -1359,6 +1414,20 @@ fn App() -> Element {
                             proton: proton_report.clone(),
                             shell: shell_state.shell,
                             libraries: detail_libraries.clone(),
+                        }
+                    }
+                }
+            } else if current_view == View::Graphics {
+                div {
+                    style: "flex:1;min-height:0;overflow-y:auto;",
+                    if let Some(entry) = detail_entry {
+                        graphics_view::Graphics {
+                            key: "graphics-{entry.store().as_str()}-{entry.app_id()}",
+                            entry,
+                            db: detail::DbHandle(db_handle.clone()),
+                            proton: proton_report.clone(),
+                            actions: graphics_actions,
+                            shell: shell_state.shell,
                         }
                     }
                 }
@@ -1598,6 +1667,11 @@ fn LibraryGrid(props: LibraryGridProps) -> Element {
             }
         };
     };
+
+    // The first paint of a loaded library is the cold start the harness wants:
+    // the scan and the database read are behind it, so a 500-game library is
+    // what the budget is measured against. Idempotent and a no-op off-harness.
+    crate::perf::mark_first_paint(state.games.len());
 
     let matches: Vec<&library::GameEntry> = session
         .read()
@@ -2065,6 +2139,9 @@ fn perform_action(
             // Update the window model now so the next render draws the focused
             // row; the DOM scroll keeps the container in sync.
             scroll_top.set(target);
+            // A real scroll step is a frame for the perf harness: the interval
+            // since the previous step is what the 60 fps budget is measured on.
+            crate::perf::mark_frame();
             let future = scroller
                 .borrow()
                 .as_ref()
@@ -2311,6 +2388,7 @@ pub(crate) fn dispatch_action(
     downloads: &focus::ActionChannel,
     stores: &focus::ActionChannel,
     detail: &focus::ActionChannel,
+    graphics: &focus::ActionChannel,
     controls: &focus::ActionChannel,
 ) {
     // Read the current view first: the match scrutinee's guard would live for
@@ -2322,6 +2400,7 @@ pub(crate) fn dispatch_action(
         View::Downloads => downloads,
         View::Stores => stores,
         View::Detail => detail,
+        View::Graphics => graphics,
         View::Controls => controls,
         View::History | View::Account | View::Logs => {
             // These screens have no graph yet; Back still leaves them so the

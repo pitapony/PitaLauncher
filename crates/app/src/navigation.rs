@@ -18,6 +18,7 @@ pub(crate) enum View {
     History,
     Stores,
     Detail,
+    Graphics,
     Account,
     Controls,
     Logs,
@@ -50,6 +51,7 @@ impl View {
             Self::Stores => "Stores",
             // Not a destination, but the enum is closed and a label is cheap.
             Self::Detail => "Details",
+            Self::Graphics => "Graphics",
             Self::Account => "Account",
             Self::Controls => "Controls",
             Self::Logs => "Logs",
@@ -172,6 +174,18 @@ impl Navigation {
         self.view = View::Detail;
     }
 
+    /// Open the graphics screen for a game.
+    ///
+    /// The graphics screen is opened *from* a detail page, so it does not touch
+    /// `back`: the detail page's own Back target is preserved, and `Back` from
+    /// graphics returns to the detail page (whose Back then returns to wherever
+    /// the game was opened). The selection is kept, so the page resolves the
+    /// same game.
+    pub(crate) fn open_graphics(&mut self, id: GameId) {
+        self.selected = Some(id);
+        self.view = View::Graphics;
+    }
+
     /// Cycle the current view to the next (`forward`) or previous destination.
     ///
     /// `Tab`'s job, handled at the app level so it works on every screen without
@@ -221,6 +235,18 @@ mod tests {
         // Back is where the page was opened from, not a fixed screen.
         nav.open_detail(id("620"), View::Stores);
         assert_eq!(nav.back(), View::Stores);
+    }
+
+    #[test]
+    fn open_graphics_keeps_the_detail_pages_back_target() {
+        let mut nav = Navigation::new(View::Home);
+        nav.open_detail(id("620"), View::Home);
+        nav.open_graphics(id("620"));
+        assert_eq!(nav.view(), View::Graphics);
+        assert_eq!(nav.selected(), Some(id("620")));
+        // The detail page's Back target is untouched, so leaving graphics
+        // returns to the detail page and leaving that returns Home.
+        assert_eq!(nav.back(), View::Home);
     }
 
     #[test]

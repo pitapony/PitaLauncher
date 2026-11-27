@@ -404,6 +404,7 @@ pub(crate) fn gamepad_actions(
         focus::ActionChannel,
         focus::ActionChannel,
         focus::ActionChannel,
+        focus::ActionChannel,
     ),
     pad_shell: shell::ShellState,
     pad_active: Signal<bool>,
@@ -505,6 +506,7 @@ pub(crate) fn gamepad_actions(
                             &actions.3,
                             &actions.4,
                             &actions.5,
+                            &actions.6,
                         );
                     }
                     gamepad::GamepadEvent::Control(binding) => {
@@ -724,6 +726,7 @@ pub(crate) fn keyboard(
         focus::ActionChannel,
         focus::ActionChannel,
         focus::ActionChannel,
+        focus::ActionChannel,
     ),
     mut key_shell: shell::ShellState,
     mut key_pad_active: Signal<bool>,
@@ -853,6 +856,7 @@ pub(crate) fn keyboard(
             &key_actions.3,
             &key_actions.4,
             &key_actions.5,
+            &key_actions.6,
         );
     });
 }

@@ -1,0 +1,40 @@
+# Shipped DLSSNR-AMD backend pins (ticket #28).
+#
+# DLSSNR is two independent codebases with one installer UX, and each is pinned
+# separately (ADR-0024): the RDNA 4 upstream on GitLab, the RDNA 3 Linux fork on
+# GitHub. A card is never offered the other architecture's package, so `backend`
+# is one of `rdna4_upstream` (GitLab, validated by us) or `rdna3_fork` (GitHub,
+# `experimental`). `source` is `gitlab` or `github`.
+#
+# `version` is the release version the fork-lag gate compares against a game's
+# `[neural_rendering] dlssnr_min_version`; it is carried explicitly because the
+# two hosts tag differently. The upstream is ahead of the fork — that lag is the
+# point, and the UI surfaces it rather than silently falling back.
+#
+# The archive's SHA-256 is checked against `sha256` before a byte is unpacked, so
+# a moved tag or a swapped asset is refused. A user can add or replace a pin in
+# `<XDG_CONFIG_HOME>/pitagames/dlssnr/backends.toml`.
+#
+# NOTE: not yet driven against a real download (no target machine has been
+# reachable, and the live HTTP fetcher is ticket #12's open item). The digests
+# below are placeholders to be replaced with the releases' published SHA-256 the
+# first time the pins are fetched against the real hosts; `mods::release`
+# refuses the bytes if they do not match, so a placeholder can never install.
+
+[[backends]]
+backend = "rdna4_upstream"
+source = "gitlab"
+project = "mochizuki0323/DLSSNR-AMD"
+tag = "v0.0.9"
+version = "0.0.9"
+asset = "DLSSNR-AMD-Vulkan-Linux-0.0.9-x86_64.tar.gz"
+sha256 = "a102f349565986ec6604c251e5e656adca1e1f0b38b3ad8c35ca5c790b343b7e"
+
+[[backends]]
+backend = "rdna3_fork"
+source = "github"
+project = "mauri870/DLSSNR-RDNA3"
+tag = "v0.0.8"
+version = "0.0.8"
+asset = "DLSSNR-AMD-Vulkan-Linux-0.0.8-x86_64.tar.gz"
+sha256 = "98fd8a8f135aa1deefa7cbfa6261cb4fc09b34ccf94ce403a59f9f755d16995d"

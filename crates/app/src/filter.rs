@@ -16,7 +16,7 @@
 use std::collections::{HashMap, HashSet};
 
 use pitagames_core::{Game, GameId, Store};
-use pitagames_input::{FocusGraph, FocusId};
+use pitagames_input::{Band, FocusGraph, FocusId};
 use pitagames_stores::InstallPhase;
 use pitagames_stores::status::updates;
 
@@ -383,28 +383,19 @@ impl ChipRow {
 /// tile's id is `chip_count + index`, so `Up` from the top tile row reaches the
 /// chips and the two sets never share an id. A zero column count is treated as
 /// one column.
+///
+/// The layout itself is the shared [`FocusGraph::ragged`] builder, so the console
+/// library's graph and its property tests cannot drift.
 pub fn ragged_graph(
     chip_count: usize,
     chip_columns: usize,
     tile_count: usize,
     tile_columns: usize,
 ) -> FocusGraph {
-    let chip_columns = chip_columns.max(1);
-    let tile_columns = tile_columns.max(1);
-    let chip_rows = chip_count.div_ceil(chip_columns);
-
-    let mut graph = FocusGraph::new();
-    for index in 0..chip_count {
-        graph.insert(index, index / chip_columns, index % chip_columns);
-    }
-    for index in 0..tile_count {
-        graph.insert(
-            chip_count + index,
-            chip_rows + index / tile_columns,
-            index % tile_columns,
-        );
-    }
-    graph
+    FocusGraph::ragged(&[
+        Band::new(chip_count, chip_columns),
+        Band::new(tile_count, tile_columns),
+    ])
 }
 
 /// How many chips fit on one line of `available` CSS pixels.

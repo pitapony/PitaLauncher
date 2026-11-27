@@ -130,6 +130,9 @@ pub enum Key {
     Q,
     E,
     F,
+    /// Opens the focused item's context action (the pad's `West`). On the game
+    /// page this is the Graphics screen.
+    C,
     /// Opens the shell's menu/overlay (the pad's `Start`).
     M,
     /// The keyboard's shell toggle. There is no `F11` gamepad equivalent; the

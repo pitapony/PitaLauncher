@@ -473,6 +473,9 @@ pub fn Detail(props: DetailProps) -> Element {
     let hero_install_id = game_id.clone();
     let hero_install_title = title.clone();
     let hero_libraries = props.libraries.clone();
+    // The Graphics screen's own captures (the desktop button and the pad's
+    // `Context` action both open it).
+    let graphics_game = game_id.clone();
 
     // The detail screen's action drain. The app's one pump posts here; this
     // screen owns its own graph. The cells are the two primary actions the page
@@ -519,6 +522,13 @@ pub fn Detail(props: DetailProps) -> Element {
                         pitagames_input::OskPress::Cancel => osk_open.set(false),
                         pitagames_input::OskPress::Idle | pitagames_input::OskPress::Edited => {}
                     }
+                    continue;
+                }
+                // The pad's `Context` button (West) opens the graphics screen
+                // for this game, in either shell — the console game page's route
+                // to the M3 profile.
+                if action == Action::Context {
+                    session.write().open_graphics(game.clone());
                     continue;
                 }
                 // The pad's Search button is the page's text entry; the only
@@ -807,6 +817,12 @@ pub fn Detail(props: DetailProps) -> Element {
                             style: "padding:8px 12px;border-radius:8px;border:1px solid #2c2c38;background:#1a1a22;color:var(--text-muted);font-size:var(--text-caption);",
                             "{reason}"
                         }
+                    }
+
+                    button {
+                        onclick: move |_| session.write().open_graphics(graphics_game.clone()),
+                        style: "padding:8px 14px;border-radius:8px;border:1px solid #3a3a4c;background:#1e1e28;color:var(--text-secondary);font-size:var(--text-caption);cursor:pointer;min-height:var(--hit-min);min-width:var(--hit-min);",
+                        "Graphics"
                     }
                 }
             }
