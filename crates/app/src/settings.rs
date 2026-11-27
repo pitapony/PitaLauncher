@@ -15,6 +15,7 @@
 //! the field it names and that the built [`FocusGraph`] is trap-free.
 
 use dioxus::prelude::*;
+use pitagames_core::GameId;
 use pitagames_core::i18n::t;
 use pitagames_core::paths;
 use pitagames_core::profile::GamescopeOptions;
@@ -25,6 +26,7 @@ use pitagames_input::{Action, Band, FocusGraph};
 use pitagames_platform::proton::DiscoveryReport;
 
 use crate::View;
+use crate::copy::CopyButton;
 use crate::focus::{self, ActionChannel};
 use crate::library::Library;
 use crate::session::Session;
@@ -71,6 +73,12 @@ pub enum Control {
     RestoreSteam,
     /// Leave to the Controls screen for remapping.
     OpenControls,
+    /// Run one repair: mod trees, Steam config and the database.
+    RunRepair,
+    /// Render the local settings export and show it for copying.
+    ExportSettings,
+    /// Save the rendered export into the data directory.
+    SaveExport,
 }
 
 /// What the component must do after a control mutated the config.
@@ -88,6 +96,12 @@ pub enum Intent {
     RestoreSteam,
     /// Leave to the Controls screen.
     OpenControls,
+    /// Run one repair now.
+    RunRepair,
+    /// Render the local settings export now.
+    Export,
+    /// Save the rendered settings export now.
+    SaveExport,
 }
 
 /// The controls, grouped into the rows the screen draws.
@@ -122,6 +136,9 @@ fn rows() -> Vec<Vec<Control>> {
         vec![Control::CompatSync, Control::CompatSyncNow],
         vec![Control::RestoreSteam],
         vec![Control::OpenControls],
+        // Maintenance is the repair + export section at the foot of the screen.
+        vec![Control::RunRepair],
+        vec![Control::ExportSettings, Control::SaveExport],
     ]
 }
 
@@ -244,6 +261,11 @@ pub fn apply(control: Control, config: &mut AppConfig) -> Intent {
         Control::CompatSyncNow => Intent::Sync,
         Control::RestoreSteam => Intent::RestoreSteam,
         Control::OpenControls => Intent::OpenControls,
+        // Maintenance controls change no config field: repair and export act on
+        // the machine, not on the preference file.
+        Control::RunRepair => Intent::RunRepair,
+        Control::ExportSettings => Intent::Export,
+        Control::SaveExport => Intent::SaveExport,
     }
 }
 
@@ -370,6 +392,9 @@ pub fn SettingsView(props: SettingsProps) -> Element {
     let config = use_signal(|| AppConfig::load_default().0);
     let status = use_signal(String::new);
     let status_error = use_signal(|| false);
+    // The rendered settings export, shown in a selectable box and copied or
+    // saved from the same text. `None` until the user asks for one.
+    let export = use_signal(|| None::<String>);
 
     use_future(move || {
         let channel = actions.clone();
@@ -387,6 +412,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     session,
                     status,
                     status_error,
+                    export,
                 );
             }
         }
@@ -397,6 +423,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
     let focused = screen_focus.index();
     let status_text = status();
     let status_bad = status_error();
+    let export_snapshot = export.read().clone();
     let runtime = runtime_lines(proton.as_ref(), library.read().as_ref());
     let compat_target = paths::data_dir().map(|dir| dir.join("compat"));
     let backup_dir = paths::steam_backup_dir();
@@ -426,7 +453,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     for shell_choice in [Shell::Desktop, Shell::Console] {
                         button {
                             key: "theme-{shell_choice.as_str()}",
-                            onclick: move |_| activate(Control::Shell(shell_choice), config, on_shell, library, session, status, status_error),
+                            onclick: move |_| activate(Control::Shell(shell_choice), config, on_shell, library, session, status, status_error, export),
                             style: "{chip_style(selected(Control::Shell(shell_choice), &current, live_shell))}{focus::ring_style(focused == Some(index_of(Control::Shell(shell_choice))))}",
                             "{shell_choice.label()}"
                         }
@@ -447,7 +474,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     for mode in [StartMode::Desktop, StartMode::Console, StartMode::Remember] {
                         button {
                             key: "start-{mode.as_str()}",
-                            onclick: move |_| activate(Control::StartMode(mode), config, on_shell, library, session, status, status_error),
+                            onclick: move |_| activate(Control::StartMode(mode), config, on_shell, library, session, status, status_error, export),
                             style: "{chip_style(selected(Control::StartMode(mode), &current, live_shell))}{focus::ring_style(focused == Some(index_of(Control::StartMode(mode))))}",
                             "{mode.label()}"
                         }
@@ -466,7 +493,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                         {t("settings.ui_scale")}
                     }
                     button {
-                        onclick: move |_| activate(Control::UiScale(-1), config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::UiScale(-1), config, on_shell, library, session, status, status_error, export),
                         "aria-label": t("settings.ui_scale_down"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::UiScale(-1))))}",
                         "−"
@@ -476,7 +503,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                         "{current.ui.display.ui_scale:.2}×"
                     }
                     button {
-                        onclick: move |_| activate(Control::UiScale(1), config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::UiScale(1), config, on_shell, library, session, status, status_error, export),
                         "aria-label": t("settings.ui_scale_up"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::UiScale(1))))}",
                         "+"
@@ -489,7 +516,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                         {t("settings.safe_area")}
                     }
                     button {
-                        onclick: move |_| activate(Control::SafeArea(-1), config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::SafeArea(-1), config, on_shell, library, session, status, status_error, export),
                         "aria-label": t("settings.safe_area_down"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::SafeArea(-1))))}",
                         "−"
@@ -499,7 +526,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                         "{current.ui.display.safe_area_pct}%"
                     }
                     button {
-                        onclick: move |_| activate(Control::SafeArea(1), config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::SafeArea(1), config, on_shell, library, session, status, status_error, export),
                         "aria-label": t("settings.safe_area_up"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::SafeArea(1))))}",
                         "+"
@@ -512,7 +539,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                         {t("settings.cursor")}
                     }
                     button {
-                        onclick: move |_| activate(Control::Cursor(-1), config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::Cursor(-1), config, on_shell, library, session, status, status_error, export),
                         "aria-label": t("settings.cursor_down"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::Cursor(-1))))}",
                         "−"
@@ -522,7 +549,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                         "{cursor_label(current.ui.display.hide_cursor_ms)}"
                     }
                     button {
-                        onclick: move |_| activate(Control::Cursor(1), config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::Cursor(1), config, on_shell, library, session, status, status_error, export),
                         "aria-label": t("settings.cursor_up"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::Cursor(1))))}",
                         "+"
@@ -537,19 +564,19 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                 div {
                     style: "display:flex;flex-wrap:wrap;gap:8px;",
                     button {
-                        onclick: move |_| activate(Control::ReduceAnimations, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::ReduceAnimations, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::ReduceAnimations, &current))}{focus::ring_style(focused == Some(index_of(Control::ReduceAnimations)))}",
                         span { style: "font-weight:600;", {t("settings.reduce_animations")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::ReduceAnimations, &current))} }
                     }
                     button {
-                        onclick: move |_| activate(Control::ConsoleFullscreen, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::ConsoleFullscreen, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::ConsoleFullscreen, &current))}{focus::ring_style(focused == Some(index_of(Control::ConsoleFullscreen)))}",
                         span { style: "font-weight:600;", {t("settings.console_fullscreen")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::ConsoleFullscreen, &current))} }
                     }
                     button {
-                        onclick: move |_| activate(Control::SafeMode, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::SafeMode, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::SafeMode, &current))}{focus::ring_style(focused == Some(index_of(Control::SafeMode)))}",
                         span { style: "font-weight:600;", {t("settings.safe_mode")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::SafeMode, &current))} }
@@ -568,19 +595,19 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                 div {
                     style: "display:flex;flex-wrap:wrap;gap:8px;",
                     button {
-                        onclick: move |_| activate(Control::WrapperGamemode, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::WrapperGamemode, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::WrapperGamemode, &current))}{focus::ring_style(focused == Some(index_of(Control::WrapperGamemode)))}",
                         span { style: "font-weight:600;", {t("settings.wrapper_gamemode")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::WrapperGamemode, &current))} }
                     }
                     button {
-                        onclick: move |_| activate(Control::WrapperMangohud, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::WrapperMangohud, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::WrapperMangohud, &current))}{focus::ring_style(focused == Some(index_of(Control::WrapperMangohud)))}",
                         span { style: "font-weight:600;", {t("settings.wrapper_mangohud")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::WrapperMangohud, &current))} }
                     }
                     button {
-                        onclick: move |_| activate(Control::WrapperGamescope, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::WrapperGamescope, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::WrapperGamescope, &current))}{focus::ring_style(focused == Some(index_of(Control::WrapperGamescope)))}",
                         span { style: "font-weight:600;", {t("settings.wrapper_gamescope")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::WrapperGamescope, &current))} }
@@ -599,13 +626,13 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                 div {
                     style: "display:flex;flex-wrap:wrap;gap:8px;",
                     button {
-                        onclick: move |_| activate(Control::CompatSync, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::CompatSync, config, on_shell, library, session, status, status_error, export),
                         style: "{toggle_style(is_on(Control::CompatSync, &current))}{focus::ring_style(focused == Some(index_of(Control::CompatSync)))}",
                         span { style: "font-weight:600;", {t("settings.compat_sync")} }
                         span { style: "opacity:0.8;", {on_off(is_on(Control::CompatSync, &current))} }
                     }
                     button {
-                        onclick: move |_| activate(Control::CompatSyncNow, config, on_shell, library, session, status, status_error),
+                        onclick: move |_| activate(Control::CompatSyncNow, config, on_shell, library, session, status, status_error, export),
                         style: "{action_style()}{focus::ring_style(focused == Some(index_of(Control::CompatSyncNow)))}",
                         {t("settings.sync_now")}
                     }
@@ -627,7 +654,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:8px;",
                 SectionLabel { label: t("settings.steam") }
                 button {
-                    onclick: move |_| activate(Control::RestoreSteam, config, on_shell, library, session, status, status_error),
+                    onclick: move |_| activate(Control::RestoreSteam, config, on_shell, library, session, status, status_error, export),
                     style: "{action_style()}{focus::ring_style(focused == Some(index_of(Control::RestoreSteam)))}",
                     {t("settings.restore_steam")}
                 }
@@ -667,13 +694,55 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                 style: "display:flex;flex-direction:column;gap:8px;",
                 SectionLabel { label: t("settings.controls") }
                 button {
-                    onclick: move |_| activate(Control::OpenControls, config, on_shell, library, session, status, status_error),
+                    onclick: move |_| activate(Control::OpenControls, config, on_shell, library, session, status, status_error, export),
                     style: "{action_style()}{focus::ring_style(focused == Some(index_of(Control::OpenControls)))}",
                     {t("settings.open_controls")}
                 }
                 span {
                     style: "{hint_style()}",
                     {t("settings.controls_hint")}
+                }
+            }
+
+            // -- Maintenance (repair + the local settings export) ----------
+            div {
+                style: "display:flex;flex-direction:column;gap:8px;",
+                SectionLabel { label: t("settings.maintenance") }
+                div {
+                    style: "display:flex;flex-wrap:wrap;gap:8px;",
+                    button {
+                        onclick: move |_| activate(Control::RunRepair, config, on_shell, library, session, status, status_error, export),
+                        style: "{action_style()}{focus::ring_style(focused == Some(index_of(Control::RunRepair)))}",
+                        {t("settings.run_repair")}
+                    }
+                    button {
+                        onclick: move |_| activate(Control::ExportSettings, config, on_shell, library, session, status, status_error, export),
+                        style: "{action_style()}{focus::ring_style(focused == Some(index_of(Control::ExportSettings)))}",
+                        {t("settings.export_settings")}
+                    }
+                    button {
+                        onclick: move |_| activate(Control::SaveExport, config, on_shell, library, session, status, status_error, export),
+                        style: "{action_style()}{focus::ring_style(focused == Some(index_of(Control::SaveExport)))}",
+                        {t("settings.save_export")}
+                    }
+                }
+                span {
+                    style: "{hint_style()}",
+                    {t("settings.maintenance_hint")}
+                }
+                if let Some(text) = export_snapshot.clone() {
+                    div {
+                        style: "display:flex;align-items:center;gap:8px;",
+                        span {
+                            style: "{hint_style()}",
+                            {t("settings.export_preview")}
+                        }
+                        CopyButton { text: text.clone() }
+                    }
+                    pre {
+                        style: "margin:0;padding:12px;border-radius:8px;background:#14141b;border:1px solid #26262f;color:var(--text-secondary);font-family:monospace;font-size:var(--text-micro);white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;max-height:320px;overflow-y:auto;",
+                        "{text}"
+                    }
                 }
             }
 
@@ -702,6 +771,7 @@ fn activate(
     mut session: Signal<Session>,
     status: Signal<String>,
     status_error: Signal<bool>,
+    mut export: Signal<Option<String>>,
 ) {
     let (mut next, _warnings) = AppConfig::load_default();
     let intent = apply(control, &mut next);
@@ -719,6 +789,15 @@ fn activate(
         Intent::SwitchShell(choice) => on_shell.call(choice),
         Intent::RestoreSteam => restore_steam(library, status, status_error),
         Intent::OpenControls => session.write().go(View::Controls),
+        Intent::RunRepair => run_repair(status, status_error),
+        Intent::Export => {
+            let selected = session.read().selected();
+            render_export(selected, export, status, status_error);
+        }
+        Intent::SaveExport => {
+            let selected = session.read().selected();
+            save_export(selected, export, status, status_error);
+        }
     }
 }
 
@@ -733,6 +812,7 @@ fn handle_action(
     mut session: Signal<Session>,
     status: Signal<String>,
     status_error: Signal<bool>,
+    export: Signal<Option<String>>,
 ) {
     if action == Action::Back {
         session.write().go(View::Library);
@@ -759,6 +839,7 @@ fn handle_action(
         session,
         status,
         status_error,
+        export,
     );
 }
 
@@ -803,6 +884,113 @@ fn sync_compat(mut status: Signal<String>, mut status_error: Signal<bool>) {
         }
         Err(message) => {
             status.set(message);
+            status_error.set(true);
+        }
+    }
+}
+
+/// Run one repair and turn its report into the status line.
+///
+/// The repair is the same `pitagames_repair::run` the CLI's `repair` command
+/// runs, so the button and `pitagames-cli repair` cannot drift. It is `async`
+/// (it opens the database), so it runs on a worker; the status line never
+/// blocks the click.
+fn run_repair(mut status: Signal<String>, mut status_error: Signal<bool>) {
+    status.set(t("settings.repair_running").to_string());
+    status_error.set(false);
+    spawn(async move {
+        let request = pitagames_repair::RepairRequest::for_this_machine(true);
+        match pitagames_repair::run(&request).await {
+            Ok(report) if report.is_clean() => {
+                status.set(t("settings.repair_clean").to_string());
+                status_error.set(false);
+            }
+            Ok(report) => {
+                let db = report.db.as_ref().map_or_else(
+                    || t("settings.repair_db_not_checked"),
+                    |db| {
+                        if db.integrity.ok {
+                            t("settings.repair_ok")
+                        } else {
+                            t("settings.repair_failed")
+                        }
+                    },
+                );
+                status.set(
+                    t("settings.repair_summary")
+                        .replace("{mods}", &report.tampered_mods().count().to_string())
+                        .replace("{steam}", &report.steam.count().to_string())
+                        .replace("{db}", db),
+                );
+                status_error.set(true);
+            }
+            Err(error) => {
+                status.set(t("settings.repair_error").replace("{error}", &error.to_string()));
+                status_error.set(true);
+            }
+        }
+    });
+}
+
+/// The rendered settings export, reusing the one already shown on screen.
+///
+/// Rendering probes the GPU and the Proton builds, so it happens once per
+/// export; a second Copy or Save reuses the same text.
+fn rendered_export(selected: Option<GameId>, mut export: Signal<Option<String>>) -> String {
+    if let Some(text) = export.read().clone() {
+        return text;
+    }
+    let text = pitagames_repair::export::for_machine(selected.as_ref(), None)
+        .text()
+        .to_string();
+    export.set(Some(text.clone()));
+    text
+}
+
+/// Render the export and put it on screen for copying.
+fn render_export(
+    selected: Option<GameId>,
+    export: Signal<Option<String>>,
+    mut status: Signal<String>,
+    mut status_error: Signal<bool>,
+) {
+    let text = rendered_export(selected, export);
+    status.set(t("settings.export_ready").replace("{count}", &text.len().to_string()));
+    status_error.set(false);
+}
+
+/// Write the rendered export into the data directory's `support` folder.
+///
+/// No upload, no endpoint: the user gets a path they can attach to a report.
+fn save_export(
+    selected: Option<GameId>,
+    export: Signal<Option<String>>,
+    mut status: Signal<String>,
+    mut status_error: Signal<bool>,
+) {
+    let text = rendered_export(selected, export);
+    let Some(dir) = paths::data_dir().map(|dir| dir.join("support")) else {
+        status.set(t("settings.no_data_dir").to_string());
+        status_error.set(true);
+        return;
+    };
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        status.set(t("settings.export_error").replace("{error}", &error.to_string()));
+        status_error.set(true);
+        return;
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0);
+    let path = dir.join(format!("pitagames-settings-{stamp}.txt"));
+    match std::fs::write(&path, text) {
+        Ok(()) => {
+            status.set(t("settings.export_saved").replace("{path}", &path.display().to_string()));
+            status_error.set(false);
+        }
+        Err(error) => {
+            status.set(t("settings.export_error").replace("{error}", &error.to_string()));
             status_error.set(true);
         }
     }
@@ -1179,5 +1367,67 @@ mod tests {
     fn the_cursor_label_reads_never_or_seconds() {
         assert_eq!(cursor_label(0), t("settings.cursor_never"));
         assert_eq!(cursor_label(3_000), "3.0s");
+    }
+
+    #[test]
+    fn the_maintenance_controls_change_no_config_field() {
+        // Repair and the settings export act on the machine, not on the
+        // preference file: `apply` names the intent but mutates nothing.
+        for (control, intent) in [
+            (Control::RunRepair, Intent::RunRepair),
+            (Control::ExportSettings, Intent::Export),
+            (Control::SaveExport, Intent::SaveExport),
+        ] {
+            let mut config = AppConfig::default();
+            let before = config.clone();
+            assert_eq!(apply(control, &mut config), intent);
+            assert_eq!(config, before, "{control:?} changed the config");
+        }
+    }
+
+    #[test]
+    fn the_maintenance_rows_join_the_trap_free_graph() {
+        for control in [
+            Control::RunRepair,
+            Control::ExportSettings,
+            Control::SaveExport,
+        ] {
+            assert!(cells().contains(&control), "{control:?} is not drawn");
+        }
+        // Each maintenance cell reaches every other through the public moves,
+        // so adding the two rows cannot strand a control.
+        let graph = graph();
+        let count = graph.len();
+        let directions = [
+            Action::NavigateUp,
+            Action::NavigateDown,
+            Action::NavigateLeft,
+            Action::NavigateRight,
+        ];
+        for start in [
+            index_of(Control::RunRepair),
+            index_of(Control::ExportSettings),
+            index_of(Control::SaveExport),
+        ] {
+            let mut reached = BTreeSet::new();
+            reached.insert(start);
+            let mut frontier = vec![start];
+            while let Some(current) = frontier.pop() {
+                for direction in directions {
+                    let mut walk = graph.clone();
+                    walk.focus_index(Some(current));
+                    if let Some(next) = walk.move_focus(direction)
+                        && reached.insert(next.get() as usize)
+                    {
+                        frontier.push(next.get() as usize);
+                    }
+                }
+            }
+            assert_eq!(
+                reached.len(),
+                count,
+                "maintenance cell {start} cannot reach every cell"
+            );
+        }
     }
 }

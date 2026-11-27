@@ -75,15 +75,28 @@ their names nor their values appear.
 - `pitagames-cli repair export [<store> <id>] [--dir <profiles>] [--out <file>]
   [--json]` — prints, or saves with `--out`, the local settings export.
 
-The GUI half is **not** in this slice: ticket #20 owns `View::Settings`, so #35
-deliberately ships no screen. It ships the two entry points that screen calls,
-so the button is a graft after both merge:
+The GUI half ships on ticket #20's `View::Settings` screen: the **Maintenance**
+section at the foot of `crates/app/src/settings.rs` adds three controls to the
+screen's closed `Control` set — `Control::RunRepair`,
+`Control::ExportSettings` and `Control::SaveExport` — whose
+`Intent::{RunRepair, Export, SaveExport}` change **no** config field (`apply()`
+returns them without mutating `AppConfig`; a headless test asserts it, and that
+the two new rows keep the built `FocusGraph` trap-free). The section drives the
+same two entry points the CLI calls, so the button and `pitagames-cli repair`
+cannot drift:
 
-- `RepairRequest::for_this_machine(apply)` + `repair::run(&request) ->
-  Result<RepairReport>` — the repair, with its defaults filled from the XDG
-  paths.
-- `export::for_machine(selected, profiles_dir) -> SettingsExport` — the export,
-  probing the GPU, the Proton builds and (given a game) its stored profile.
+- **Run repair** — `RepairRequest::for_this_machine(true)` then
+  `repair::run(&request).await` on a worker (Dioxus `spawn`), reporting
+  `RepairReport::is_clean()`, the tampered-mod count (`tampered_mods()`), the
+  Steam restore count (`report.steam.count()`) and the database verdict into the
+  screen's status line. A `RepairError` becomes a red status; nothing panics.
+- **Export settings** — `export::for_machine(selected, None)`, where `selected`
+  is the library's current detail selection (else `None`); its `.text()` is
+  shown in a selectable box beside the shared `crate::copy::CopyButton`.
+- **Save export** — the same text written to
+  `<data_dir>/pitagames/support/pitagames-settings-<unix_secs>.txt`, whose path
+  lands in the status line; a write error is a red status. No network call, and
+  the crate's own credential filter is what keeps secrets out.
 
 The CLI calls both, so the screen and the command cannot drift.
 
@@ -108,6 +121,4 @@ The CLI calls both, so the screen and the command cannot drift.
   the repair detects and *offers* a re-apply; it is the mod installer (Tier B's
   pinned release, the NR installer) that supplies the files and calls
   `reapply`. The repair never fetches, so it stays offline.
-- The Settings screen (and its "repair" button) is grafted onto ticket #20's
-  screen after this branch and #20 merge; #35 ships only the library and the CLI.
 - Not run against a real modded game, a real Steam install or a real GPU.

@@ -18,6 +18,7 @@ pitagames-input.workspace = true
 pitagames-metadata.workspace = true
 pitagames-mods.workspace = true
 pitagames-platform.workspace = true
+pitagames-repair.workspace = true
 pitagames-secrets.workspace = true
 pitagames-stores.workspace = true
 
