@@ -16,6 +16,8 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+use crate::profile::WrapperChain;
+
 /// The default TV overscan margin for the console shell, in percent of the screen.
 pub const DEFAULT_SAFE_AREA_PCT: f32 = 2.5;
 /// How long the pointer may sit still before the shell hides it.
@@ -417,6 +419,14 @@ pub struct AppConfig {
     pub ui: UiConfig,
     /// The compatibility database preference (the sync toggle).
     pub compat: CompatConfig,
+    /// The **default wrappers** a newly created profile starts from.
+    ///
+    /// This is the exact [`WrapperChain`] a profile stores (`[wrapper]` in the
+    /// file), reused rather than re-modelled so the Settings screen, the profile
+    /// and the compiler cannot disagree. It is only a *starting point*: a game's
+    /// own Runtime panel overrides it, and the console session still drops the
+    /// per-game gamescope step under `PITAGAMES_SESSION=1`.
+    pub wrapper: WrapperChain,
 }
 
 impl AppConfig {
@@ -651,6 +661,37 @@ mod tests {
     }
 
     #[test]
+    fn the_default_wrappers_start_empty_and_survive_the_file() {
+        // A fresh install adds no process in front of a game.
+        let config = AppConfig::default();
+        assert!(config.wrapper.is_empty());
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = AppConfig {
+            wrapper: WrapperChain {
+                gamemode: true,
+                mangohud: true,
+                ..WrapperChain::default()
+            },
+            ..AppConfig::default()
+        };
+        config.save(&path).unwrap();
+        let (loaded, warnings) = AppConfig::load(&path);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(loaded.wrapper.gamemode);
+        assert!(loaded.wrapper.mangohud);
+        assert!(loaded.wrapper.gamescope.is_none());
+        assert!(loaded.wrapper.custom.is_empty());
+
+        // A file that names no `[wrapper]` keeps the empty default.
+        let partial = dir.path().join("partial.toml");
+        std::fs::write(&partial, "[ui]\nstart_mode = \"console\"\n").unwrap();
+        let (loaded, _) = AppConfig::load(&partial);
+        assert!(loaded.wrapper.is_empty());
+    }
+
+    #[test]
     fn a_missing_file_is_the_defaults_without_a_warning() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
@@ -736,6 +777,8 @@ mod tests {
         config.ui.display.reduce_animations = true;
         config.ui.safe_mode = true;
         config.compat.sync = true;
+        config.wrapper.gamemode = true;
+        config.wrapper.mangohud = true;
         config.save(&path).unwrap();
 
         let (loaded, warnings) = AppConfig::load(&path);

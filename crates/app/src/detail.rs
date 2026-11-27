@@ -11,7 +11,7 @@ use dioxus::prelude::*;
 use futures_channel::mpsc::UnboundedSender;
 
 use pitagames_core::i18n::t;
-use pitagames_core::ui::Shell;
+use pitagames_core::ui::{AppConfig, Shell};
 use pitagames_core::{AntiCheat, GameId, Profile, ProtonRef};
 use pitagames_db::{Db, HistoryRepository, StoredLaunch, StoredProfile};
 use pitagames_platform::proton::{DiscoveryReport, ProtonInstall};
@@ -1656,7 +1656,12 @@ async fn create_profile(
         error.set(t("detail.profiles_unavailable").to_string());
         return;
     };
-    match persist::save_profile(&db, &Profile::new(game_id.clone(), name)).await {
+    // A new profile starts from the Settings screen's default wrapper chain (the
+    // same `[wrapper]` in `config.toml`), never a hard-coded second default. A
+    // chain a hand-edited file made invalid is ignored rather than blocking the
+    // profile; its own Runtime panel is where it gets set anyway.
+    let profile = runtime::new_profile(game_id.clone(), name, &AppConfig::load_default().0.wrapper);
+    match persist::save_profile(&db, &profile).await {
         Ok(_) => {
             new_name.set(String::new());
             load_profiles(

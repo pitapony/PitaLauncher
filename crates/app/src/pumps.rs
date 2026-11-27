@@ -569,6 +569,14 @@ pub(crate) fn bootstrap(
             // Read-only and fast; the detail page needs it as soon as a game opens.
             proton_state.set(Some(runtime::discover_proton()));
 
+            // The Settings screen's compat-DB sync, when it is on: refresh the
+            // data-directory copy once per launch, so a package update is picked
+            // up without opening Settings. A failure is silent here; the screen
+            // is where a user asks and reads the report.
+            if pitagames_core::ui::AppConfig::load_default().0.compat.sync {
+                let _ = crate::settings::run_sync();
+            }
+
             match persist::open_default().await {
                 Ok(db) => {
                     let games = library.snapshot_games();

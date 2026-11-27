@@ -17,6 +17,7 @@
 use dioxus::prelude::*;
 use pitagames_core::i18n::t;
 use pitagames_core::paths;
+use pitagames_core::profile::GamescopeOptions;
 use pitagames_core::ui::{
     AppConfig, MAX_SAFE_AREA_PCT, MAX_UI_SCALE, MIN_UI_SCALE, Shell, StartMode,
 };
@@ -56,6 +57,12 @@ pub enum Control {
     ConsoleFullscreen,
     /// Toggle safe mode.
     SafeMode,
+    /// Toggle the default `gamemoderun` wrapper for new profiles.
+    WrapperGamemode,
+    /// Toggle the default `mangohud` wrapper for new profiles.
+    WrapperMangohud,
+    /// Toggle the default `gamescope` wrapper for new profiles.
+    WrapperGamescope,
     /// Toggle the compat-DB sync.
     CompatSync,
     /// Copy the shipped compat database into the data directory now.
@@ -107,6 +114,11 @@ fn rows() -> Vec<Vec<Control>> {
             Control::ConsoleFullscreen,
             Control::SafeMode,
         ],
+        vec![
+            Control::WrapperGamemode,
+            Control::WrapperMangohud,
+            Control::WrapperGamescope,
+        ],
         vec![Control::CompatSync, Control::CompatSyncNow],
         vec![Control::RestoreSteam],
         vec![Control::OpenControls],
@@ -154,6 +166,9 @@ pub fn toggle_on(control: Control, config: &AppConfig) -> Option<bool> {
         Control::ReduceAnimations => Some(config.ui.display.reduce_animations),
         Control::ConsoleFullscreen => Some(config.ui.display.console_fullscreen),
         Control::SafeMode => Some(config.ui.safe_mode),
+        Control::WrapperGamemode => Some(config.wrapper.gamemode),
+        Control::WrapperMangohud => Some(config.wrapper.mangohud),
+        Control::WrapperGamescope => Some(config.wrapper.gamescope.is_some()),
         Control::CompatSync => Some(config.compat.sync),
         _ => None,
     }
@@ -196,6 +211,24 @@ pub fn apply(control: Control, config: &mut AppConfig) -> Intent {
         }
         Control::SafeMode => {
             config.ui.safe_mode = !config.ui.safe_mode;
+            Intent::Save
+        }
+        Control::WrapperGamemode => {
+            config.wrapper.gamemode = !config.wrapper.gamemode;
+            Intent::Save
+        }
+        Control::WrapperMangohud => {
+            config.wrapper.mangohud = !config.wrapper.mangohud;
+            Intent::Save
+        }
+        Control::WrapperGamescope => {
+            config.wrapper.gamescope = if config.wrapper.gamescope.is_some() {
+                None
+            } else {
+                // The editor's own default: an empty chain that turns gamescope
+                // on starts fullscreen.
+                Some(GamescopeOptions::default())
+            };
             Intent::Save
         }
         Control::CompatSync => {
@@ -434,6 +467,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     }
                     button {
                         onclick: move |_| activate(Control::UiScale(-1), config, on_shell, library, session, status, status_error),
+                        "aria-label": t("settings.ui_scale_down"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::UiScale(-1))))}",
                         "−"
                     }
@@ -443,6 +477,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     }
                     button {
                         onclick: move |_| activate(Control::UiScale(1), config, on_shell, library, session, status, status_error),
+                        "aria-label": t("settings.ui_scale_up"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::UiScale(1))))}",
                         "+"
                     }
@@ -455,6 +490,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     }
                     button {
                         onclick: move |_| activate(Control::SafeArea(-1), config, on_shell, library, session, status, status_error),
+                        "aria-label": t("settings.safe_area_down"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::SafeArea(-1))))}",
                         "−"
                     }
@@ -464,6 +500,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     }
                     button {
                         onclick: move |_| activate(Control::SafeArea(1), config, on_shell, library, session, status, status_error),
+                        "aria-label": t("settings.safe_area_up"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::SafeArea(1))))}",
                         "+"
                     }
@@ -476,6 +513,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     }
                     button {
                         onclick: move |_| activate(Control::Cursor(-1), config, on_shell, library, session, status, status_error),
+                        "aria-label": t("settings.cursor_down"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::Cursor(-1))))}",
                         "−"
                     }
@@ -485,6 +523,7 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                     }
                     button {
                         onclick: move |_| activate(Control::Cursor(1), config, on_shell, library, session, status, status_error),
+                        "aria-label": t("settings.cursor_up"),
                         style: "{step_style()}{focus::ring_style(focused == Some(index_of(Control::Cursor(1))))}",
                         "+"
                     }
@@ -519,6 +558,37 @@ pub fn SettingsView(props: SettingsProps) -> Element {
                 span {
                     style: "{hint_style()}",
                     {t("settings.safe_mode_hint")}
+                }
+            }
+
+            // -- Wrapper defaults -----------------------------------------
+            div {
+                style: "display:flex;flex-direction:column;gap:8px;",
+                SectionLabel { label: t("settings.wrappers") }
+                div {
+                    style: "display:flex;flex-wrap:wrap;gap:8px;",
+                    button {
+                        onclick: move |_| activate(Control::WrapperGamemode, config, on_shell, library, session, status, status_error),
+                        style: "{toggle_style(is_on(Control::WrapperGamemode, &current))}{focus::ring_style(focused == Some(index_of(Control::WrapperGamemode)))}",
+                        span { style: "font-weight:600;", {t("settings.wrapper_gamemode")} }
+                        span { style: "opacity:0.8;", {on_off(is_on(Control::WrapperGamemode, &current))} }
+                    }
+                    button {
+                        onclick: move |_| activate(Control::WrapperMangohud, config, on_shell, library, session, status, status_error),
+                        style: "{toggle_style(is_on(Control::WrapperMangohud, &current))}{focus::ring_style(focused == Some(index_of(Control::WrapperMangohud)))}",
+                        span { style: "font-weight:600;", {t("settings.wrapper_mangohud")} }
+                        span { style: "opacity:0.8;", {on_off(is_on(Control::WrapperMangohud, &current))} }
+                    }
+                    button {
+                        onclick: move |_| activate(Control::WrapperGamescope, config, on_shell, library, session, status, status_error),
+                        style: "{toggle_style(is_on(Control::WrapperGamescope, &current))}{focus::ring_style(focused == Some(index_of(Control::WrapperGamescope)))}",
+                        span { style: "font-weight:600;", {t("settings.wrapper_gamescope")} }
+                        span { style: "opacity:0.8;", {on_off(is_on(Control::WrapperGamescope, &current))} }
+                    }
+                }
+                span {
+                    style: "{hint_style()}",
+                    {t("settings.wrappers_hint")}
                 }
             }
 
@@ -707,22 +777,34 @@ fn save(config: &AppConfig, mut status: Signal<String>, mut status_error: Signal
 }
 
 /// Copy the shipped compat database into the data directory (the sync).
-fn sync_compat(mut status: Signal<String>, mut status_error: Signal<bool>) {
-    let Some(target) = paths::data_dir().map(|dir| dir.join("compat")) else {
-        status.set(t("settings.no_data_dir").to_string());
-        status_error.set(true);
-        return;
-    };
-    // The source is the packaged database, never the copy being written: a
-    // stale copy would otherwise win the loader's later-source merge.
+///
+/// The one sync both the Settings screen and the startup read through, so the
+/// toggle cannot mean two different things. The source is the packaged
+/// database, never the copy being written: a stale copy would otherwise win the
+/// loader's later-source merge.
+pub fn run_sync() -> Result<pitagames_platform::compat::SyncReport, String> {
+    let target = paths::data_dir()
+        .map(|dir| dir.join("compat"))
+        .ok_or_else(|| t("settings.no_data_dir").to_string())?;
     let sources = pitagames_platform::compat::sync_sources(&target);
-    let report = pitagames_platform::compat::sync_shipped(&sources, &target);
-    if report.is_ok() {
-        status.set(t("settings.synced").replace("{count}", &report.synced().to_string()));
-        status_error.set(false);
-    } else {
-        status.set(report.summary());
-        status_error.set(true);
+    Ok(pitagames_platform::compat::sync_shipped(&sources, &target))
+}
+
+/// Run the sync and turn its report into the screen's status line.
+fn sync_compat(mut status: Signal<String>, mut status_error: Signal<bool>) {
+    match run_sync() {
+        Ok(report) if report.is_ok() => {
+            status.set(t("settings.synced").replace("{count}", &report.synced().to_string()));
+            status_error.set(false);
+        }
+        Ok(report) => {
+            status.set(report.summary());
+            status_error.set(true);
+        }
+        Err(message) => {
+            status.set(message);
+            status_error.set(true);
+        }
     }
 }
 
@@ -992,6 +1074,9 @@ mod tests {
             Control::ReduceAnimations,
             Control::ConsoleFullscreen,
             Control::SafeMode,
+            Control::WrapperGamemode,
+            Control::WrapperMangohud,
+            Control::WrapperGamescope,
             Control::CompatSync,
         ] {
             let before = toggle_on(control, &config).expect("a toggle has a state");
@@ -1058,6 +1143,36 @@ mod tests {
             }
             assert_eq!(reached.len(), count, "cell {start} cannot reach every cell");
         }
+    }
+
+    #[test]
+    fn the_wrapper_toggles_write_the_default_chain_the_profiles_start_from() {
+        let mut config = AppConfig::default();
+        assert!(config.wrapper.is_empty());
+
+        // GameMode and MangoHud are plain booleans on the chain.
+        apply(Control::WrapperGamemode, &mut config);
+        apply(Control::WrapperMangohud, &mut config);
+        assert!(config.wrapper.gamemode);
+        assert!(config.wrapper.mangohud);
+
+        // Gamescope turns on with the editor's own fullscreen default...
+        apply(Control::WrapperGamescope, &mut config);
+        let gamescope = config.wrapper.gamescope.clone().expect("gamescope is on");
+        assert!(gamescope.fullscreen);
+        assert_eq!(gamescope.width, None);
+
+        // ...and turns back off to `None`.
+        apply(Control::WrapperGamescope, &mut config);
+        assert!(config.wrapper.gamescope.is_none());
+
+        // The chain survives the file the profile creation reads.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        config.save(&path).unwrap();
+        let (loaded, _) = AppConfig::load(&path);
+        assert!(loaded.wrapper.gamemode);
+        assert!(loaded.wrapper.mangohud);
     }
 
     #[test]
