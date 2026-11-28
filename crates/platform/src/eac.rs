@@ -27,7 +27,7 @@
 //! fixture command lines and boot reads with no EAC machine, and the crate
 //! builds on macOS where `/proc` and `/sys` do not exist.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -682,17 +682,6 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-/// The default program a caller should resolve on `PATH` before running
-/// [`reboot_argv`]: `pkexec` first, then `eac-setup` as the fallback.
-#[must_use]
-pub fn reboot_program() -> PathBuf {
-    if on_path(PKEXEC) {
-        PathBuf::from(PKEXEC)
-    } else {
-        PathBuf::from(EAC_SETUP)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -938,6 +927,23 @@ mod tests {
     }
 
     #[test]
+    fn an_eac_v2_game_is_still_protected_so_injection_stays_gated() {
+        // The EAC entry makes the game *runnable*; it never makes injection
+        // safe. An EAC v2 game is as protected as any other, so the anti-cheat
+        // gate still refuses injection without an explicit acknowledgement —
+        // even on the EAC entry (ADR-0025/ADR-0031).
+        let ready = probe(&eac_probe());
+        assert_eq!(verdict(AntiCheat::Eac, true, &ready), EacVerdict::Ready);
+        assert!(AntiCheat::Eac.is_protected());
+        assert_eq!(
+            crate::anticheat::gate(AntiCheat::Eac, true, false),
+            crate::anticheat::GateDecision::ConfirmationRequired {
+                anticheat: AntiCheat::Eac
+            }
+        );
+    }
+
+    #[test]
     fn a_game_with_no_curated_v2_and_no_eac_is_not_protected() {
         let ready = probe(&eac_probe());
         assert_eq!(
@@ -1034,7 +1040,7 @@ mod tests {
         // The UI labels and the docs table share these strings; a test reads
         // `docs/eac-v2.md` and asserts each appears verbatim, so the two cannot
         // drift (the pattern `platform::capability` uses).
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
             .join("docs/eac-v2.md");
